@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -54,8 +55,8 @@ func run(log *slog.Logger) error {
 	}
 	publicURL := config.Get("ENGRAM_PUBLIC_URL", "")
 	poll, err := time.ParseDuration(config.Get("ENGRAM_POLL_INTERVAL", "5m"))
-	if err != nil {
-		return fmt.Errorf("ENGRAM_POLL_INTERVAL: %w", err)
+	if err != nil || poll <= 0 {
+		return fmt.Errorf("ENGRAM_POLL_INTERVAL must be a positive duration, like 5m")
 	}
 
 	emb, err := config.Embedder()
@@ -94,7 +95,14 @@ func run(log *slog.Logger) error {
 	if !register {
 		log.Warn("ENGRAM_PUBLIC_URL unset: not registering for notifications, relying on polling", "interval", poll)
 	}
-	go srv.Run(ctx, poll, register)
+	var bg sync.WaitGroup
+	bg.Add(1)
+	go func() {
+		defer bg.Done()
+		srv.Run(ctx, poll, register)
+	}()
+	// Let in-flight syncs finish before the store closes.
+	defer bg.Wait()
 
 	addr := config.Get("ENGRAM_LISTEN", ":8080")
 	hs := &http.Server{Addr: addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
@@ -105,9 +113,13 @@ func run(log *slog.Logger) error {
 		_ = hs.Shutdown(shutdown)
 	}()
 	log.Info("engram-appview listening", "addr", addr, "service", srv.ServiceID(), "account", client.DID(), "spaces", spaces, "model", emb.Model())
-	if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	err = hs.ListenAndServe()
+	// Stop the background loop (if the server failed on its own) and wait
+	// for notification syncs; the deferred bg.Wait runs before st.Close.
+	stop()
+	srv.Jobs.Wait()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
-	srv.Jobs.Wait()
 	return nil
 }
