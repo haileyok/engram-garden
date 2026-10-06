@@ -73,6 +73,18 @@ indexed, node membership) are small and covered under
   drops without them. Prefixes become configuration
   (`ENGRAM_EMBED_DOC_PREFIX`, `ENGRAM_EMBED_QUERY_PREFIX`) so other models
   can leave them empty.
+- **Embedding needs a GPU at volume.** A careful published benchmark
+  ([Big Iron, 2026](https://www.bigiron.cc/guides/embedding-throughput-across-cpu-igpu-and-dgpu-in-a-homelab))
+  measured nomic-embed-text through Ollama on 512-token chunks at ~1.75
+  documents/s on a laptop CPU (i7-12700H) vs ~59/s on a laptop RTX 3060.
+  Batching barely changed Ollama's throughput, and PyTorch fp16 was ~2×
+  faster on the same GPU. Memories (~125 tokens) and queries (~20 tokens)
+  are much shorter than those chunks, so they'll embed faster, but embedding
+  is still the most expensive step in both indexing and search. Plan for:
+  - embedding on GPU nodes, separate from the index nodes, behind the same
+    OpenAI-compatible API;
+  - a per-node cache of query embeddings, keyed by model and query text;
+  - measuring Ollama against faster runtimes on the benchmark machine.
 - **One active model per space.** Vectors from different models can't be
   compared, so every search uses exactly one model. To change models, the
   manifest gains a second, *building* index (its own model, dimensions and
@@ -117,8 +129,15 @@ signature 107 µs.
 So the search scans 1-bit vectors and re-ranks the top ~200 with the 1-byte
 vectors. For typical spaces, the scan costs less than verifying the request's
 signatures. These figures come from a small development box. Proper numbers
-will come from a dedicated benchmark machine, including SIMD for the 1-byte
-re-rank.
+will come from a dedicated benchmark machine.
+
+The 1-bit scan is already fast because `math/bits.OnesCount64` compiles to
+the CPU's popcount instruction. The 1-byte re-rank can use SIMD through Go
+1.26's experimental `simd/archsimd` package (amd64, built with
+`GOEXPERIMENT=simd`). Its API isn't stable (Go 1.27 changed it and added an
+experimental portable `simd` package), so the SIMD version lives behind a
+build tag, with the plain-Go version as the fallback and the reference in
+tests.
 
 ## Object layout
 
@@ -268,10 +287,21 @@ Wasabi's pay-as-you-go terms shape the design:
 | **1 TB minimum monthly charge** ($7.99 at the time of writing). | Negligible. |
 | No per-request fees. | Many small range reads are fine. |
 
-Unverified: whether Wasabi honors S3 conditional writes (`If-None-Match` on
-PutObject). Wasabi's documentation pages don't clearly say. The design
-doesn't depend on it (see [Fencing](#fencing)). If it is supported, it adds
-a cheap safety check.
+**Conditional writes are unconfirmed on Wasabi.** Wasabi's object-operations
+documentation doesn't mention `If-None-Match` or `If-Match` on PutObject, and
+doesn't list conditional writes among its unsupported operations. An
+independent survey of S3-compatible providers' conditional writes
+([zeropg storage backends notes](https://github.com/reisepass/zeropg/blob/main/docs/STORAGE-BACKENDS.md))
+lists Wasabi as unconfirmed. It also warns that some providers silently
+ignore the header, returning 200 and overwriting. Oracle's S3 layer is
+documented to do this.
+
+So the design doesn't depend on conditional writes (see
+[Fencing](#fencing)), and doesn't trust them without proof. At startup, the
+store probes the bucket: it writes a probe key, writes it again with
+`If-None-Match: *`, and uses conditional writes only if the second write is
+rejected with 412 or 409. A CI conformance test runs the same probe against
+each supported backend.
 
 Storage cost at scale: a billion memories at ~2.5 KB each is ~2.5 TB, about
 $20/month.
@@ -380,9 +410,9 @@ uploading, so the design makes its uploads irrelevant instead:
   stops writing if it has lost the lease.
 - During a handover, a request may briefly reach the old owner and see
   slightly stale results. That's acceptable for search.
-- If Wasabi supports conditional writes, `If-None-Match: *` on each manifest
-  key also stops two writers that hold the same token from racing for the
-  same generation.
+- If the startup probe shows the bucket honors conditional writes,
+  `If-None-Match: *` on each manifest key also stops two writers that hold
+  the same token from racing for the same generation.
 
 ## Export and import
 
@@ -436,10 +466,12 @@ Afterwards: the web UI and live notifications.
 
 ## Open questions
 
-- Does Wasabi honor `If-None-Match` on PutObject? To test against a real
-  bucket.
-- Benchmark-machine numbers: scan throughput with SIMD, cold-load latency
-  from Wasabi, and Ollama embedding throughput (CPU vs GPU).
+- Does Wasabi honor `If-None-Match` on PutObject? Its documentation doesn't
+  say, so this is answered by the startup probe against a real bucket.
+- Benchmark-machine numbers: re-rank throughput with `simd/archsimd`,
+  cold-load latency from Wasabi, and embedding throughput for
+  memory-length and query-length text (Ollama on CPU and GPU, and a faster
+  runtime).
 - Text search alongside vector search, for exact names and identifiers.
   Probably a small per-segment inverted index, designed after the first
   version.
