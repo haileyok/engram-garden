@@ -110,6 +110,16 @@ func (n *Net) NewAccount(did string) *Account {
 	return a
 }
 
+// AccountByDID returns a registered account.
+func (n *Net) AccountByDID(did string) *Account {
+	n.T.Helper()
+	a := n.account(did)
+	if a == nil {
+		n.T.Fatalf("no account %s", did)
+	}
+	return a
+}
+
 // RotateKey gives an account a new signing key and republishes its DID doc.
 func (n *Net) RotateKey(a *Account) {
 	n.T.Helper()
@@ -401,6 +411,44 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 			repos = append(repos, map[string]string{"did": a.DID, "repoRev": a.rev, "hash": "x", "spaceRev": a.spaceRev})
 		}
 		return map[string]any{"repos": repos}, nil
+
+	case "com.atproto.space.createRecord", "com.atproto.space.deleteRecord":
+		a := n.account(r.Header.Get("X-Test-Did"))
+		if a == nil {
+			return nil, &xerr{401, "AuthRequired", "no session"}
+		}
+		var body struct {
+			Space      string         `json:"space"`
+			Repo       string         `json:"repo"`
+			Collection string         `json:"collection"`
+			Rkey       string         `json:"rkey"`
+			Record     map[string]any `json:"record"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			return nil, &xerr{400, "InvalidRequest", err.Error()}
+		}
+		if body.Space != n.Space || body.Repo != a.DID {
+			return nil, &xerr{400, "InvalidRequest", "can only write your own repo in the test space"}
+		}
+		if nsid == "com.atproto.space.deleteRecord" {
+			n.mu.Lock()
+			_, ok := a.records[space.FormatRecordPath(body.Collection, body.Rkey)]
+			n.mu.Unlock()
+			if ok {
+				n.Delete(a, body.Collection, body.Rkey)
+			}
+			return map[string]any{}, nil
+		}
+		if body.Rkey == "" {
+			n.mu.Lock()
+			body.Rkey = n.clock.Next().String()
+			n.mu.Unlock()
+		}
+		uri, _ := n.Put(a, body.Collection, body.Rkey, body.Record)
+		n.mu.Lock()
+		c := a.records[space.FormatRecordPath(body.Collection, body.Rkey)].Cid.String()
+		n.mu.Unlock()
+		return map[string]any{"uri": uri, "cid": c, "validationStatus": "unknown"}, nil
 
 	case "com.atproto.space.registerNotify":
 		if e := n.checkCredential(r, n.Authority.DID); e != nil {
