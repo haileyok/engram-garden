@@ -6,8 +6,8 @@ Status: proposed. This replaces the Postgres and pgvector store in
 ## Goals
 
 1. **Each space uses its own resources.** A space's data, cost and limits are
-   its own, so one busy space can't slow down another and costs can be
-   attributed per space.
+   its own, so costs can be attributed per space and limits bound how much
+   one busy space can affect others.
 2. **Scale to a very large number of spaces and agents**, horizontally
    (more nodes) and vertically (bigger nodes).
 3. **Keep hosting cheap.** Cost should track how many spaces are *in use*,
@@ -218,6 +218,15 @@ candidates and the docs of the results: about 4% of the space. A synthetic
    becomes a new segment. The node uploads the segment, then a new manifest
    that lists it and carries the updated deletions and repo sync positions,
    then truncates the WAL.
+   - Flushes for a space run one at a time. Each new manifest is derived
+     from the owner's in-memory copy of the previous one, so no flush can
+     drop another's segments or deletions.
+   - **The manifest is the commit point.** Repo sync positions only advance
+     in the same manifest that publishes the segments and deletions for
+     those changes. A crash between uploading a segment and its manifest
+     leaves an unreferenced segment, which garbage collection removes, and
+     the old positions, so the changes are synced again.
+   - The WAL is truncated only after the manifest upload succeeds.
 4. **Merge:** see below.
 
 Nothing is acknowledged to anyone on the strength of the WAL. Notifications
@@ -243,7 +252,8 @@ Small segments accumulate. A merge rewrites several segments into one,
 dropping deleted memories, then deletes the inputs.
 
 - Merge when a space has more than 8 segments, or when deleted memories
-  exceed 25% of its segments.
+  exceed 25% of its segments. Keeping the segment count small also bounds
+  how many range reads a cold search needs.
 - Run merges at most once a day per space, and prefer segments older than
   90 days as inputs (see below).
 
@@ -301,9 +311,10 @@ For a 1 GB space (~400k memories), that's about 38 MB of 1-bit vectors, plus
 200 candidates × 772 bytes ≈ 154 KB of 1-byte vectors, plus the docs blocks
 of the results. The candidates are scattered across segments, so their reads
 are grouped by segment, adjacent ranges are merged, and the groups are
-fetched in parallel. That's at most a few dozen requests, and Wasabi doesn't
-charge per request. The estimate is **0.5–1.5 s** for the first query, to be
-measured on the benchmark machine.
+fetched in parallel. Merging keeps a space to about 8 segments, so that's at
+most a few dozen requests, and Wasabi doesn't charge per request. The
+estimate is **0.5–1.5 s** for the first query, to be measured on the
+benchmark machine.
 
 - **Warm early.** Loading starts on the first sign a space is about to be
   used: an agent's MCP session starts (new endpoint
@@ -337,8 +348,12 @@ measured on the benchmark machine.
   are forwarded the same way, so sync and search for a space always run on
   the same node.
 - **Global state:** the list of indexed spaces and their notification
-  registrations is small. It lives in a single object
-  (`registry-<generation>.json`) maintained by one coordinator node.
+  registrations is small, and also rebuildable. Indexed spaces come from
+  configuration, and registrations are renewed daily by each space's owner
+  regardless. The list lives in a single object
+  (`registry-<token>-<generation>.json`, ordered like manifests) maintained
+  by one coordinator node. If it's lost, owners re-register their spaces on
+  the next renewal.
 
 ### Fencing
 
@@ -385,8 +400,17 @@ uploading, so the design makes its uploads irrelevant instead:
 ## Per-space limits
 
 Limits per space (memories, bytes, searches per second, embedding volume per
-day) are enforced by the owning node from the manifest's counts. Exceeding
-one returns a clear error rather than slowing down other spaces.
+day) are enforced by the space's owner, after forwarding, so there's exactly
+one place counting each space:
+
+- Counts are live: the manifest's totals plus the write buffer plus
+  embeddings in flight. A new owner starts from the manifest's totals.
+  Rate counters reset on handover, which is acceptable.
+- Exceeding a limit returns a clear error.
+- Per-space concurrency caps and a fair queue for embedding work stop one
+  space from monopolizing a node's CPU, embedding capacity or Wasabi
+  bandwidth. Spaces on the same node still share hardware, so a busy space
+  can add some latency for others, but limits bound how much.
 
 ## Build order
 
