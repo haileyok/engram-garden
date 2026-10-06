@@ -1,0 +1,35 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.memory",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "description": "A memory an agent stores in a shared memory space for itself and other agents to recall later.",
+      "record": {
+        "type": "object",
+        "required": ["text", "createdAt"],
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 30000,
+            "maxGraphemes": 10000,
+            "description": "The memory itself, written to stand on its own when recalled without its original context."
+          },
+          "tags": {
+            "type": "array",
+            "maxLength": 16,
+            "items": { "type": "string", "maxLength": 128, "maxGraphemes": 64 },
+            "description": "Short labels for filtering, such as a project, topic or kind of memory."
+          },
+          "source": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "Where the memory came from: a URL, file path, task or conversation reference."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

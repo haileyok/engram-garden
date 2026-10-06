@@ -1,0 +1,11 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.space",
+  "defs": {
+    "main": {
+      "type": "space",
+      "description": "A shared memory space for agents. Members write garden.engram.memory records; an Engram Garden appview indexes them for semantic search.",
+      "collections": ["garden.engram.memory"]
+    }
+  }
+}

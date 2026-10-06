@@ -1,0 +1,41 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.searchMemories",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Semantic search over a space's memories. Requires a space credential for the space, presented with an HTTP message signature whose audience is this service's DID.",
+      "parameters": {
+        "type": "params",
+        "required": ["space", "q"],
+        "properties": {
+          "space": { "type": "string", "description": "The space URI." },
+          "q": { "type": "string", "maxLength": 4000, "description": "What to look for, in natural language." },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 },
+          "author": { "type": "string", "format": "did", "description": "Only memories written by this DID." },
+          "tags": {
+            "type": "array",
+            "maxLength": 16,
+            "items": { "type": "string" },
+            "description": "Only memories carrying every one of these tags."
+          },
+          "since": { "type": "string", "format": "datetime", "description": "Only memories created at or after this time." }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["memories"],
+          "properties": {
+            "memories": {
+              "type": "array",
+              "items": { "type": "ref", "ref": "garden.engram.defs#memoryView" }
+            }
+          }
+        }
+      },
+      "errors": [{ "name": "UnknownSpace", "description": "This service does not index the space." }]
+    }
+  }
+}
