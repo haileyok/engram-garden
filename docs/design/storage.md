@@ -15,9 +15,10 @@ Status: proposed. This replaces the Postgres and pgvector store in
 4. **Make export easy.** A space's index can be exported and imported by
    another appview without re-embedding.
 
-Non-goals for now: searching across spaces, hosting embedding models (the
-appview calls an embeddings endpoint), and agent-supplied vectors (see
-[Embeddings](#embeddings)).
+Non-goals for now: searching across spaces, embedding on the appview (agents
+embed their own memories and queries; see [Embeddings](#embeddings)), and
+verifying that a memory's vector matches its text (see
+[Vector integrity](#vector-integrity-deferred)).
 
 ## Why not a shared vector index
 
@@ -51,7 +52,7 @@ both its searches and its sync.
             │   1-bit vectors,                                       │
             │   write buffers                                        │
             │ SSD: recently used                                     │
-            │   segments, WAL                                        │
+            │   segments                                             │
             └────────┬───────────────────────────────────────────────┘
                      │ range reads, new segments, manifests
                      ▼
@@ -64,40 +65,132 @@ indexed, node membership) are small and covered under
 
 ## Embeddings
 
-- The appview embeds memories and queries itself, through the
-  OpenAI-compatible `/embeddings` API. That covers Ollama
-  (`http://localhost:11434/v1`), which is the primary target.
-- **768 dimensions.** `nomic-embed-text` produces 768 natively.
-- **Task prefixes.** nomic-embed-text expects `search_document: ` before
-  stored text and `search_query: ` before queries, and retrieval quality
-  drops without them. Prefixes become configuration
-  (`ENGRAM_EMBED_DOC_PREFIX`, `ENGRAM_EMBED_QUERY_PREFIX`) so other models
-  can leave them empty.
-- **Embedding needs a GPU at volume.** A careful published benchmark
+**Agents embed their own memories and queries.** The appview never runs a
+model. It syncs memory records (verified against their authors' signed
+commits, as today), then quantizes, stores and searches the vectors they
+carry.
+
+Why:
+
+- Embedding is the most expensive step in the system. A careful published
+  benchmark
   ([Big Iron, 2026](https://www.bigiron.cc/guides/embedding-throughput-across-cpu-igpu-and-dgpu-in-a-homelab))
   measured nomic-embed-text through Ollama on 512-token chunks at ~1.75
   documents/s on a laptop CPU (i7-12700H) vs ~59/s on a laptop RTX 3060.
-  Batching barely changed Ollama's throughput, and PyTorch fp16 was ~2×
-  faster on the same GPU. Memories (~125 tokens) and queries (~20 tokens)
-  are much shorter than those chunks, so they'll embed faster, but embedding
-  is still the most expensive step in both indexing and search. Plan for:
-  - embedding on GPU nodes, separate from the index nodes, behind the same
-    OpenAI-compatible API;
-  - a per-node cache of query embeddings, keyed by model and query text;
-  - measuring Ollama against faster runtimes on the benchmark machine.
-- **One active model per space.** Vectors from different models can't be
-  compared, so every search uses exactly one model. To change models, the
-  manifest gains a second, *building* index (its own model, dimensions and
-  segments). The owner re-embeds every live memory into it in the
-  background, and new writes go to both indexes. Searches keep using the
-  *active* index until the building index covers every memory. Then one
-  manifest update makes it active and lists the old segments for deletion.
-  Rolling back means dropping the building index.
-- **Agent-supplied vectors (later).** `garden.engram.memory` will gain an
-  optional field carrying a vector and the model that produced it. When it
-  matches the space's model, the appview can store it instead of embedding.
-  This isn't part of this work. The record format stays unchanged until
-  then.
+  Embedding for every space would mean running GPU machines.
+- Spread across agents, the same work is trivial. One agent writes a few
+  memories an hour and embeds one short query per recall. Memories
+  (~125 tokens) and queries (~20 tokens) are far shorter than those chunks,
+  so even a laptop CPU keeps up. This is goal 1, each space using its own
+  resources, applied to compute.
+- The vector lives in the memory record, in the author's own repo and under
+  their signed commit. Any appview can index a space from the records alone,
+  without re-embedding, which also makes export nearly free.
+
+### The space's model
+
+Every vector in a space must come from the same model, used the same way,
+or the vectors can't be compared. The space authority declares it in a
+`garden.engram.config` record (record key `self`) in its own repo in the
+space:
+
+```json
+{
+  "$type": "garden.engram.config",
+  "model": "nomic-embed-text",
+  "modelDigest": "sha256:…",
+  "dims": 768,
+  "documentPrefix": "search_document: ",
+  "queryPrefix": "search_query: ",
+  "createdAt": "…"
+}
+```
+
+- `modelDigest` pins the exact model build. A model tag such as Ollama's
+  `nomic-embed-text` can point to different weights over time.
+- nomic-embed-text expects `search_document: ` before stored text and
+  `search_query: ` before queries, and retrieval quality drops without them.
+  The prefixes are part of the declaration so every agent embeds the same
+  way. Other models can leave them empty.
+- `engram-mcp` reads the config, embeds through any OpenAI-compatible
+  `/embeddings` endpoint (Ollama at `http://localhost:11434/v1` by default),
+  and refuses to write if its model doesn't match the declared one.
+- The appview copies the declared model into the space's manifest.
+
+### Memory records carry their vector
+
+`garden.engram.memory` gains a required `embedding` field:
+
+```json
+"embedding": {
+  "model": "nomic-embed-text",
+  "modelDigest": "sha256:…",
+  "dims": 768,
+  "encoding": "f16le",
+  "vector": {"$bytes": "<1536 bytes, base64>"}
+}
+```
+
+- `f16le` is little-endian IEEE half precision: 2 bytes per dimension,
+  1.5 KB at 768 dimensions. That's close enough to full precision for
+  search, and a third of the size of the same vector as JSON numbers.
+- The appview indexes a memory only if its `model`, `modelDigest` and
+  `dims` match the space's declared model. Memories that don't match are
+  skipped, counted per author, and reported, so a misconfigured agent is
+  easy to spot.
+- To keep the transition to a new model simple, `embedding` may later
+  become an array, one entry per model (see
+  [Changing models](#changing-models)).
+
+### Searching with a vector
+
+`garden.engram.searchMemories` takes the query's vector instead of its
+text: a `vector` parameter, base64url-encoded `f16le`, plus `model` and
+`modelDigest`, which must match the space's model. The text query `q`
+becomes optional. It isn't used for ranking yet, but it's kept for keyword
+search later (see [Open questions](#open-questions)).
+
+### Changing models
+
+Vectors from different models can't be compared, so every search uses
+exactly one model, the *active* one.
+
+1. The authority updates `garden.engram.config` with the new model under a
+   `next` key, alongside the current one.
+2. Agents re-embed their memories and rewrite them with an embedding for
+   each model. `engram-mcp` does this in the background for its own
+   memories.
+3. The appview builds a second, *building* index from the new-model
+   vectors, while searches keep using the active index.
+4. When the building index covers enough of the space, the authority
+   promotes `next` to the current model. The appview makes the building
+   index active in one manifest update.
+
+The catch: agents that never come back never re-embed, so their memories
+drop out of search under the new model. That's the main cost of embedding
+on the client. The optional server-side embedding below can fill the gap.
+
+### Server-side embedding (later, optional)
+
+An appview operator may later enable embedding on the appview: for memories
+without a usable vector, for agents that can't run a model, and for
+re-embedding during a model change. It isn't part of this design's first
+version. The storage format doesn't change if it's added: an
+appview-embedded vector is indexed exactly like a supplied one.
+
+### Vector integrity (deferred)
+
+A member could write a vector that doesn't match its text, either garbage
+or a vector tuned to appear in every search. In a members-only space that's
+a member misbehaving, and it's attributable: the vector is in the author's
+signed repo, so anyone can recompute the embedding and prove the mismatch.
+For now, the space authority handles it by removing the member.
+
+A possible defense, if needed later: the first time a memory appears in
+search results, the appview embeds its text and compares (memories are
+immutable per CID, so each is checked once); it checks authors with a clean
+record less often; and it caps results per author. That requires
+server-side embedding, so it waits for that.
 
 ## Quantization
 
@@ -108,9 +201,9 @@ Each memory's 768-dimension float vector is stored twice, more compactly:
 | **1-bit**: the sign of each dimension | 96 bytes | Scanning every memory in a search |
 | **1-byte**: each dimension scaled to int8, plus a float32 scale per vector | 772 bytes | Re-ranking the top candidates |
 
-Vectors are normalized before quantizing. The full float vector isn't kept:
-the 1-byte form is close enough for re-ranking, and re-embedding from text
-recovers the original.
+Vectors are normalized before quantizing. The supplied half-precision vector
+isn't kept in the index: the 1-byte form is close enough for re-ranking, and
+the original is always available in the memory record on the author's PDS.
 
 ### Measured scan speed
 
@@ -230,13 +323,12 @@ candidates and the docs of the results: about 4% of the space. A synthetic
 1. **Sync** (unchanged): a write notification or poll makes the indexer pull
    and verify the member's changes.
 2. **Buffer:** verified creates, updates and deletes go into the space's
-   in-memory write buffer, and are appended to a write-ahead log (WAL) on
-   local SSD before being acknowledged. Newly embedded memories are
-   searchable immediately from the buffer.
+   in-memory write buffer. New memories are searchable immediately from the
+   buffer.
 3. **Flush:** when the buffer reaches 1,000 memories or an hour old, it
    becomes a new segment. The node uploads the segment, then a new manifest
    that lists it and carries the updated deletions and repo sync positions,
-   then truncates the WAL.
+   then clears the flushed changes from the buffer.
    - Flushes for a space run one at a time. Each new manifest is derived
      from the owner's in-memory copy of the previous one, so no flush can
      drop another's segments or deletions.
@@ -245,25 +337,22 @@ candidates and the docs of the results: about 4% of the space. A synthetic
      those changes. A crash between uploading a segment and its manifest
      leaves an unreferenced segment, which garbage collection removes, and
      the old positions, so the changes are synced again.
-   - The WAL is truncated only after the manifest upload succeeds.
 4. **Merge:** see below.
 
-Nothing is acknowledged to anyone on the strength of the WAL. Notifications
-are accepted before syncing, as today. Durability rests on the members'
-PDSes:
+There's no write-ahead log. The buffer only holds changes that are already
+durable on the members' PDSes, and since vectors come in the records,
+pulling a change again costs a request, not an embedding. Notifications are
+accepted before syncing, as today.
 
-- If a node crashes, its replacement loads the current manifest and the
-  indexer re-syncs each repo from the sync position recorded there, using
-  `listRepoOps`. Changes that were only in the lost buffer are pulled and
-  embedded again. Embedding doesn't have to reproduce identical vectors,
-  only equivalent ones.
+- If a node crashes or restarts, its replacement loads the current manifest
+  and the indexer re-syncs each repo from the sync position recorded there,
+  using `listRepoOps`. Changes that were only in the lost buffer, at most
+  about an hour's worth, are pulled again.
 - If a PDS can't serve the oplog from that position, or the result doesn't
   verify against the signed commit, the indexer falls back to a full
   verified `getRepo` export of that repo, as it does today.
 - Until a repo catches up, its newest memories are missing from search.
   They aren't lost.
-
-The WAL only saves re-embedding after a restart on the same node.
 
 ### Merging segments
 
@@ -320,7 +409,7 @@ $20/month.
 | Tier | Holds | Evicted |
 |---|---|---|
 | RAM | Manifests, every segment's metadata and 1-bit sections, write buffers | Least recently used space |
-| Local SSD | Full segment files for recently used spaces, WAL | Least recently used segment |
+| Local SSD | Full segment files for recently used spaces | Least recently used segment |
 | Wasabi | Everything | Never (it's the source of truth for the index) |
 
 A 1-byte section or docs block not on SSD is range-read from Wasabi and then
@@ -405,7 +494,7 @@ uploading, so the design makes its uploads irrelevant instead:
   only then serves the space. Changes the old owner indexed but never
   published, or published under its lower token, are pulled again from the
   PDSes from the manifest's sync positions. The index is rebuildable, so
-  losing them costs re-embedding, not data.
+  losing them costs some requests, not data.
 - **Before each flush**, an owner re-checks that its lease is current, and
   stops writing if it has lost the lease.
 - During a handover, a request may briefly reach the old owner and see
@@ -425,42 +514,54 @@ uploading, so the design makes its uploads irrelevant instead:
 - The export format is the storage format, so it's documented and versioned
   with it.
 - An appview without an export can always build the index from the members'
-  PDSes. An export only saves re-embedding.
+  PDSes, since the vectors travel in the records. An export saves pulling
+  every repo and gives the new appview a ready index straight away.
 
 ## Per-space limits
 
-Limits per space (memories, bytes, searches per second, embedding volume per
-day) are enforced by the space's owner, after forwarding, so there's exactly
-one place counting each space:
+Limits per space (memories, bytes, searches per second, writes per day) are
+enforced by the space's owner, after forwarding, so there's exactly one
+place counting each space:
 
-- Counts are live: the manifest's totals plus the write buffer plus
-  embeddings in flight. A new owner starts from the manifest's totals.
-  Rate counters reset on handover, which is acceptable.
-- Exceeding a limit returns a clear error.
-- Per-space concurrency caps and a fair queue for embedding work stop one
-  space from monopolizing a node's CPU, embedding capacity or Wasabi
-  bandwidth. Spaces on the same node still share hardware, so a busy space
-  can add some latency for others, but limits bound how much.
+- Counts are live: the manifest's totals plus the write buffer. A new owner
+  starts from the manifest's totals. Rate counters reset on handover, which
+  is acceptable.
+- Exceeding a limit returns a clear error. Memories past a space's limit
+  aren't indexed until the limit is raised or memories are deleted.
+- Per-space concurrency caps and a fair queue for sync work stop one space
+  from monopolizing a node's CPU or Wasabi bandwidth. Spaces on the same
+  node still share hardware, so a busy space can add some latency for
+  others, but limits bound how much.
 
 ## Build order
 
 Each step is one PR with tests.
 
 1. This document.
-2. **Segment package:** writer, reader, both quantizations, scan and
+2. **Client-side embedding**, on the current Postgres store, since it's
+   independent of storage:
+   - lexicons: the `embedding` field on `garden.engram.memory`, the
+     `garden.engram.config` record, and a vector parameter on
+     `garden.engram.searchMemories`;
+   - `engram-mcp` reads the space's config and embeds memories and queries
+     through an OpenAI-compatible endpoint (Ollama by default);
+   - the indexer takes vectors from records, skipping and reporting ones
+     that don't match the space's model, and the appview's embedder is
+     removed.
+3. **Segment package:** writer, reader, both quantizations, scan and
    re-rank, plus benchmarks to run on the benchmark machine.
-3. **Per-space store:** write buffer, WAL, flush, deletions, merging and
+4. **Per-space store:** write buffer, flush, deletions, merging and
    manifests. Behind a storage interface with a local-directory
    implementation and an S3 implementation (range reads), tested against a
-   fake S3.
-4. **Cache tiers:** shared cold loads, early warming, approximate results on
+   fake S3, plus the conditional-write probe.
+5. **Cache tiers:** shared cold loads, early warming, approximate results on
    deadline.
-5. **Switch the indexer and appview** to the per-space store and remove
+6. **Switch the indexer and appview** to the per-space store and remove
    Postgres. No data migration is needed: the index rebuilds from the
    PDSes.
-6. **Routing:** rendezvous hashing, forwarding and fencing.
-7. **Export and import.**
-8. **Cluster index for very large spaces.**
+7. **Routing:** rendezvous hashing, forwarding and fencing.
+8. **Export and import.**
+9. **Cluster index for very large spaces.**
 
 Afterwards: the web UI and live notifications.
 
@@ -468,10 +569,11 @@ Afterwards: the web UI and live notifications.
 
 - Does Wasabi honor `If-None-Match` on PutObject? Its documentation doesn't
   say, so this is answered by the startup probe against a real bucket.
-- Benchmark-machine numbers: re-rank throughput with `simd/archsimd`,
-  cold-load latency from Wasabi, and embedding throughput for
-  memory-length and query-length text (Ollama on CPU and GPU, and a faster
-  runtime).
+- Benchmark-machine numbers: re-rank throughput with `simd/archsimd`, and
+  cold-load latency from Wasabi.
+- Embedding latency on typical agent hardware (laptop CPU through Ollama)
+  for memory-length and query-length text, to confirm client-side embedding
+  stays unnoticeable.
 - Text search alongside vector search, for exact names and identifiers.
   Probably a small per-segment inverted index, designed after the first
   version.
