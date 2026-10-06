@@ -35,7 +35,7 @@ func newTestStore(t *testing.T, dims int) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := conn.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+	if err := EnsureExtension(ctx, conn.Config()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := conn.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {

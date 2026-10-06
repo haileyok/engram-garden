@@ -33,7 +33,9 @@ func New(t testing.TB, dims int) *store.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := conn.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+	// Create the extension in the default schema, before any test schema
+	// is first on the search path.
+	if err := store.EnsureExtension(ctx, conn.Config()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := conn.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {

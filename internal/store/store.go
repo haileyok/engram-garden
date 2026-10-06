@@ -74,7 +74,7 @@ func OpenConfig(ctx context.Context, cfg *pgxpool.Config, dims int) (*Store, err
 		return nil, fmt.Errorf("invalid embedding dimensions %d", dims)
 	}
 	// The vector type must exist before connections register it.
-	if err := ensureExtension(ctx, cfg.ConnConfig); err != nil {
+	if err := EnsureExtension(ctx, cfg.ConnConfig); err != nil {
 		return nil, err
 	}
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
@@ -92,16 +92,27 @@ func OpenConfig(ctx context.Context, cfg *pgxpool.Config, dims int) (*Store, err
 	return s, nil
 }
 
-func ensureExtension(ctx context.Context, cc *pgx.ConnConfig) error {
+// EnsureExtension enables pgvector. CREATE EXTENSION IF NOT EXISTS isn't
+// safe to run concurrently (racing callers fail on a unique violation), so
+// callers take turns under an advisory lock.
+func EnsureExtension(ctx context.Context, cc *pgx.ConnConfig) error {
 	conn, err := pgx.ConnectConfig(ctx, cc.Copy())
 	if err != nil {
 		return err
 	}
 	defer conn.Close(ctx)
-	if _, err := conn.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(727171)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
 		return fmt.Errorf("enabling pgvector (is it installed?): %w", err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (s *Store) Close() { s.pool.Close() }
