@@ -73,9 +73,14 @@ indexed, node membership) are small and covered under
   drops without them. Prefixes become configuration
   (`ENGRAM_EMBED_DOC_PREFIX`, `ENGRAM_EMBED_QUERY_PREFIX`) so other models
   can leave them empty.
-- **One model per space.** The manifest records the model and dimensions.
-  Changing models means re-embedding the space, which can run in the
-  background while the old segments keep serving.
+- **One active model per space.** Vectors from different models can't be
+  compared, so every search uses exactly one model. To change models, the
+  manifest gains a second, *building* index (its own model, dimensions and
+  segments). The owner re-embeds every live memory into it in the
+  background, and new writes go to both indexes. Searches keep using the
+  *active* index until the building index covers every memory. Then one
+  manifest update makes it active and lists the old segments for deletion.
+  Rolling back means dropping the building index.
 - **Agent-supplied vectors (later).** `garden.engram.memory` will gain an
   optional field carrying a vector and the model that produced it. When it
   matches the space's model, the appview can store it instead of embedding.
@@ -123,7 +128,7 @@ URI characters.
 
 ```
 spaces/<space key>/
-  manifest-<generation>.json
+  manifest-<token>-<generation>.json
   seg-<segment id>.seg
 ```
 
@@ -136,12 +141,16 @@ newest manifest lists.
 {
   "format": 1,
   "space": "at://did:plc:…/space/garden.engram.space/memory",
+  "token": 7,
   "generation": 42,
-  "model": "nomic-embed-text",
-  "dims": 768,
-  "segments": [
-    {"id": "01J…", "count": 1000, "bytes": 2600000, "minCreatedAt": "…", "maxCreatedAt": "…"}
-  ],
+  "active": {
+    "model": "nomic-embed-text",
+    "dims": 768,
+    "segments": [
+      {"id": "01J…", "count": 1000, "bytes": 2600000, "minCreatedAt": "…", "maxCreatedAt": "…"}
+    ]
+  },
+  "building": null,
   "deleted": "<base64 roaring bitmap of deleted memory ids>",
   "nextMemoryId": 51234,
   "repos": {
@@ -150,9 +159,12 @@ newest manifest lists.
 }
 ```
 
-- `generation` increases by one with every update. Each generation is a new
-  object (`manifest-<generation>.json`) rather than an overwrite. The
-  newest one wins, and older ones are deleted after the 90-day minimum (see
+- `token` is the owner's fencing token (see [Fencing](#fencing)), and
+  `generation` increases by one with every update by that owner. Each
+  update is a new object, `manifest-<token>-<generation>.json`, both numbers
+  zero-padded so keys sort numerically. Never overwrite. **The current
+  manifest is the one with the highest token, then the highest generation.**
+  Older ones are deleted after the 90-day minimum (see
   [Wasabi constraints](#wasabi-constraints)).
 - `repos` carries each member repo's sync position: the last oplog rev, the
   set hash state, and the latest known spaceRev. This is what the
@@ -208,11 +220,22 @@ candidates and the docs of the results: about 4% of the space. A synthetic
    then truncates the WAL.
 4. **Merge:** see below.
 
-If a node crashes, its replacement loads the newest manifest and the
-indexer re-syncs each repo from the sync position recorded there. Changes
-that were only in the lost buffer are pulled again from the PDSes, so
-nothing is lost. The WAL just avoids re-embedding after a clean restart on
-the same node.
+Nothing is acknowledged to anyone on the strength of the WAL. Notifications
+are accepted before syncing, as today. Durability rests on the members'
+PDSes:
+
+- If a node crashes, its replacement loads the current manifest and the
+  indexer re-syncs each repo from the sync position recorded there, using
+  `listRepoOps`. Changes that were only in the lost buffer are pulled and
+  embedded again. Embedding doesn't have to reproduce identical vectors,
+  only equivalent ones.
+- If a PDS can't serve the oplog from that position, or the result doesn't
+  verify against the signed commit, the indexer falls back to a full
+  verified `getRepo` export of that repo, as it does today.
+- Until a repo catches up, its newest memories are missing from search.
+  They aren't lost.
+
+The WAL only saves re-embedding after a restart on the same node.
 
 ### Merging segments
 
@@ -274,17 +297,29 @@ When a search arrives for a space with nothing in RAM or on SSD:
    of the results.
 4. Respond. In the background, pull the rest of the space onto SSD.
 
-For a 1 GB space (~400k memories) that's about 40 MB of 1-bit vectors plus a
-few hundred KB of range reads. The estimate is **0.5–1.5 s** for the first
-query, to be measured on the benchmark machine.
+For a 1 GB space (~400k memories), that's about 38 MB of 1-bit vectors, plus
+200 candidates × 772 bytes ≈ 154 KB of 1-byte vectors, plus the docs blocks
+of the results. The candidates are scattered across segments, so their reads
+are grouped by segment, adjacent ranges are merged, and the groups are
+fetched in parallel. That's at most a few dozen requests, and Wasabi doesn't
+charge per request. The estimate is **0.5–1.5 s** for the first query, to be
+measured on the benchmark machine.
 
 - **Warm early.** Loading starts on the first sign a space is about to be
   used: an agent's MCP session starts (new endpoint
   `garden.engram.warmSpace`), a write notification arrives, or a credential
   is issued for it.
-- **Deadline.** If a load passes a deadline (default 3 s), the search
-  returns results scored on 1-bit vectors only, marked `approximate: true`.
-  The MCP tool says results may be less precise.
+- **Deadline.** The 1-bit scan always covers every segment and the write
+  buffer. A partial scan could miss the best matches, so it is never
+  returned. If re-ranking reads haven't finished by the deadline (default
+  3 s), the search returns the complete 1-bit ranking, marked
+  `approximate: true`, and the MCP tool says results may be less precise. If
+  the 1-bit sections themselves can't be read by a hard limit (default
+  10 s), the search fails with a retryable error, and the load carries on in
+  the background.
+- **Memory budget.** Each node has a RAM budget for 1-bit sections. A space
+  whose 1-bit sections exceed its share (initially 1 GB) keeps them on SSD
+  and streams them through the scan instead of pinning them in RAM.
 - **Very large spaces.** Past a threshold (initially 250k memories), a
   segment also stores a small table of cluster centers and groups its
   memories by nearest center. A search scans only the clusters nearest the
@@ -307,14 +342,31 @@ query, to be measured on the benchmark machine.
 
 ### Fencing
 
-Two nodes must never write the same space at once, for example while the
-node list is changing. Each owner holds a lease on the space with a fencing
-token, and writes the token into every manifest it uploads.
+Two nodes may briefly both believe they own a space, for example during a
+rolling deploy or a partition. Object storage can't stop the old owner from
+uploading, so the design makes its uploads irrelevant instead:
 
-- When loading, a node reads the newest manifest generation. If that
-  manifest's token is newer than its own, it gives up ownership.
-- If Wasabi supports conditional writes, `If-None-Match: *` on
-  `manifest-<generation>.json` also rejects a second writer racing for the
+- **Fencing tokens.** Taking ownership of a space requires a lease from a
+  small coordination store, which hands out a strictly increasing token per
+  space. Before the coordination store exists, the token is the node list's
+  configuration epoch, which increases on every membership change.
+- **Readers ignore stale owners.** Manifest keys start with the token, and
+  the current manifest is the one with the highest token. Whatever a stale
+  owner uploads carries a lower token, so it's never chosen. Its orphaned
+  segments are deleted by garbage collection once no current manifest
+  references them and they're past the 90-day minimum.
+- **Handover.** A new owner takes the lease, loads the current manifest,
+  writes its first manifest under its own token (copying the state), and
+  only then serves the space. Changes the old owner indexed but never
+  published, or published under its lower token, are pulled again from the
+  PDSes from the manifest's sync positions. The index is rebuildable, so
+  losing them costs re-embedding, not data.
+- **Before each flush**, an owner re-checks that its lease is current, and
+  stops writing if it has lost the lease.
+- During a handover, a request may briefly reach the old owner and see
+  slightly stale results. That's acceptable for search.
+- If Wasabi supports conditional writes, `If-None-Match: *` on each manifest
+  key also stops two writers that hold the same token from racing for the
   same generation.
 
 ## Export and import
