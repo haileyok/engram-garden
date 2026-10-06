@@ -55,11 +55,12 @@ type Net struct {
 	Space     string
 	Authority *Account
 
-	mu       sync.Mutex
-	accounts map[string]*Account
-	members  map[string]bool
-	clock    *syntax.TIDClock
-	calls    map[string]int
+	mu            sync.Mutex
+	accounts      map[string]*Account
+	members       map[string]bool
+	registrations map[string]bool
+	clock         *syntax.TIDClock
+	calls         map[string]int
 
 	// Tamper knobs.
 	CorruptCommits bool // sign commits over the wrong contents
@@ -70,11 +71,12 @@ type Net struct {
 func New(t testing.TB) *Net {
 	t.Helper()
 	n := &Net{
-		T:        t,
-		accounts: map[string]*Account{},
-		members:  map[string]bool{},
-		clock:    syntax.NewTIDClock(0),
-		calls:    map[string]int{},
+		T:             t,
+		accounts:      map[string]*Account{},
+		members:       map[string]bool{},
+		registrations: map[string]bool{},
+		clock:         syntax.NewTIDClock(0),
+		calls:         map[string]int{},
 	}
 	n.Dir = identity.NewMockDirectory()
 	n.Server = httptest.NewServer(http.HandlerFunc(n.serve))
@@ -224,6 +226,83 @@ func (n *Net) ServiceAuth(aud, lxm string) string {
 	return tok
 }
 
+// Registrations lists the services registered for notifications.
+func (n *Net) Registrations() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	var out []string
+	for s := range n.registrations {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// DeliverWrite sends a notifyWrite for an account's latest write to every
+// registered service, as the authority forwards notifications, and returns
+// the response statuses.
+func (n *Net) DeliverWrite(a *Account, prevSpaceRev string) []int {
+	n.T.Helper()
+	n.mu.Lock()
+	body := map[string]string{"space": n.Space, "repo": a.DID, "repoRev": a.rev, "hash": "x", "spaceRev": a.spaceRev}
+	n.mu.Unlock()
+	if prevSpaceRev != "" {
+		body["prevSpaceRev"] = prevSpaceRev
+	}
+	var statuses []int
+	for _, svc := range n.Registrations() {
+		statuses = append(statuses, n.Deliver(svc, "com.atproto.space.notifyWrite", body, n.ServiceAuth(svc, "com.atproto.space.notifyWrite")))
+	}
+	return statuses
+}
+
+// Deliver POSTs a body to the service's DID document endpoint with the given
+// bearer token, returning the status.
+func (n *Net) Deliver(service, nsid string, body any, bearer string) int {
+	n.T.Helper()
+	did, frag, _ := strings.Cut(service, "#")
+	ident, err := n.Dir.LookupDID(context.Background(), syntax.DID(did))
+	if err != nil {
+		n.T.Fatal(err)
+	}
+	endpoint := ident.GetServiceEndpoint(frag)
+	if endpoint == "" {
+		n.T.Fatalf("%s has no #%s service", did, frag)
+	}
+	raw, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, endpoint+"/xrpc/"+nsid, bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		n.T.Fatal(err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+// SignServiceAuth mints a service-auth JWT from any account.
+func (n *Net) SignServiceAuth(a *Account, aud, lxm string) string {
+	n.T.Helper()
+	tok, err := serviceJWT(a, aud, lxm)
+	if err != nil {
+		n.T.Fatal(err)
+	}
+	return tok
+}
+
+// RegisterService publishes a DID document for a service DID with one
+// service entry, so notifications can reach it.
+func (n *Net) RegisterService(did, fragment, endpoint string) {
+	n.Dir.Insert(identity.Identity{
+		DID:      syntax.DID(did),
+		Handle:   syntax.HandleInvalid,
+		Services: map[string]identity.ServiceEndpoint{fragment: {Type: "AtprotoSpaceSyncer", URL: endpoint}},
+	})
+}
+
 func serviceJWT(a *Account, aud, lxm string) (string, error) {
 	nsid, err := syntax.ParseNSID(lxm)
 	if err != nil {
@@ -322,6 +401,23 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 			repos = append(repos, map[string]string{"did": a.DID, "repoRev": a.rev, "hash": "x", "spaceRev": a.spaceRev})
 		}
 		return map[string]any{"repos": repos}, nil
+
+	case "com.atproto.space.registerNotify":
+		if e := n.checkCredential(r, n.Authority.DID); e != nil {
+			return nil, e
+		}
+		var body struct {
+			Space   string `json:"space"`
+			Service string `json:"service"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Space != n.Space || body.Service == "" {
+			return nil, &xerr{400, "InvalidRequest", "bad registration"}
+		}
+		n.mu.Lock()
+		n.registrations[body.Service] = true
+		n.mu.Unlock()
+		return map[string]string{"expiresAt": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)}, nil
 
 	case "com.atproto.space.listRepoOps":
 		repo := q.Get("repo")

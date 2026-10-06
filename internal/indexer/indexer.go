@@ -124,6 +124,32 @@ func (ix *Indexer) SyncSpace(ctx context.Context, spaceURI string) error {
 	return errors.Join(errs...)
 }
 
+// Register asks the space's authority to forward write notifications to the
+// service identifier (a DID with a fragment naming the DID document entry to
+// deliver to). Registrations lapse after a day, so call it periodically.
+func (ix *Indexer) Register(ctx context.Context, spaceURI, service string) (time.Time, error) {
+	ref, err := space.ParseRef(spaceURI)
+	if err != nil {
+		return time.Time{}, err
+	}
+	host, err := ix.Client.SpaceHost(ctx, ref.Authority)
+	if err != nil {
+		return time.Time{}, err
+	}
+	var out struct {
+		ExpiresAt string `json:"expiresAt"`
+	}
+	body := map[string]string{"space": spaceURI, "service": service}
+	if err := ix.Client.Procedure(ctx, host, spaceURI, ref.Authority, "com.atproto.space.registerNotify", body, &out); err != nil {
+		return time.Time{}, fmt.Errorf("registerNotify: %w", err)
+	}
+	exp, err := syntax.ParseDatetimeLenient(out.ExpiresAt)
+	if err != nil {
+		return time.Time{}, nil
+	}
+	return exp.Time(), nil
+}
+
 // noteSpaceRev records the newest spaceRev seen and returns the previous one.
 func (ix *Indexer) noteSpaceRev(spaceURI, rev string) string {
 	ix.mu.Lock()
