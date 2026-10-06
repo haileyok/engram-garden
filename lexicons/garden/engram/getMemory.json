@@ -1,0 +1,32 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.getMemory",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Fetch one indexed memory by URI. Same authentication as garden.engram.searchMemories.",
+      "parameters": {
+        "type": "params",
+        "required": ["space", "uri"],
+        "properties": {
+          "space": { "type": "string", "description": "The space URI." },
+          "uri": { "type": "string", "description": "The memory's space record URI." }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["memory"],
+          "properties": {
+            "memory": { "type": "ref", "ref": "garden.engram.defs#memoryView" }
+          }
+        }
+      },
+      "errors": [
+        { "name": "UnknownSpace", "description": "This service does not index the space." },
+        { "name": "MemoryNotFound" }
+      ]
+    }
+  }
+}

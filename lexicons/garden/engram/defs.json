@@ -1,0 +1,29 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.defs",
+  "defs": {
+    "memoryView": {
+      "type": "object",
+      "required": ["uri", "cid", "author", "text", "tags", "createdAt", "indexedAt"],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "description": "The memory's space record URI: at://{authority}/space/{spaceType}/{skey}/{author}/garden.engram.memory/{rkey}."
+        },
+        "cid": { "type": "string", "format": "cid" },
+        "author": { "type": "string", "format": "did" },
+        "text": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "source": { "type": "string" },
+        "createdAt": { "type": "string", "format": "datetime" },
+        "indexedAt": { "type": "string", "format": "datetime" },
+        "similarity": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000,
+          "description": "Search results only: cosine similarity to the query, scaled to 0-1000."
+        }
+      }
+    }
+  }
+}
