@@ -84,6 +84,7 @@ func (ix *Indexer) SyncSpace(ctx context.Context, spaceURI string) error {
 	var errs []error
 	cursor := ""
 	maxRev := ""
+	listed := map[string]bool{}
 	for {
 		params := url.Values{"space": {spaceURI}, "limit": {"100"}}
 		if cursor != "" {
@@ -104,6 +105,7 @@ func (ix *Indexer) SyncSpace(ctx context.Context, spaceURI string) error {
 			return fmt.Errorf("listRepos: %w", err)
 		}
 		for _, r := range out.Repos {
+			listed[r.DID] = true
 			maxRev = max(maxRev, r.SpaceRev)
 			if rev, ok := known[r.DID]; ok && rev >= r.SpaceRev {
 				continue
@@ -117,6 +119,21 @@ func (ix *Indexer) SyncSpace(ctx context.Context, spaceURI string) error {
 			break
 		}
 		cursor = out.Cursor
+	}
+	// The listing completed: a repo the authority no longer lists has left
+	// the space, so its memories go too.
+	for did := range known {
+		if listed[did] {
+			continue
+		}
+		unlock := ix.lock(spaceURI, did)
+		err := ix.Store.RemoveRepo(ctx, spaceURI, did)
+		unlock()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("removing %s: %w", did, err))
+			continue
+		}
+		ix.log().Info("repo left the space, removed its memories", "space", spaceURI, "repo", did)
 	}
 	if len(errs) == 0 {
 		ix.noteSpaceRev(spaceURI, maxRev)

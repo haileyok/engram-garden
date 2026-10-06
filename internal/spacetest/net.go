@@ -36,6 +36,8 @@ type Account struct {
 	ops      []op
 	rev      string
 	spaceRev string
+	// listed is whether listRepos includes the account once it has written.
+	listed bool
 }
 
 type op struct {
@@ -97,7 +99,7 @@ func (n *Net) NewAccount(did string) *Account {
 	if err != nil {
 		n.T.Fatal(err)
 	}
-	a := &Account{DID: did, Key: key, records: map[string]space.SerializedRecord{}}
+	a := &Account{DID: did, Key: key, records: map[string]space.SerializedRecord{}, listed: true}
 	n.mu.Lock()
 	n.accounts[did] = a
 	n.mu.Unlock()
@@ -143,6 +145,14 @@ func (n *Net) RotateKey(a *Account) {
 func (n *Net) AddMember(did string) {
 	n.mu.Lock()
 	n.members[did] = true
+	n.mu.Unlock()
+}
+
+// DropWriter removes an account from the authority's writer list, as when a
+// member is removed from the space.
+func (n *Net) DropWriter(a *Account) {
+	n.mu.Lock()
+	a.listed = false
 	n.mu.Unlock()
 }
 
@@ -405,7 +415,7 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		defer n.mu.Unlock()
 		repos := []map[string]string{}
 		for _, a := range n.sortedAccounts() {
-			if a.rev == "" {
+			if a.rev == "" || !a.listed {
 				continue
 			}
 			repos = append(repos, map[string]string{"did": a.DID, "repoRev": a.rev, "hash": "x", "spaceRev": a.spaceRev})

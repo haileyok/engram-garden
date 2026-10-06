@@ -245,6 +245,30 @@ func TestGapDetection(t *testing.T) {
 	}
 }
 
+func TestRepoDroppedFromListingIsRemoved(t *testing.T) {
+	t.Parallel()
+	f := setup(t)
+	ctx := context.Background()
+	f.net.Put(f.alice, Collection, "a1", memory("alice stays"))
+	f.net.Put(f.bob, Collection, "b1", memory("bob leaves"))
+	if err := f.ix.SyncSpace(ctx, f.net.Space); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.count(t); got != 2 {
+		t.Fatalf("got %d, want 2", got)
+	}
+	f.net.DropWriter(f.bob)
+	if err := f.ix.SyncSpace(ctx, f.net.Space); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.search(t, "bob leaves", store.Filter{Author: f.bob.DID}); len(got) != 0 {
+		t.Fatalf("removed writer's memories still indexed: %+v", got)
+	}
+	if got := f.count(t); got != 1 {
+		t.Fatalf("got %d, want 1", got)
+	}
+}
+
 func TestNonMemberCannotSync(t *testing.T) {
 	t.Parallel()
 	f := setup(t)
