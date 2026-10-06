@@ -123,6 +123,12 @@ The tools:
 4. Start the appview with `ENGRAM_SPACES` set to the space URI, then point each
    agent's `engram-mcp` at it.
 
+## Design
+
+[`docs/design/storage.md`](docs/design/storage.md) describes the planned
+storage and scaling design: per-space index files in object storage, owned
+by one node at a time.
+
 ## Development
 
 ```bash
