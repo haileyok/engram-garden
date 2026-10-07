@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	SpaceType        = "garden.engram.space"
 	MemoryCollection = "garden.engram.memory"
 	ConfigCollection = "garden.engram.config"
 	// ConfigRkey is the config record's key in the authority's repo.
