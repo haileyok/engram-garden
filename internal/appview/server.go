@@ -70,19 +70,14 @@ type Server struct {
 	semOnce  sync.Once
 	nodeSem  chan struct{}
 	spaceSem sync.Map // space -> chan struct{}
+	followUp sync.Map // space -> true: notifications arrived while at the cap
 }
 
-// acquireSync waits for a sync slot for the space: first the space's own
-// cap, then the node's, so a space queues behind itself rather than ahead
-// of others.
-func (s *Server) acquireSync(ctx context.Context, spaceURI string) (func(), error) {
-	s.semOnce.Do(func() {
-		n := s.MaxSyncs
-		if n <= 0 {
-			n = 32
-		}
-		s.nodeSem = make(chan struct{}, n)
-	})
+// trySpaceSlot takes one of the space's notified-sync slots without
+// waiting. When the space is at its cap, the caller records a follow-up
+// instead of queueing, so waiting work is bounded by the number of spaces
+// times the per-space cap, not by the notification rate.
+func (s *Server) trySpaceSlot(spaceURI string) (func(), bool) {
 	per := s.MaxSpaceSyncs
 	if per <= 0 {
 		per = 2
@@ -91,16 +86,27 @@ func (s *Server) acquireSync(ctx context.Context, spaceURI string) (func(), erro
 	sp := v.(chan struct{})
 	select {
 	case sp <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
+		return func() { <-sp }, true
+	default:
+		return nil, false
 	}
+}
+
+// acquireNodeSlot waits for one of the node's sync slots.
+func (s *Server) acquireNodeSlot(ctx context.Context) (func(), error) {
+	s.semOnce.Do(func() {
+		n := s.MaxSyncs
+		if n <= 0 {
+			n = 32
+		}
+		s.nodeSem = make(chan struct{}, n)
+	})
 	select {
 	case s.nodeSem <- struct{}{}:
+		return func() { <-s.nodeSem }, nil
 	case <-ctx.Done():
-		<-sp
 		return nil, ctx.Err()
 	}
-	return func() { <-s.nodeSem; <-sp }, nil
 }
 
 // ServiceID is the identifier notifications are addressed to.
@@ -640,21 +646,32 @@ func (s *Server) handleNotifyWrite(w http.ResponseWriter, r *http.Request) {
 	// A write is a sign the space is in use: start loading it now.
 	s.Store.Warm(n.Space)
 	// Sync in the background; the periodic space sync catches anything
-	// that fails here.
+	// that fails here. A space already at its cap gets a follow-up space
+	// sync from a running job instead of another goroutine.
+	releaseSpace, ok := s.trySpaceSlot(n.Space)
+	if !ok {
+		s.followUp.Store(n.Space, true)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	s.Jobs.Add(1)
 	go func() {
 		defer s.Jobs.Done()
+		defer releaseSpace()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		release, err := s.acquireSync(ctx, n.Space)
+		releaseNode, err := s.acquireNodeSlot(ctx)
 		if err != nil {
 			s.log().Warn("notified sync never got a slot; the periodic sync will catch up", "space", n.Space)
 			return
 		}
-		defer release()
+		defer releaseNode()
 		needSync, err := s.Indexer.HandleWrite(ctx, n)
 		if err != nil {
 			s.log().Warn("notified sync failed", "space", n.Space, "repo", n.Repo, "err", err)
+		}
+		if _, more := s.followUp.LoadAndDelete(n.Space); more {
+			needSync = true
 		}
 		if needSync {
 			s.log().Info("syncing the whole space", "space", n.Space)

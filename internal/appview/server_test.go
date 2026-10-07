@@ -437,6 +437,41 @@ func TestForwardingToOwner(t *testing.T) {
 	}
 }
 
+// TestNotificationFloodIsBounded holds a space at its sync cap: further
+// notifications start no work, but leave a follow-up so their writes still
+// get indexed.
+func TestNotificationFloodIsBounded(t *testing.T) {
+	t.Parallel()
+	f := setup(t)
+	f.srv.MaxSpaceSyncs = 1
+	if _, err := f.srv.Indexer.Register(context.Background(), f.net.Space, f.srv.ServiceID()); err != nil {
+		t.Fatal(err)
+	}
+	release, ok := f.srv.trySpaceSlot(f.net.Space)
+	if !ok {
+		t.Fatal("no slot")
+	}
+	f.net.Put(f.alice, indexer.Collection, "a1", memory("flooded memory about otters"))
+	for range 20 {
+		if got := f.net.DeliverWrite(f.alice, ""); got[0] != 200 {
+			t.Fatalf("delivery: %v", got)
+		}
+	}
+	f.srv.Jobs.Wait() // nothing started while the slot was held
+	if _, ok := f.srv.followUp.Load(f.net.Space); !ok {
+		t.Fatal("no follow-up recorded")
+	}
+	release()
+	// The next notification runs, and its follow-up syncs the space.
+	f.net.Put(f.bob, indexer.Collection, "b1", memory("later memory"))
+	f.net.DeliverWrite(f.bob, "")
+	f.srv.Jobs.Wait()
+	status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", searchParams(f.net.Space, "otters"))
+	if status != 200 || len(memories(body)) == 0 || memories(body)[0]["text"] != "flooded memory about otters" {
+		t.Fatalf("flooded write not indexed: %d %v", status, body)
+	}
+}
+
 func TestDIDDocument(t *testing.T) {
 	t.Parallel()
 	f := setup(t)

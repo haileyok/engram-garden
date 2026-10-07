@@ -617,8 +617,10 @@ place counting each space:
   memories are deleted.
 - Per-space concurrency caps stop one space from monopolizing a node's CPU
   or Wasabi bandwidth: by default 8 concurrent searches per space, and 2
-  notified syncs per space out of 32 per node, with a space waiting on its
-  own cap before it takes a node slot. Spaces on the same node still share
+  notified syncs per space out of 32 per node. Notifications beyond a
+  space's cap don't queue: they leave a flag, and a running sync for that
+  space follows up with a full space sync, so a flood of notifications
+  costs no more than the caps allow. Spaces on the same node still share
   hardware, so a busy space can add some latency for others, but limits
   bound how much.
 
