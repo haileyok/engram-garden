@@ -33,6 +33,16 @@ Guidance for working on Engram Garden.
   notification receivers, `did:web` document, background sync and
   registration loop.
 - `internal/mcpserver`: MCP tools.
+- `cmd/engram-web`, `internal/web`: the web app's backend. OAuth sign-in
+  (indigo's client; sessions in `FileStore`), then it acts for the user with
+  `spaceclient`, like `engram-mcp`. The `Auth` interface lets tests sign in
+  as `spacetest` accounts. Requests that change anything must be same-origin
+  JSON.
+- `web/`: the React frontend (Vite, TypeScript, no router library). It
+  builds into `internal/web/dist/app`, which `engram-web` embeds.
+- Registered spaces: `internal/appview/registration.go`. The appview indexes
+  `ENGRAM_SPACES` plus spaces registered with `garden.engram.registerSpace`,
+  stored as write-once objects under `registered-spaces/`.
 - `internal/spacetest`: in-memory Spaces network for tests.
 - Spaces primitives (tokens, HTTP signatures, commits, CARs) come from
   `github.com/haileyok/cocoon/space`. Fix protocol bugs there, not here.
@@ -42,7 +52,12 @@ Guidance for working on Engram Garden.
 ```bash
 go test -race ./...
 GOEXPERIMENT=simd go test ./internal/vec/
+make web web-test   # frontend build, typecheck and tests
 ```
+
+- `internal/web` tests run the real appview and `spacetest`, signed in
+  through a fake `Auth`. To look at the UI, run the demo:
+  `make web && ENGRAM_WEB_DEMO=1 go test -run TestDemo -timeout 0 ./internal/web/`.
 
 - No external services are needed. Storage tests use `blob.Dir` in
   `t.TempDir()` and an in-process S3 (gofakes3).

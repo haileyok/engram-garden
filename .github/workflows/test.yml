@@ -18,3 +18,23 @@ jobs:
       # The int8 re-rank's SIMD version is behind GOEXPERIMENT=simd; check it
       # builds and matches the plain-Go version.
       - run: GOEXPERIMENT=simd go test -count=1 ./internal/vec/
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: make web
+      - run: make web-test
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # The binary with the frontend embedded.
+      - run: go build -o /tmp/engram-web ./cmd/engram-web

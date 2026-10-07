@@ -64,6 +64,8 @@ and `recall` tools.
 | `garden.engram.getSpaceStatus` | query | The space's model, memory count, and authors whose vectors don't match |
 | `garden.engram.warmSpace` | procedure | Start loading a space's index ahead of searches |
 | `garden.engram.exportSpace` | query | Download the space's index as a tar |
+| `garden.engram.registerSpace` | procedure | Ask the appview to index a space. Any member may ask; the appview's account must be a member |
+| `garden.engram.describeService` | query | The appview's account (add it to a space so the appview can index it) and whether registration is open |
 
 They live in [`lexicons/`](lexicons/garden/engram).
 
@@ -71,7 +73,8 @@ They live in [`lexicons/`](lexicons/garden/engram).
 
 | Variable | Default | |
 |---|---|---|
-| `ENGRAM_SPACES` | | Comma-separated space URIs to index (required) |
+| `ENGRAM_SPACES` | | Comma-separated space URIs to always index (required when registration is closed) |
+| `ENGRAM_REGISTRATION` | `open` | `open`: members can register more spaces with `garden.engram.registerSpace`, as long as the appview's account is a member of the space. `closed`: only `ENGRAM_SPACES`. |
 | `ENGRAM_SERVICE_DID` | | The appview's DID, e.g. `did:web:engram.garden` (required) |
 | `ENGRAM_PUBLIC_URL` | | Public HTTPS URL. When set, the appview serves its `did:web` document and registers for notifications. When unset, it polls. |
 | `ENGRAM_IDENTIFIER` / `ENGRAM_PASSWORD` | | The appview account's handle or DID, and its password (required) |
@@ -185,14 +188,59 @@ The tools:
 - `list_memories` lists memories newest first.
 - `forget` deletes one of the agent's own memories.
 
+## The web app
+
+`engram-web` is a web app for people. Sign in with your ATProto account to:
+
+- see the memory spaces you govern or have written to, or open any space you belong to by its URI;
+- browse a space's memories newest first, filtered by author, tag and date, with new memories appearing as agents write them;
+- check the space's status: its model, how many memories are indexed, progress during a model change, and authors whose vectors don't match;
+- delete your own memories;
+- as a space's authority: create spaces, add and remove members (including the appview's account), declare or change the model (it can read the model's digest and size from the Ollama on your computer), and have the appview index the space.
+
+There's no search by meaning in the web app yet: that needs a query vector from the space's model, and the browser doesn't have one.
+
+Sign-in is ATProto OAuth with DPoP. The web app asks for these permissions:
+
+- `space:garden.engram.space?authority=*&collection=garden.engram.memory&action=read&action=delete`: read the memory spaces you belong to, and delete your own memories in them;
+- `space:garden.engram.space?collection=garden.engram.config&action=read&action=create&action=update&manage=create&manage=update`: in spaces you govern, create spaces, manage members and set the model.
+
+The server keeps OAuth tokens; the browser holds only a signed session cookie. After sign-in it acts exactly as `engram-mcp` does: it exchanges your delegation token for a space credential and presents it to the appview, so you see only spaces you're a member of.
+
+| Variable | Default | |
+|---|---|---|
+| `ENGRAM_WEB_PUBLIC_URL` | | Where the web app is served, e.g. `https://engram.garden` (required). `http://127.0.0.1:<port>` runs a development client that needs no key. |
+| `ENGRAM_WEB_CLIENT_KEY` | | The OAuth client's P-256 private key, multibase (`goat key generate -t P-256`). Required for https. |
+| `ENGRAM_WEB_LISTEN` | `:8090` | |
+| `ENGRAM_WEB_DATA` | `engram-web-data` | Sessions and pending sign-ins, one file each. Keep it private. |
+| `ENGRAM_WEB_COOKIE_KEY` | generated in the data directory | Hex, at least 32 bytes. Signs session cookies. |
+| `ENGRAM_APPVIEW_URL` / `ENGRAM_APPVIEW_DID` | `https://engram.garden` / `did:web:<appview host>` | |
+| `ENGRAM_WEB_ALLOW_PRIVATE` | on for `127.0.0.1` | Allow requests to private addresses, for a local PDS. |
+
+```bash
+make web                     # build the frontend into the binary
+go run ./cmd/engram-web
+```
+
+To work on the frontend, run `engram-web` with `ENGRAM_WEB_PUBLIC_URL=http://127.0.0.1:8090`, then `cd web && pnpm dev`; Vite proxies the API to it. To work without a PDS at all:
+
+```bash
+make web && ENGRAM_WEB_DEMO=1 go test -run TestDemo -timeout 0 ./internal/web/
+```
+
+That serves the app against an in-memory network with a few agents writing memories, and prints a link that signs you in.
+
 ## Setting up a space
+
+The quickest way is the web app: **New space** creates the space, adds the appview's account, declares the model and registers the space with the appview. By hand:
 
 1. Create accounts for the appview and each agent.
 2. As the authority, create the space with `com.atproto.simplespace.createSpace`
    (type `garden.engram.space`, read policy `member-list`).
 3. Add the appview and the agents with `com.atproto.simplespace.putMember`.
 4. Declare the model with `engram-config -model nomic-embed-text`.
-5. Start the appview with `ENGRAM_SPACES` set to the space URI, then point each
+5. Have the appview index it: call `garden.engram.registerSpace` as any member,
+   or put the space URI in the appview's `ENGRAM_SPACES`. Then point each
    agent's `engram-mcp` at it.
 
 ## Development
@@ -201,6 +249,7 @@ The tools:
 make test
 make lint
 GOEXPERIMENT=simd go test ./internal/vec/   # the SIMD re-rank (amd64)
+make web web-test                           # the frontend (pnpm)
 ```
 
 Tests run against an in-memory Spaces network (`internal/spacetest`). It
