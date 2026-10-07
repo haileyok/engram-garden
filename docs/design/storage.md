@@ -420,7 +420,10 @@ accepted before syncing, as before.
 ### Merging segments
 
 Small segments accumulate. A merge rewrites several segments into one,
-dropping deleted memories, then deletes the inputs.
+dropping deleted memories, and publishes a manifest without the inputs. The
+inputs themselves are left for garbage collection: deleting them before the
+90-day minimum saves nothing, and a search that started before the merge may
+still be reading them.
 
 - Merge when a space has more than 8 segments, or when deleted memories
   exceed 25% of its segments. Keeping the segment count small also bounds

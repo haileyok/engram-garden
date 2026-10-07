@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -347,25 +349,53 @@ func TestMergeAndGC(t *testing.T) {
 		}
 		return n
 	}
-	if segs() != 1 {
-		t.Fatalf("merge inputs not deleted: %d segment objects", segs())
+	manifests := func() (n int) {
+		objs, _ := f.blob.List(ctx, spacePrefix(testSpace))
+		for _, o := range objs {
+			if contains(o.Key, "/manifest-") {
+				n++
+			}
+		}
+		return n
 	}
-	// An orphan from a crashed flush is collected after the retention.
+	// Merge inputs stay until garbage collection: searches in flight may
+	// still read them, and deleting early saves nothing.
+	if segs() != 7 {
+		t.Fatalf("after merge: %d segment objects, want 6 inputs + 1 merged", segs())
+	}
+	// An orphan from a crashed flush.
 	_ = blob.PutBytes(ctx, f.blob, SegmentKey(testSpace, "orphan"), []byte("x"), false)
-	clock.Add(int64(91 * 24 * time.Hour))
 	n.mu.Lock()
 	s := n.spaces[testSpace]
 	n.mu.Unlock()
-	s.flushMu.Lock()
-	err := s.gcLocked(ctx)
-	s.flushMu.Unlock()
-	if err != nil {
-		t.Fatal(err)
+	gc := func() {
+		t.Helper()
+		s.flushMu.Lock()
+		err := s.gcLocked(ctx)
+		s.flushMu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	// Local files are "modified" now, not 91 days ago, so nothing is old
-	// enough yet by mtime; the orphan survives until its retention passes.
-	if segs() != 2 {
+	// Everything is younger than the retention: nothing goes.
+	gc()
+	if segs() != 8 {
 		t.Fatalf("collected too early: %d", segs())
+	}
+	// Age every object past the retention (GC goes by object age).
+	old := now().Add(-100 * 24 * time.Hour)
+	_ = filepath.WalkDir(f.blob.(blob.Dir).Root, func(p string, _ os.DirEntry, _ error) error {
+		return os.Chtimes(p, old, old)
+	})
+	gc()
+	if segs() != 1 {
+		t.Fatalf("after GC: %d segment objects, want only the merged one", segs())
+	}
+	if m := manifests(); m != 2 {
+		t.Fatalf("after GC: %d manifests, want the current one and GC's own", m)
+	}
+	if res := search(t, f.node(func(o *Options) { o.Now = now }), modelA, "topic3", Filter{}); len(res.Hits) != 4 {
+		t.Fatalf("search after GC: %+v", res.Hits)
 	}
 }
 

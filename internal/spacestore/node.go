@@ -211,7 +211,7 @@ func (n *Node) load(ctx context.Context, spaceURI string) (*Space, error) {
 		buf: map[string]*bufEntry{}, locs: map[string]*loc{}, repos: map[string]*pendingRepo{},
 		skipped: map[string]map[string]struct{}{}, nextID: max(man.NextMemoryID, 1),
 		config: man.Config, spaceGone: man.SpaceDeleted,
-		searchSem: make(chan struct{}, max(1, n.opt.Limits.MaxConcurrentSearches, 8)),
+		searchSem: make(chan struct{}, 8),
 	}
 	if n.opt.Limits.SearchesPerSecond > 0 {
 		s.limiter = rate.NewLimiter(rate.Limit(n.opt.Limits.SearchesPerSecond), max(1, int(n.opt.Limits.SearchesPerSecond)))

@@ -246,12 +246,21 @@ func (s *Space) flushLocked(ctx context.Context) error {
 	}
 	s.mu.RLock()
 	var keep [2][]*seg
+	changed := false
 	for i, sl := range s.slots {
 		if sl != nil {
 			keep[i] = slices.Clone(sl.segs)
 		}
+		changed = changed || (sl == nil) != (models[i] == nil) || (sl != nil && sl.model != *models[i])
 	}
 	s.mu.RUnlock()
+	if changed {
+		// The space's model changed during the flush. Publish nothing; the
+		// changes are still buffered and the next flush writes them under
+		// the new shape. The uploaded segments are collected later.
+		clearInflight()
+		return nil
+	}
 	setIndex(&next.Active, models[0], newSegs[0], keep[0])
 	setIndex(&next.Building, models[1], newSegs[1], keep[1])
 	for did, p := range repoSnap {
@@ -536,11 +545,11 @@ func (s *Space) mergeLocked(ctx context.Context) error {
 		}
 	}
 	s.mu.Unlock()
+	// The inputs stay in object storage until garbage collection, after the
+	// provider's minimum retention: deleting them sooner saves nothing, and
+	// a search that started before the merge may still be reading them.
 	for _, sg := range removed {
 		s.n.cache.remove(sg.src.key)
-		if err := s.n.opt.Blob.Delete(ctx, sg.src.key); err != nil {
-			s.n.log().Warn("deleting merged segment failed", "key", sg.src.key, "err", err)
-		}
 	}
 	s.n.noteRAM()
 	return nil
