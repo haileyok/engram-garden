@@ -57,10 +57,50 @@ type Server struct {
 	// HTTP forwards requests to other nodes.
 	HTTP *http.Client
 
+	// MaxSyncs caps notified syncs running at once across the node
+	// (default 32), and MaxSpaceSyncs per space (default 2), so one busy
+	// space can't take every slot.
+	MaxSyncs      int
+	MaxSpaceSyncs int
+
 	// Background work, so tests can wait for it.
 	Jobs sync.WaitGroup
 
-	syncing sync.Map // space -> struct{}: a space sync is running
+	syncing  sync.Map // space -> struct{}: a space sync is running
+	semOnce  sync.Once
+	nodeSem  chan struct{}
+	spaceSem sync.Map // space -> chan struct{}
+}
+
+// acquireSync waits for a sync slot for the space: first the space's own
+// cap, then the node's, so a space queues behind itself rather than ahead
+// of others.
+func (s *Server) acquireSync(ctx context.Context, spaceURI string) (func(), error) {
+	s.semOnce.Do(func() {
+		n := s.MaxSyncs
+		if n <= 0 {
+			n = 32
+		}
+		s.nodeSem = make(chan struct{}, n)
+	})
+	per := s.MaxSpaceSyncs
+	if per <= 0 {
+		per = 2
+	}
+	v, _ := s.spaceSem.LoadOrStore(spaceURI, make(chan struct{}, per))
+	sp := v.(chan struct{})
+	select {
+	case sp <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case s.nodeSem <- struct{}{}:
+	case <-ctx.Done():
+		<-sp
+		return nil, ctx.Err()
+	}
+	return func() { <-s.nodeSem; <-sp }, nil
 }
 
 // ServiceID is the identifier notifications are addressed to.
@@ -584,6 +624,12 @@ func (s *Server) handleNotifyWrite(w http.ResponseWriter, r *http.Request) {
 		defer s.Jobs.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
+		release, err := s.acquireSync(ctx, n.Space)
+		if err != nil {
+			s.log().Warn("notified sync never got a slot; the periodic sync will catch up", "space", n.Space)
+			return
+		}
+		defer release()
 		needSync, err := s.Indexer.HandleWrite(ctx, n)
 		if err != nil {
 			s.log().Warn("notified sync failed", "space", n.Space, "repo", n.Repo, "err", err)

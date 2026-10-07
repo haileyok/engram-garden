@@ -1,7 +1,11 @@
 # Storage and scaling design
 
-Status: proposed. This replaces the Postgres and pgvector store in
-`internal/store`.
+Status: implemented, except the parts marked as later. This replaced the
+Postgres and pgvector store. The code is in `internal/spacestore` (the
+index), `internal/segment`, `internal/vec`, `internal/blob`,
+`internal/routing` and `internal/lex`. Where the implementation settled a
+detail differently from the first draft, this document describes what was
+built.
 
 ## Goals
 
@@ -22,8 +26,8 @@ verifying that a memory's vector matches its text (see
 
 ## Why not a shared vector index
 
-The current store puts every space's vectors in one Postgres table with one
-HNSW index. That fits this workload badly:
+The previous store put every space's vectors in one Postgres table with one
+HNSW index. That fit this workload badly:
 
 - **The workload:** many spaces, each small (hundreds to a few thousand
   memories), most of them idle at any moment. Every search is confined to
@@ -31,7 +35,7 @@ HNSW index. That fits this workload badly:
 - A shared HNSW index has to stay in RAM to be fast, so we pay memory for
   idle spaces.
 - Filtering a shared index down to one space degrades as the index grows.
-  The current code already widens `hnsw.ef_search` to compensate.
+  The old code widened `hnsw.ef_search` to compensate.
 - Spaces share CPU and cache, so one busy space slows everyone.
 - The index only holds data copied from members' PDSes and can always be
   rebuilt from them, so a replicated database buys durability we don't
@@ -67,7 +71,7 @@ indexed, node membership) are small and covered under
 
 **Agents embed their own memories and queries.** The appview never runs a
 model. It syncs memory records (verified against their authors' signed
-commits, as today), then quantizes, stores and searches the vectors they
+commits, as before), then quantizes, stores and searches the vectors they
 carry.
 
 Why:
@@ -127,20 +131,26 @@ space:
   "modelDigest": "sha256:…",
   "dims": 768,
   "encoding": "f16le",
-  "vector": {"$bytes": "<1536 bytes, base64>"}
+  "vector": {"$bytes": "<1536 bytes, unpadded base64>"}
 }
 ```
+
+The text that gets embedded is the space's `documentPrefix`, the memory's
+text (cut at 24,000 characters), and, when it has tags, a blank line and
+`Tags: a, b`.
 
 - `f16le` is little-endian IEEE half precision: 2 bytes per dimension,
   1.5 KB at 768 dimensions. That's close enough to full precision for
   search, and a third of the size of the same vector as JSON numbers.
 - The appview indexes a memory only if its `model`, `modelDigest` and
   `dims` match the space's declared model. Memories that don't match are
-  skipped, counted per author, and reported, so a misconfigured agent is
-  easy to spot.
-- To keep the transition to a new model simple, `embedding` may later
-  become an array, one entry per model (see
-  [Changing models](#changing-models)).
+  skipped, counted per author, and reported (in the log and in
+  `garden.engram.getSpaceStatus`), so a misconfigured agent is easy to
+  spot.
+- During a model change, a memory also carries `nextEmbedding`, the same
+  shape for the next model (see [Changing models](#changing-models)). The
+  appview reads both fields and uses whichever matches each index. A second
+  field kept the lexicon simpler than turning `embedding` into an array.
 
 ### Searching with a vector
 
@@ -156,15 +166,26 @@ Vectors from different models can't be compared, so every search uses
 exactly one model, the *active* one.
 
 1. The authority updates `garden.engram.config` with the new model under a
-   `next` key, alongside the current one.
-2. Agents re-embed their memories and rewrite them with an embedding for
-   each model. `engram-mcp` does this in the background for its own
-   memories.
+   `next` key, alongside the current one (`engram-config -next`).
+2. Agents re-embed their memories and rewrite them with `nextEmbedding`.
+   `engram-mcp` does this in the background for its own memories, at
+   startup and every 15 minutes, and new memories carry both from then on.
 3. The appview builds a second, *building* index from the new-model
-   vectors, while searches keep using the active index.
-4. When the building index covers enough of the space, the authority
-   promotes `next` to the current model. The appview makes the building
-   index active in one manifest update.
+   vectors, while searches keep using the active index. Seeing the new
+   `next`, it forgets every repo's sync position, so the next space sync
+   reads every repo again in full and picks up vectors it skipped before.
+   Records it already holds unchanged keep their memory ids.
+4. When the building index covers enough of the space
+   (`garden.engram.getSpaceStatus` reports how many memories have the new
+   vector), the authority promotes `next` to the current model
+   (`engram-config -promote`). The appview makes the building index active
+   in one manifest update. `engram-mcp` notices on its next search (the
+   appview answers `ModelMismatch`), re-reads the config and retries.
+
+The appview honors the config only from the authority's repo, and syncs the
+authority's repo first so the model is known before any memory. A
+notification for a space whose config it hasn't seen yet triggers a full
+space sync.
 
 The catch: agents that never come back never re-embed, so their memories
 drop out of search under the new model. That's the main cost of embedding
@@ -232,6 +253,13 @@ experimental portable `simd` package), so the SIMD version lives behind a
 build tag, with the plain-Go version as the fallback and the reference in
 tests.
 
+Measured with the implementation (`internal/vec` benchmarks, one core of
+the development box): the 1-bit scan runs at 43M vectors/s, and the 1-byte
+re-rank at 1.7M vectors/s in plain Go and 4.3M vectors/s with
+`GOEXPERIMENT=simd` (AVX2 and FMA), 2.6 times faster. The SIMD version
+only uses full 16-byte loads; the API's partial-slice load was 16 times
+slower than plain Go.
+
 ## Object layout
 
 Everything for a space lives under one prefix. The space key is the
@@ -257,9 +285,11 @@ newest manifest lists.
   "generation": 42,
   "active": {
     "model": "nomic-embed-text",
+    "modelDigest": "sha256:…",
     "dims": 768,
     "segments": [
-      {"id": "01J…", "count": 1000, "bytes": 2600000, "minCreatedAt": "…", "maxCreatedAt": "…"}
+      {"id": "…", "count": 1000, "bytes": 2600000, "minCreatedAt": "…", "maxCreatedAt": "…",
+       "createdAt": "…", "clustered": false}
     ]
   },
   "building": null,
@@ -267,7 +297,14 @@ newest manifest lists.
   "nextMemoryId": 51234,
   "repos": {
     "did:plc:alice": {"rev": "3mxa…", "setHash": "<base64>", "spaceRev": "3mxa…"}
-  }
+  },
+  "config": {"model": "nomic-embed-text", "modelDigest": "sha256:…", "dims": 768,
+             "documentPrefix": "search_document: ", "queryPrefix": "search_query: "},
+  "skipped": {"did:plc:bob": ["3mxb…"]},
+  "spaceDeleted": false,
+  "lastMergeAt": "…",
+  "lastGcAt": "…",
+  "updatedAt": "…"
 }
 ```
 
@@ -280,11 +317,19 @@ newest manifest lists.
   [Wasabi constraints](#wasabi-constraints)).
 - `repos` carries each member repo's sync position: the last oplog rev, the
   set hash state, and the latest known spaceRev. This is what the
-  `repos` Postgres table holds today. With it in the manifest, any node can
+  old `repos` Postgres table held. With it in the manifest, any node can
   resume a space from Wasabi alone.
 - Memory ids are dense integers assigned in arrival order. The `deleted`
   bitmap marks ids whose record was deleted or replaced. An update gives the
-  memory a new id and marks the old one deleted.
+  memory a new id and marks the old one deleted. During a model change a
+  memory has the same id in both indexes, so one bitmap serves both. A
+  merge removes the ids it dropped from the bitmap.
+- `config` is the authority's declared model as last seen, and `skipped`
+  lists, per author, the memories whose vectors don't match it.
+  `spaceDeleted` remembers a space its authority deleted. `lastMergeAt` and
+  `lastGcAt` pace maintenance.
+- Segment ids are time-ordered: nanoseconds since the epoch in hex, then
+  random bytes.
 
 ### Segment file
 
@@ -292,19 +337,28 @@ A segment is immutable and holds a batch of memories. Its sections are
 contiguous, so each can be fetched with one range read:
 
 ```
-[header]       magic "EGSEG", format version, count, dims, section offsets
-[metadata]     per memory, fixed width: memory id, author index, createdAt,
-               tag bitmap offset
-[strings]      authors, tags and record keys for this segment, deduplicated
+[header]       magic "EGSEG", format version, count, dims, and per section:
+               offset, length, CRC-32C
+[metadata]     per memory, 40 bytes: memory id, author, record key, tag list
+               offset and count, cluster, text+source size, createdAt,
+               64-bit hash of the record CID
+[strings]      authors, record keys and tags for this segment, deduplicated,
+               plus the tag lists
 [1-bit]        count × 96 bytes
 [1-byte]       count × (768 + 4) bytes
-[docs]         text, source, URI, CID: zstd-compressed in ~64 KB blocks
-[doc index]    per block: first memory id and byte offset
-[footer]       section checksums, header copy
+[docs]         text, source, CID, indexedAt: zstd-compressed in ~64 KB blocks
+[doc index]    per block: first row, offset and length
+[clusters]     only in clustered segments: centers and each cluster's rows
+[footer]       a copy of the header, then "EGSEGEND"
 ```
 
 - Search filters (author, tags, created-after) are evaluated from the
   metadata section during the scan, before scoring.
+- The CID hash and size in the metadata let a node tell whether a record
+  changed, and count a space's bytes against its limit, without reading any
+  documents. A cold load reads only the header, metadata, strings, doc index
+  and 1-bit sections.
+- URIs aren't stored: they're built from the space, author and record key.
 - `docs` is compressed in blocks, so fetching a few results reads a few
   blocks, not the whole section.
 - The format is versioned. Readers reject versions they don't know rather
@@ -312,11 +366,19 @@ contiguous, so each can be fetched with one range read:
 
 ### Size estimates
 
-For 100,000 memories of about 500 characters each, including metadata and
-compressed text: **~250 MB in total, of which ~10 MB is 1-bit vectors.** A
-search on a cold space needs the 1-bit section, the 1-byte vectors of the top
-candidates and the docs of the results: about 4% of the space. A synthetic
-100k-memory space will replace these estimates once the format exists.
+Measured with a synthetic segment (`BenchmarkWrite100k`): 100,000 memories
+of about 500 characters each come to **104 MB, of which 9.6 MB is 1-bit
+vectors**, 77 MB is 1-byte vectors and 4 MB is metadata. The synthetic text
+uses a tiny vocabulary, so its 11 MB of compressed docs is optimistic; real
+text compresses to perhaps a quarter to a half of its size, adding
+15–25 MB. Call it **~120–130 MB per 100k memories**, about half the first
+estimate.
+
+A search on a cold space needs the metadata, the 1-bit section, the 1-byte
+vectors of the top candidates and the docs of the results: about 14 MB, or
+12%, of a 100k space, because metadata and 1-bit vectors dominate. In a
+test space of 2,000 memories it read 25%, since 200 candidates are a tenth
+of such a small space.
 
 ## Write path
 
@@ -326,8 +388,9 @@ candidates and the docs of the results: about 4% of the space. A synthetic
    in-memory write buffer. New memories are searchable immediately from the
    buffer.
 3. **Flush:** when the buffer reaches 1,000 memories or an hour old, it
-   becomes a new segment. The node uploads the segment, then a new manifest
-   that lists it and carries the updated deletions and repo sync positions,
+   becomes a new segment (one per index during a model change). A config
+   change and an export flush right away, and shutdown flushes every space.
+   The node uploads the segment, then a new manifest that lists it and carries the updated deletions and repo sync positions,
    then clears the flushed changes from the buffer.
    - Flushes for a space run one at a time. Each new manifest is derived
      from the owner's in-memory copy of the previous one, so no flush can
@@ -342,7 +405,7 @@ candidates and the docs of the results: about 4% of the space. A synthetic
 There's no write-ahead log. The buffer only holds changes that are already
 durable on the members' PDSes, and since vectors come in the records,
 pulling a change again costs a request, not an embedding. Notifications are
-accepted before syncing, as today.
+accepted before syncing, as before.
 
 - If a node crashes or restarts, its replacement loads the current manifest
   and the indexer re-syncs each repo from the sync position recorded there,
@@ -350,7 +413,7 @@ accepted before syncing, as today.
   about an hour's worth, are pulled again.
 - If a PDS can't serve the oplog from that position, or the result doesn't
   verify against the signed commit, the indexer falls back to a full
-  verified `getRepo` export of that repo, as it does today.
+  verified `getRepo` export of that repo, as before.
 - Until a repo catches up, its newest memories are missing from search.
   They aren't lost.
 
@@ -363,7 +426,12 @@ dropping deleted memories, then deletes the inputs.
   exceed 25% of its segments. Keeping the segment count small also bounds
   how many range reads a cold search needs.
 - Run merges at most once a day per space, and prefer segments older than
-  90 days as inputs (see below).
+  90 days as inputs (see below). Merged segments are rebuilt from the
+  inputs' 1-byte vectors, which re-quantize to the same values.
+- Garbage collection runs on the same daily schedule. It deletes segments
+  no current manifest references and manifests older than the current one,
+  but only once they're past the 90-day minimum. A segment uploaded by a
+  flush that crashed before its manifest is collected the same way.
 
 ## Wasabi constraints
 
@@ -412,16 +480,20 @@ $20/month.
 | Local SSD | Full segment files for recently used spaces | Least recently used segment |
 | Wasabi | Everything | Never (it's the source of truth for the index) |
 
-A 1-byte section or docs block not on SSD is range-read from Wasabi and then
-cached.
+A 1-byte section or docs block not on SSD is range-read from Wasabi. After a
+space loads, its whole segment files are pulled onto SSD in the background,
+and later reads come from there. Individual ranges aren't cached
+separately; the whole-file pull covers them within seconds. Segments a node
+writes itself go straight onto its SSD.
 
 ### Cold start
 
 When a search arrives for a space with nothing in RAM or on SSD:
 
 1. Fetch the newest manifest (a few KB).
-2. Range-read each segment's metadata and 1-bit sections in parallel,
-   scanning each chunk as it arrives.
+2. Range-read each segment's metadata and 1-bit sections, up to 16 segments
+   at once, then scan. (Scanning chunks as they arrive would save a little
+   more time; it's a later refinement.)
 3. Range-read the 1-byte vectors of the top candidates and the docs blocks
    of the results.
 4. Respond. In the background, pull the rest of the space onto SSD.
@@ -436,9 +508,10 @@ estimate is **0.5–1.5 s** for the first query, to be measured on the
 benchmark machine.
 
 - **Warm early.** Loading starts on the first sign a space is about to be
-  used: an agent's MCP session starts (new endpoint
-  `garden.engram.warmSpace`), a write notification arrives, or a credential
-  is issued for it.
+  used: an agent's MCP session starts (`engram-mcp` calls
+  `garden.engram.warmSpace`), or a write notification arrives. Credential
+  issuance happens at the authority, which doesn't tell the appview, so it
+  isn't a signal.
 - **Deadline.** The 1-bit scan always covers every segment and the write
   buffer. A partial scan could miss the best matches, so it is never
   returned. If re-ranking reads haven't finished by the deadline (default
@@ -450,10 +523,13 @@ benchmark machine.
 - **Memory budget.** Each node has a RAM budget for 1-bit sections. A space
   whose 1-bit sections exceed its share (initially 1 GB) keeps them on SSD
   and streams them through the scan instead of pinning them in RAM.
-- **Very large spaces.** Past a threshold (initially 250k memories), a
-  segment also stores a small table of cluster centers and groups its
-  memories by nearest center. A search scans only the clusters nearest the
-  query. This is not in the first version.
+- **Very large spaces.** A segment of 250k memories or more (in practice,
+  a merge of a very large space) also stores a table of about √n cluster
+  centers, trained by spherical k-means on a sample, with its rows grouped
+  by nearest center. A search scans only the nearest max(4, k/8) clusters
+  of such a segment. In tests the probed clusters held the true nearest
+  neighbor for at least 95 of 100 queries; the recall/speed trade-off at
+  real scale is for the benchmark machine.
 
 ## Routing and ownership
 
@@ -466,13 +542,18 @@ benchmark machine.
   forwards the request to the owner over internal HTTP. Write notifications
   are forwarded the same way, so sync and search for a space always run on
   the same node.
-- **Global state:** the list of indexed spaces and their notification
-  registrations is small, and also rebuildable. Indexed spaces come from
-  configuration, and registrations are renewed daily by each space's owner
+- **Global state:** the list of indexed spaces and their owners is small,
+  and also rebuildable. Indexed spaces come from configuration, and each
+  owner renews its spaces' notification registrations every 12 hours or so
   regardless. The list lives in a single object
-  (`registry-<token>-<generation>.json`, ordered like manifests) maintained
-  by one coordinator node. If it's lost, owners re-register their spaces on
-  the next renewal.
+  (`registry-<epoch>-<generation>.json` at the bucket root, ordered like
+  manifests) written by one coordinator node, the rendezvous owner of the
+  key `registry`, whenever its contents change. If it's lost, it's
+  rewritten on the next tick.
+- Each node only syncs, registers for and flushes the spaces it owns. A
+  forwarded request that arrives at a node that doesn't own the space (the
+  nodes disagree, mid-change) gets a retryable `NotOwner` error rather than
+  being forwarded again.
 
 ### Fencing
 
@@ -523,45 +604,47 @@ Limits per space (memories, bytes, searches per second, writes per day) are
 enforced by the space's owner, after forwarding, so there's exactly one
 place counting each space:
 
-- Counts are live: the manifest's totals plus the write buffer. A new owner
-  starts from the manifest's totals. Rate counters reset on handover, which
-  is acceptable.
-- Exceeding a limit returns a clear error. Memories past a space's limit
-  aren't indexed until the limit is raised or memories are deleted.
-- Per-space concurrency caps and a fair queue for sync work stop one space
-  from monopolizing a node's CPU or Wasabi bandwidth. Spaces on the same
-  node still share hardware, so a busy space can add some latency for
-  others, but limits bound how much.
+- Counts are live: the loaded index plus the write buffer. A new owner
+  starts from the manifest's segments. Rate counters reset on handover,
+  which is acceptable.
+- Exceeding a limit returns a clear error (`RateLimitExceeded` for
+  searches). Memories past a space's memory, byte or daily-write limit
+  aren't indexed, and their repo's sync position doesn't advance, so
+  they're pulled again on each sync and indexed once the limit is raised or
+  memories are deleted.
+- Per-space concurrency caps stop one space from monopolizing a node's CPU
+  or Wasabi bandwidth: by default 8 concurrent searches per space, and 2
+  notified syncs per space out of 32 per node, with a space waiting on its
+  own cap before it takes a node slot. Spaces on the same node still share
+  hardware, so a busy space can add some latency for others, but limits
+  bound how much.
 
 ## Build order
 
-Each step is one PR with tests.
+The plan was one PR per step. All of it shipped together, with this
+document:
 
-1. This document.
-2. **Client-side embedding**, on the current Postgres store, since it's
-   independent of storage:
-   - lexicons: the `embedding` field on `garden.engram.memory`, the
-     `garden.engram.config` record, and a vector parameter on
-     `garden.engram.searchMemories`;
-   - `engram-mcp` reads the space's config and embeds memories and queries
-     through an OpenAI-compatible endpoint (Ollama by default);
-   - the indexer takes vectors from records, skipping and reporting ones
-     that don't match the space's model, and the appview's embedder is
-     removed.
-3. **Segment package:** writer, reader, both quantizations, scan and
-   re-rank, plus benchmarks to run on the benchmark machine.
-4. **Per-space store:** write buffer, flush, deletions, merging and
-   manifests. Behind a storage interface with a local-directory
-   implementation and an S3 implementation (range reads), tested against a
-   fake S3, plus the conditional-write probe.
-5. **Cache tiers:** shared cold loads, early warming, approximate results on
-   deadline.
-6. **Switch the indexer and appview** to the per-space store and remove
-   Postgres. No data migration is needed: the index rebuilds from the
-   PDSes.
-7. **Routing:** rendezvous hashing, forwarding and fencing.
-8. **Export and import.**
-9. **Cluster index for very large spaces.**
+1. **Client-side embedding:** the `embedding` and `nextEmbedding` fields on
+   `garden.engram.memory`, the `garden.engram.config` record, vector
+   parameters on `garden.engram.searchMemories`; `engram-mcp` embeds
+   through an OpenAI-compatible endpoint (Ollama by default) and checks the
+   model digest; `engram-config` declares the model; the indexer takes
+   vectors from records; the appview's embedder is gone.
+2. **Vectors and segments** (`internal/vec`, `internal/segment`): half
+   precision, both quantizations, scan and re-rank, the segment format, and
+   benchmarks.
+3. **Object storage** (`internal/blob`): local directory and S3 (range
+   reads), tested against an in-process fake S3, and the conditional-write
+   probe.
+4. **Per-space store** (`internal/spacestore`): write buffer, flush,
+   deletions, merging, garbage collection, manifests, cache tiers, shared
+   cold loads, warming, deadlines, limits and fencing.
+5. **Indexer and appview** on the per-space store. Postgres is removed. No
+   data migration is needed: the index rebuilds from the PDSes.
+6. **Routing** (`internal/routing`): rendezvous hashing, forwarding and the
+   registry.
+7. **Export and import.**
+8. **Cluster index for very large spaces.**
 
 Afterwards: the web UI and live notifications.
 
