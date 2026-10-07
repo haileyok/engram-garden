@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/haileyok/engram-garden/internal/blob"
 	"github.com/haileyok/engram-garden/internal/indexer"
@@ -75,6 +76,30 @@ func TestDescribeService(t *testing.T) {
 	status, body := f.get(t, nil, "", "garden.engram.describeService", nil)
 	if status != 200 || body["did"] != serviceDID || body["account"] != f.client.DID().String() || body["registration"] != "open" {
 		t.Fatalf("describe: %d %v", status, body)
+	}
+}
+
+// TestRegistrationSyncWaitsForASlot: a registration's first sync takes one
+// of the node's sync slots, like notified syncs.
+func TestRegistrationSyncWaitsForASlot(t *testing.T) {
+	t.Parallel()
+	f := registrationFixture(t, true)
+	f.srv.MaxSyncs = 1
+	hold, err := f.srv.acquireNodeSlot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, body := f.register(t, f.alice); status != 200 {
+		t.Fatalf("register: %d %v", status, body)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := f.net.Calls("com.atproto.space.listRepos"); n != 0 {
+		t.Fatalf("synced while every slot was taken (%d listRepos calls)", n)
+	}
+	hold()
+	f.srv.Jobs.Wait()
+	if f.net.Calls("com.atproto.space.listRepos") == 0 {
+		t.Fatal("never synced")
 	}
 }
 

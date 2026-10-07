@@ -198,6 +198,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		defer s.Jobs.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
+		// Share the node's sync slots, so registrations can't start
+		// unbounded work. The background loop catches up if this gives up.
+		releaseNode, err := s.acquireNodeSlot(ctx)
+		if err != nil {
+			return
+		}
+		defer releaseNode()
 		s.syncSpaceOnce(ctx, spaceURI)
 	}()
 	writeJSON(w, http.StatusOK, map[string]any{"space": spaceURI})
