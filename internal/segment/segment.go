@@ -7,7 +7,7 @@
 //	[header]      magic, version, count, dims, then a table of sections:
 //	              offset, length and CRC-32C of each
 //	[metadata]    count fixed-width rows: memory id, author, record key,
-//	              tags, cluster, createdAt
+//	              tags, cluster, document size, createdAt, CID hash
 //	[strings]     authors, record keys and tags, deduplicated
 //	[1-bit]       count × BitBytes(dims)
 //	[1-byte]      count × Int8Bytes(dims)
@@ -55,8 +55,10 @@ const (
 	// footer).
 	HeaderSize = 8 + 4*4 + numSections*sectionEntry
 	footerSize = HeaderSize + len(endMagic)
-	metaRow    = 32
-	noCluster  = 0xffff
+	// metaRow: id u32, author u32, rkey u32, tags offset u32, tag count
+	// u16, cluster u16, doc size u32, createdAt i64, CID hash u64.
+	metaRow   = 40
+	noCluster = 0xffff
 	// MaxClusters bounds the clusters in one segment (cluster numbers are
 	// 16-bit, with one value meaning "none").
 	MaxClusters = 4096

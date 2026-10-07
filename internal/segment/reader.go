@@ -323,6 +323,16 @@ func (ix *Index) CreatedAtMicros(row int) int64 {
 	return int64(binary.LittleEndian.Uint64(ix.meta[row*metaRow+24:]))
 }
 
+// CIDHash is a row's CID hash (see CIDHash).
+func (ix *Index) CIDHash(row int) uint64 {
+	return binary.LittleEndian.Uint64(ix.meta[row*metaRow+32:])
+}
+
+// DocSize is the length of a row's text plus source.
+func (ix *Index) DocSize(row int) int64 {
+	return int64(binary.LittleEndian.Uint32(ix.meta[row*metaRow+20:]))
+}
+
 // HasTags reports whether a row carries every tag (as string indexes).
 func (ix *Index) HasTags(row int, tags []uint32) bool {
 	m := ix.meta[row*metaRow:]

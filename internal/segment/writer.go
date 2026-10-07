@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"hash/fnv"
 	"io"
+	"math"
 	"slices"
 	"time"
 
@@ -119,8 +121,9 @@ func Write(w io.Writer, docs []Doc, opt WriteOptions) (Info, error) {
 		meta = binary.LittleEndian.AppendUint32(meta, tagsOff)
 		meta = binary.LittleEndian.AppendUint16(meta, uint16(len(d.Tags)))
 		meta = binary.LittleEndian.AppendUint16(meta, cl)
-		meta = binary.LittleEndian.AppendUint32(meta, 0)
+		meta = binary.LittleEndian.AppendUint32(meta, uint32(min(len(d.Text)+len(d.Source), math.MaxUint32)))
 		meta = binary.LittleEndian.AppendUint64(meta, uint64(d.CreatedAt.UnixMicro()))
+		meta = binary.LittleEndian.AppendUint64(meta, CIDHash(d.CID))
 		bits = append(bits, d.Bits...)
 		int8s = append(int8s, d.Int8...)
 		if info.MinCreatedAt.IsZero() || d.CreatedAt.Before(info.MinCreatedAt) {
@@ -215,6 +218,14 @@ func (c *countWriter) Write(p []byte) (int, error) {
 	n, err := c.w.Write(p)
 	c.n += int64(n)
 	return n, err
+}
+
+// CIDHash is the 64-bit hash of a record CID kept in metadata, so a node can
+// tell whether a record changed without reading its document.
+func CIDHash(c string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(c))
+	return h.Sum64()
 }
 
 // Bytes writes a segment into memory.
