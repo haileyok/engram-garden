@@ -21,25 +21,30 @@ export function Memories({ uri, onStatus }: { uri: string; onStatus: (s: SpaceSt
 
   const filtered = !!(filters.author || filters.tags?.length || filters.since);
 
+  // Each list (a space with a set of filters) is a generation. Responses
+  // for an older generation are dropped, and the first page keeps only what
+  // the live stream delivered during this generation.
+  const generation = useRef(0);
+  const liveThisGeneration = useRef(new Set<string>());
+
   useEffect(() => {
-    let cancelled = false;
+    const gen = ++generation.current;
+    liveThisGeneration.current = new Set();
     setMemories(null);
+    setCursor(undefined);
     setError(null);
     api.memories(uri, filters).then(
       (r) => {
-        if (cancelled) return;
-        // Keep anything the live stream delivered while this page loaded.
+        if (gen !== generation.current) return;
         setMemories((cur) => {
           const page = new Set(r.memories.map((m) => m.uri));
-          return [...(cur ?? []).filter((m) => !page.has(m.uri)), ...r.memories];
+          const live = (cur ?? []).filter((m) => liveThisGeneration.current.has(m.uri) && !page.has(m.uri));
+          return [...live, ...r.memories];
         });
         setCursor(r.cursor);
       },
-      (e) => !cancelled && setError(describeError(e)),
+      (e) => gen === generation.current && setError(describeError(e)),
     );
-    return () => {
-      cancelled = true;
-    };
   }, [uri, filters]);
 
   // New memories stream in while the list is unfiltered.
@@ -65,6 +70,7 @@ export function Memories({ uri, onStatus }: { uri: string; onStatus: (s: SpaceSt
     es.addEventListener("memories", (e) => {
       const incoming = parse<{ memories?: Memory[] }>(e)?.memories;
       if (!Array.isArray(incoming)) return;
+      for (const m of incoming) liveThisGeneration.current.add(m.uri);
       setMemories((cur) => {
         const have = new Set((cur ?? []).map((m) => m.uri));
         return [...incoming.filter((m) => !have.has(m.uri)), ...(cur ?? [])];
@@ -86,16 +92,18 @@ export function Memories({ uri, onStatus }: { uri: string; onStatus: (s: SpaceSt
 
   const more = async () => {
     if (!cursor) return;
+    const gen = generation.current;
     setLoadingMore(true);
     try {
       const r = await api.memories(uri, filters, cursor);
+      if (gen !== generation.current) return; // the filters changed meanwhile
       setMemories((cur) => {
         const have = new Set((cur ?? []).map((m) => m.uri));
         return [...(cur ?? []), ...r.memories.filter((m) => !have.has(m.uri))];
       });
       setCursor(r.cursor);
     } catch (e) {
-      setError(describeError(e));
+      if (gen === generation.current) setError(describeError(e));
     } finally {
       setLoadingMore(false);
     }

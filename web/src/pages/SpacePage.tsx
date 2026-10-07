@@ -45,7 +45,9 @@ export function SpacePage({ uri }: { uri: string }) {
         <h1>{ref.name}</h1>
         <p className="muted small">
           {isAuthority ? "Your space" : <>Run by <Handle did={ref.authority} /></>} ·{" "}
-          <code className="uri" title="Copy" onClick={() => navigator.clipboard?.writeText(uri)}>{uri}</code>
+          <button type="button" className="link uri" title="Copy the space's URI" onClick={() => navigator.clipboard?.writeText(uri)}>
+            <code>{uri}</code>
+          </button>
         </p>
       </div>
       {unindexed ? (
