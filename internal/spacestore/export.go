@@ -28,7 +28,12 @@ func (n *Node) Export(ctx context.Context, spaceURI string, w io.Writer) error {
 	// Hold the flush lock so no merge deletes a segment mid-export.
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
-	if err := s.flushLocked(ctx); err != nil && !errors.Is(err, ErrNotOwner) {
+	// Only the current owner's state is authoritative: a node that lost the
+	// space mustn't hand out its stale copy.
+	if err := s.checkLease(); err != nil {
+		return err
+	}
+	if err := s.flushLocked(ctx); err != nil {
 		return err
 	}
 	s.mu.RLock()

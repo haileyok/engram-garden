@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -437,6 +438,46 @@ func TestLimits(t *testing.T) {
 	search(t, n, modelA, "one", Filter{})
 	if _, err := n.Search(ctx, testSpace, SearchQuery{Vector: embedFor(modelA, "x"), Model: modelA}); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("rate limit: %v", err)
+	}
+}
+
+func TestReviewRegressions(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// List rejects a non-positive limit instead of panicking.
+	f := newFixture(t)
+	n := f.node()
+	seed(t, n, 3, modelA)
+	if _, _, err := n.List(ctx, testSpace, 0, "", Filter{}); err == nil {
+		t.Fatal("List with limit 0 succeeded")
+	}
+
+	// Updates count against the byte limit too.
+	g := newFixture(t)
+	g.opt.Limits = Limits{MaxBytes: 40}
+	m := g.node()
+	configure(t, m, SpaceConfig{ModelInfo: modelA})
+	if err := m.ApplyRepoChanges(ctx, testSpace, "did:plc:alice", pos("r1"), []Memory{mem("did:plc:alice", "a1", "short")}, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	big := mem("did:plc:alice", "a1", "a much longer text that is well past the forty byte limit")
+	if err := m.ApplyRepoChanges(ctx, testSpace, "did:plc:alice", pos("r2"), []Memory{big}, nil, false); !errors.Is(err, ErrOverLimit) {
+		t.Fatalf("growing update: %v", err)
+	}
+	if h, _ := m.Get(ctx, testSpace, "did:plc:alice", "a1"); h.Text != "short" {
+		t.Fatalf("over-limit update applied: %q", h.Text)
+	}
+
+	// A node that lost the space refuses to export it.
+	var token atomic.Uint64
+	token.Store(1)
+	h := newFixture(t)
+	a := h.node(func(o *Options) { o.Lease = func(string) (uint64, bool) { return token.Load(), true } })
+	seed(t, a, 3, modelA)
+	token.Store(2)
+	if err := a.Export(ctx, testSpace, io.Discard); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("export after losing the lease: %v", err)
 	}
 }
 

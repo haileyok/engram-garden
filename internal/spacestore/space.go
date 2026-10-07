@@ -299,8 +299,14 @@ func (s *Space) apply(did string, pos RepoPosition, upserts []Memory, deletes []
 			continue // already indexed
 		}
 		size := int64(len(m.Text) + len(m.Source))
-		if old == nil && ((lim.MaxMemories > 0 && len(s.locs) >= lim.MaxMemories) ||
-			(lim.MaxBytes > 0 && s.liveBytes+size > lim.MaxBytes)) {
+		var oldSize int64
+		if old != nil {
+			oldSize = old.size
+		}
+		// New memories count against the memory limit; any write that
+		// grows the space counts against the byte limit.
+		if (old == nil && lim.MaxMemories > 0 && len(s.locs) >= lim.MaxMemories) ||
+			(lim.MaxBytes > 0 && size > oldSize && s.liveBytes-oldSize+size > lim.MaxBytes) {
 			held = true
 			continue
 		}
@@ -629,6 +635,9 @@ func (a listKey) less(b listKey) bool {
 }
 
 func (s *Space) list(ctx context.Context, limit int, cursor string, f Filter) ([]Hit, string, error) {
+	if limit <= 0 {
+		return nil, "", errors.New("limit must be positive")
+	}
 	var after *listKey
 	if cursor != "" {
 		k, err := decodeCursor(cursor)

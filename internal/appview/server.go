@@ -551,13 +551,35 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, err)
 		return
 	}
-	// Errors after the first byte can only cut the stream short; tar
-	// readers notice the missing end.
-	w.Header().Set("Content-Type", "application/x-tar")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+spacestore.SpaceKey(spaceURI)+`.tar"`)
-	if err := s.Store.Export(r.Context(), spaceURI, w); err != nil {
+	tw := &startedWriter{w: w, start: func() {
+		w.Header().Set("Content-Type", "application/x-tar")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+spacestore.SpaceKey(spaceURI)+`.tar"`)
+	}}
+	if err := s.Store.Export(r.Context(), spaceURI, tw); err != nil {
+		if !tw.started {
+			s.writeErr(w, err)
+			return
+		}
+		// Mid-stream, the error can only cut the tar short; tar readers
+		// notice the missing end.
 		s.log().Warn("export failed", "space", spaceURI, "err", err)
 	}
+}
+
+// startedWriter sets the response headers on the first write, so an error
+// before any data can still be reported as an XRPC error.
+type startedWriter struct {
+	w       http.ResponseWriter
+	start   func()
+	started bool
+}
+
+func (s *startedWriter) Write(p []byte) (int, error) {
+	if !s.started {
+		s.started = true
+		s.start()
+	}
+	return s.w.Write(p)
 }
 
 func (s *Server) handleWarm(w http.ResponseWriter, r *http.Request) {
