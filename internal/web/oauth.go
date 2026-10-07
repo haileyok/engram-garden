@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"crypto/hmac"
 	"errors"
 	"fmt"
 	"net/http"
@@ -72,7 +73,7 @@ func NewOAuth(cfg OAuthConfig) (*OAuth, error) {
 		return nil, fmt.Errorf("the public URL must be https, or http://127.0.0.1:<port> for development, not %q", cfg.PublicURL)
 	}
 	config.UserAgent = "engram-garden-web"
-	app := oauth.NewClientApp(&config, cfg.Store)
+	app := oauth.NewClientApp(&config, stateCapture{cfg.Store})
 	if cfg.Dir != nil {
 		app.Dir = cfg.Dir
 	}
@@ -80,6 +81,24 @@ func NewOAuth(cfg OAuthConfig) (*OAuth, error) {
 		app.Client = cfg.HTTP
 	}
 	return &OAuth{App: app, PublicURL: base}, nil
+}
+
+// signinCookie ties a pending sign-in to the browser that started it, so
+// nobody can send someone a callback link that signs them in as somebody
+// else.
+const signinCookie = "engram_signin"
+
+type stateKey struct{}
+
+// stateCapture records the state of a sign-in as it's saved, for the
+// request that started it.
+type stateCapture struct{ oauth.ClientAuthStore }
+
+func (s stateCapture) SaveAuthRequestInfo(ctx context.Context, info oauth.AuthRequestData) error {
+	if p, ok := ctx.Value(stateKey{}).(*string); ok {
+		*p = info.State
+	}
+	return s.ClientAuthStore.SaveAuthRequestInfo(ctx, info)
 }
 
 // Resume implements Auth.
@@ -126,17 +145,34 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apiErr(http.StatusBadRequest, "InvalidHandle", "enter a handle like alice.bsky.social"))
 		return
 	}
-	redirect, err := s.OAuth.App.StartAuthFlow(r.Context(), id)
+	var state string
+	redirect, err := s.OAuth.App.StartAuthFlow(context.WithValue(r.Context(), stateKey{}, &state), id)
 	if err != nil {
 		s.log().Info("couldn't start sign-in", "handle", id, "err", err)
 		writeErr(w, apiErr(http.StatusBadRequest, "SignInFailed", "couldn't start signing in as %s", id))
 		return
 	}
+	if state == "" {
+		writeErr(w, apiErr(http.StatusInternalServerError, "SignInFailed", "sign-in wasn't recorded"))
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: signinCookie, Value: s.mac("signin." + state), Path: "/oauth/callback",
+		HttpOnly: true, Secure: strings.HasPrefix(s.Origin, "https://"), SameSite: http.SameSiteLaxMode,
+		MaxAge: int(authRequestTTL.Seconds()),
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"redirect": redirect})
 }
 
 // handleCallback finishes signing in and returns to the app.
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{Name: signinCookie, Value: "", Path: "/oauth/callback", MaxAge: -1, HttpOnly: true,
+		Secure: strings.HasPrefix(s.Origin, "https://"), SameSite: http.SameSiteLaxMode})
+	if !s.startedHere(r) {
+		s.log().Info("refused a sign-in callback this browser didn't start")
+		http.Redirect(w, r, "/?signin_error="+url.QueryEscape("that sign-in wasn't started from this browser; try again"), http.StatusSeeOther)
+		return
+	}
 	sess, err := s.OAuth.App.ProcessCallback(r.Context(), r.URL.Query())
 	if err != nil {
 		msg := "signing in failed"
@@ -154,6 +190,17 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, s.sessionCookie(sess.AccountDID, sess.SessionID))
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// startedHere checks the callback's state belongs to a sign-in this browser
+// started.
+func (s *Server) startedHere(r *http.Request) bool {
+	state := r.URL.Query().Get("state")
+	c, err := r.Cookie(signinCookie)
+	if err != nil || state == "" {
+		return false
+	}
+	return hmac.Equal([]byte(c.Value), []byte(s.mac("signin."+state)))
 }
 
 func missingScopes(granted []string) []string {

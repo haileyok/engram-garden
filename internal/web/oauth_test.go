@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -68,6 +69,60 @@ func TestOAuthClientMetadata(t *testing.T) {
 	dev, err := NewOAuth(OAuthConfig{PublicURL: "http://127.0.0.1:8090", Store: &FileStore{Dir: t.TempDir()}})
 	if err != nil || dev.App.Config.IsConfidential() || !strings.HasPrefix(dev.App.Config.ClientID, "http://localhost?") {
 		t.Fatalf("dev client: %v", err)
+	}
+}
+
+// TestCallbackNeedsTheBrowserThatStarted: a callback link from someone
+// else's sign-in doesn't sign this browser in.
+func TestCallbackNeedsTheBrowserThatStarted(t *testing.T) {
+	t.Parallel()
+	store := &FileStore{Dir: t.TempDir()}
+	o, err := NewOAuth(OAuthConfig{PublicURL: "http://127.0.0.1:8090", Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{OAuth: o, Auth: o, Origin: o.PublicURL, CookieKey: []byte("0123456789abcdef0123456789abcdef")}
+	hs := httptest.NewServer(s.Handler())
+	defer hs.Close()
+	noFollow := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	callback := func(cookie string) (string, []*http.Cookie) {
+		req, _ := http.NewRequest("GET", hs.URL+"/oauth/callback?state=st1&code=c&iss=https://pds.test", nil)
+		if cookie != "" {
+			req.AddCookie(&http.Cookie{Name: signinCookie, Value: cookie})
+		}
+		resp, err := noFollow.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.Header.Get("Location"), resp.Cookies()
+	}
+	signedIn := func(cs []*http.Cookie) bool {
+		for _, c := range cs {
+			if c.Name == cookieName && c.Value != "" {
+				return true
+			}
+		}
+		return false
+	}
+	for _, cookie := range []string{"", s.mac("signin.other-state")} {
+		loc, cs := callback(cookie)
+		if !strings.Contains(loc, "started+from+this+browser") || signedIn(cs) {
+			t.Fatalf("cookie %q: %s %v", cookie, loc, cs)
+		}
+	}
+	// With the right cookie the callback gets as far as exchanging the code
+	// (which fails here: there's no such sign-in).
+	loc, cs := callback(s.mac("signin.st1"))
+	if strings.Contains(loc, "started+from+this+browser") || !strings.Contains(loc, "signin_error") || signedIn(cs) {
+		t.Fatalf("bound callback: %s", loc)
+	}
+
+	// Starting a sign-in records its state for the cookie.
+	var state string
+	ctx := context.WithValue(context.Background(), stateKey{}, &state)
+	if err := (stateCapture{store}).SaveAuthRequestInfo(ctx, oauth.AuthRequestData{State: "st2"}); err != nil || state != "st2" {
+		t.Fatalf("captured %q: %v", state, err)
 	}
 }
 
