@@ -33,6 +33,7 @@ type Account struct {
 	Key *atcrypto.PrivateKeyK256
 
 	records  map[string]space.SerializedRecord // path -> record
+	raw      map[string]json.RawMessage        // path -> record JSON
 	ops      []op
 	rev      string
 	spaceRev string
@@ -99,7 +100,7 @@ func (n *Net) NewAccount(did string) *Account {
 	if err != nil {
 		n.T.Fatal(err)
 	}
-	a := &Account{DID: did, Key: key, records: map[string]space.SerializedRecord{}, listed: true}
+	a := &Account{DID: did, Key: key, records: map[string]space.SerializedRecord{}, raw: map[string]json.RawMessage{}, listed: true}
 	n.mu.Lock()
 	n.accounts[did] = a
 	n.mu.Unlock()
@@ -193,6 +194,7 @@ func (n *Net) Put(a *Account, collection, rkey string, value map[string]any) (st
 		o.Prev = &p
 	}
 	a.records[path] = ser
+	a.raw[path] = raw
 	a.ops = append(a.ops, o)
 	a.rev = o.Rev
 	a.spaceRev = n.clock.Next().String()
@@ -212,6 +214,7 @@ func (n *Net) Delete(a *Account, collection, rkey string) string {
 	}
 	p := prev.Cid
 	delete(a.records, path)
+	delete(a.raw, path)
 	o := op{Rev: n.clock.Next().String(), Collection: collection, Rkey: rkey, Prev: &p}
 	a.ops = append(a.ops, o)
 	a.rev = o.Rev
@@ -422,7 +425,72 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		}
 		return map[string]any{"repos": repos}, nil
 
-	case "com.atproto.space.createRecord", "com.atproto.space.deleteRecord":
+	case "com.atproto.space.getRecord", "com.atproto.space.listRecords":
+		repo := q.Get("repo")
+		if q.Get("space") != n.Space {
+			return nil, &xerr{400, "InvalidRequest", "unknown space"}
+		}
+		// The owner reads with its session; anyone else needs a credential.
+		if r.Header.Get("X-Test-Did") != repo {
+			if e := n.checkCredential(r, repo); e != nil {
+				return nil, e
+			}
+		}
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		a := n.accounts[repo]
+		if a == nil || a.rev == "" {
+			return nil, &xerr{400, "RepoNotFound", "no repo"}
+		}
+		ref, _ := space.ParseRef(n.Space)
+		view := func(rec space.SerializedRecord) (map[string]any, *xerr) {
+			raw := a.raw[space.FormatRecordPath(rec.Collection, rec.Rkey)]
+			return map[string]any{
+				"uri": ref.RecordURI(repo, rec.Collection, rec.Rkey), "cid": rec.Cid.String(),
+				"collection": rec.Collection, "rkey": rec.Rkey, "value": json.RawMessage(raw),
+			}, nil
+		}
+		if nsid == "com.atproto.space.getRecord" {
+			rec, ok := a.records[space.FormatRecordPath(q.Get("collection"), q.Get("rkey"))]
+			if !ok {
+				return nil, &xerr{400, "RecordNotFound", "no record"}
+			}
+			return view(rec)
+		}
+		paths := make([]string, 0, len(a.records))
+		for p, rec := range a.records {
+			if c := q.Get("collection"); c == "" || rec.Collection == c {
+				paths = append(paths, p)
+			}
+		}
+		sort.Strings(paths)
+		limit := 50
+		if l, err := strconv.Atoi(q.Get("limit")); err == nil && l > 0 {
+			limit = l
+		}
+		start := 0
+		if c := q.Get("cursor"); c != "" {
+			start = sort.SearchStrings(paths, c)
+			if start < len(paths) && paths[start] == c {
+				start++
+			}
+		}
+		end := min(start+limit, len(paths))
+		records := []map[string]any{}
+		for _, p := range paths[start:end] {
+			v, e := view(a.records[p])
+			if e != nil {
+				return nil, e
+			}
+			records = append(records, v)
+		}
+		res := map[string]any{"records": records}
+		if end < len(paths) {
+			res["cursor"] = paths[end-1]
+		}
+		return res, nil
+
+	case "com.atproto.space.createRecord", "com.atproto.space.deleteRecord", "com.atproto.space.putRecord":
 		a := n.account(r.Header.Get("X-Test-Did"))
 		if a == nil {
 			return nil, &xerr{401, "AuthRequired", "no session"}

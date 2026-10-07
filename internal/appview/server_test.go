@@ -1,8 +1,10 @@
 package appview
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,17 +13,19 @@ import (
 
 	"github.com/haileyok/cocoon/space"
 
+	"github.com/haileyok/engram-garden/internal/blob"
 	"github.com/haileyok/engram-garden/internal/embed"
 	"github.com/haileyok/engram-garden/internal/indexer"
+	"github.com/haileyok/engram-garden/internal/lex"
+	"github.com/haileyok/engram-garden/internal/routing"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
+	"github.com/haileyok/engram-garden/internal/spacestore"
 	"github.com/haileyok/engram-garden/internal/spacetest"
-	"github.com/haileyok/engram-garden/internal/store/storetest"
 )
 
-const (
-	dims       = 256
-	serviceDID = "did:web:engram.test"
-)
+const serviceDID = "did:web:engram.test"
+
+var model = lex.ModelInfo{Model: "hashing-256", ModelDigest: embed.HashingDigest, Dims: 256}
 
 type fixture struct {
 	net     *spacetest.Net
@@ -30,28 +34,44 @@ type fixture struct {
 	alice   *spacetest.Account
 	bob     *spacetest.Account
 	mallory *spacetest.Account
+	client  *spaceclient.Client
 }
 
-func setup(t *testing.T) *fixture {
+func newNode(t *testing.T, bs blob.Store, lease func(string) (uint64, bool)) *spacestore.Node {
 	t.Helper()
-	st := storetest.New(t, dims)
+	n, err := spacestore.New(spacestore.Options{Blob: bs, CacheDir: t.TempDir(), Lease: lease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = n.Close(context.Background()) })
+	return n
+}
+
+func newNet(t *testing.T) (*spacetest.Net, *spaceclient.Client, [3]*spacetest.Account) {
+	t.Helper()
 	n := spacetest.New(t)
 	appview := n.NewAccount("did:plc:appview")
 	alice := n.NewAccount("did:plc:alice")
 	bob := n.NewAccount("did:plc:bob")
 	mallory := n.NewAccount("did:plc:mallory")
-	for _, a := range []*spacetest.Account{appview, alice, bob} {
+	for _, a := range []*spacetest.Account{n.Authority, appview, alice, bob} {
 		n.AddMember(a.DID)
 	}
+	n.Put(n.Authority, lex.ConfigCollection, lex.ConfigRkey, lex.Config{ModelInfo: model}.Record(time.Now()))
 	client, err := spaceclient.New(n.Session(appview), n.Dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	emb := embed.Hashing{Dims: dims}
+	return n, client, [3]*spacetest.Account{alice, bob, mallory}
+}
+
+func setup(t *testing.T) *fixture {
+	t.Helper()
+	n, client, accts := newNet(t)
+	st := newNode(t, blob.Dir{Root: t.TempDir()}, nil)
 	s := &Server{
 		Store:      st,
-		Embedder:   emb,
-		Indexer:    &indexer.Indexer{Store: st, Embedder: emb, Client: client, Dir: n.Dir},
+		Indexer:    &indexer.Indexer{Store: st, Client: client, Dir: n.Dir},
 		Dir:        n.Dir,
 		ServiceDID: serviceDID,
 		Spaces:     []string{n.Space},
@@ -60,7 +80,12 @@ func setup(t *testing.T) *fixture {
 	t.Cleanup(hs.Close)
 	s.PublicURL = hs.URL
 	n.RegisterService(serviceDID, SyncerFragment, hs.URL)
-	return &fixture{net: n, srv: s, url: hs.URL, alice: alice, bob: bob, mallory: mallory}
+	return &fixture{net: n, srv: s, url: hs.URL, alice: accts[0], bob: accts[1], mallory: accts[2], client: client}
+}
+
+func vector(text string) []float32 {
+	v, _ := embed.Hashing{Dims: model.Dims}.Embed(context.Background(), []string{text})
+	return v[0]
 }
 
 func memory(text string, tags ...string) map[string]any {
@@ -68,20 +93,36 @@ func memory(text string, tags ...string) map[string]any {
 	if len(tags) > 0 {
 		m["tags"] = tags
 	}
+	m["embedding"] = lex.EmbeddingRecord(model, vector(lex.EmbedText("", text, tags)))
 	return m
 }
 
-// get calls the appview, signing with a's credential for the given audience
+func searchParams(spaceURI, q string) url.Values {
+	return url.Values{
+		"space": {spaceURI}, "q": {q}, "vector": {lex.EncodeQueryVector(vector(q))},
+		"model": {model.Model}, "modelDigest": {model.ModelDigest},
+	}
+}
+
+// do calls a base URL, signing with a's credential for the given audience
 // when a is set.
-func (f *fixture) get(t *testing.T, a *spacetest.Account, audience, nsid string, params url.Values) (int, map[string]any) {
+func do(t *testing.T, n *spacetest.Net, base, method string, a *spacetest.Account, audience, nsid string, params url.Values, body any) (int, []byte) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodGet, f.url+"/xrpc/"+nsid+"?"+params.Encode(), nil)
+	var rd io.Reader
+	if body != nil {
+		raw, _ := json.Marshal(body)
+		rd = bytes.NewReader(raw)
+	}
+	req, _ := http.NewRequest(method, base+"/xrpc/"+nsid+"?"+params.Encode(), rd)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if a != nil {
-		c, err := spaceclient.New(f.net.Session(a), f.net.Dir, nil)
+		c, err := spaceclient.New(n.Session(a), n.Dir, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		h, err := c.SignedHeaders(context.Background(), f.net.Space, audience)
+		h, err := c.SignedHeaders(context.Background(), n.Space, audience)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -94,9 +135,16 @@ func (f *fixture) get(t *testing.T, a *spacetest.Account, audience, nsid string,
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, raw
+}
+
+func (f *fixture) get(t *testing.T, a *spacetest.Account, audience, nsid string, params url.Values) (int, map[string]any) {
+	t.Helper()
+	status, raw := do(t, f.net, f.url, http.MethodGet, a, audience, nsid, params, nil)
 	var body map[string]any
-	_ = json.NewDecoder(resp.Body).Decode(&body)
-	return resp.StatusCode, body
+	_ = json.Unmarshal(raw, &body)
+	return status, body
 }
 
 func memories(body map[string]any) []map[string]any {
@@ -114,21 +162,26 @@ func TestMemberSearchesTheSpace(t *testing.T) {
 	ctx := context.Background()
 	f.net.Put(f.alice, indexer.Collection, "a1", memory("pop1 deploys go through the deploy repo workflow", "infra"))
 	f.net.Put(f.bob, indexer.Collection, "b1", memory("hailey prefers short answers", "prefs"))
+	f.net.Put(f.bob, indexer.Collection, "b2", map[string]any{"$type": indexer.Collection, "text": "no vector", "createdAt": time.Now().UTC().Format(time.RFC3339)})
 	if err := f.srv.Indexer.SyncSpace(ctx, f.net.Space); err != nil {
 		t.Fatal(err)
 	}
 
 	// Bob finds what Alice wrote.
-	status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", url.Values{"space": {f.net.Space}, "q": {"deploy workflow"}, "limit": {"1"}})
+	p := searchParams(f.net.Space, "deploy workflow")
+	p.Set("limit", "1")
+	status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", p)
 	if status != 200 {
 		t.Fatalf("search: %d %v", status, body)
 	}
 	ms := memories(body)
-	if len(ms) != 1 || ms[0]["author"] != f.alice.DID || ms[0]["similarity"].(float64) <= 0 {
+	if len(ms) != 1 || ms[0]["author"] != f.alice.DID || ms[0]["similarity"].(float64) <= 0 || body["approximate"] != nil {
 		t.Fatalf("search results: %v", body)
 	}
 
-	status, body = f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", url.Values{"space": {f.net.Space}, "q": {"anything"}, "tags": {"prefs"}})
+	p = searchParams(f.net.Space, "anything")
+	p["tags"] = []string{"prefs"}
+	status, body = f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", p)
 	if status != 200 || len(memories(body)) != 1 || memories(body)[0]["author"] != f.bob.DID {
 		t.Fatalf("tag-filtered search: %d %v", status, body)
 	}
@@ -151,12 +204,31 @@ func TestMemberSearchesTheSpace(t *testing.T) {
 	if status != 200 || len(memories(body)) != 1 || body["cursor"] != nil {
 		t.Fatalf("listMemories page 2: %d %v", status, body)
 	}
+
+	// Status reports the model and the memory without a vector.
+	status, body = f.get(t, f.alice, serviceDID, "garden.engram.getSpaceStatus", url.Values{"space": {f.net.Space}})
+	sk, _ := body["skipped"].([]any)
+	if status != 200 || body["memories"].(float64) != 2 || len(sk) != 1 || body["active"].(map[string]any)["model"] != model.Model {
+		t.Fatalf("status: %d %v", status, body)
+	}
+
+	// A query from another model is refused with a clear error.
+	p = searchParams(f.net.Space, "x")
+	p.Set("modelDigest", "sha256:other")
+	if status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", p); status != 400 || body["error"] != "ModelMismatch" {
+		t.Fatalf("wrong model: %d %v", status, body)
+	}
+
+	// Warming is accepted.
+	if status, raw := do(t, f.net, f.url, http.MethodPost, f.bob, serviceDID, "garden.engram.warmSpace", nil, map[string]string{"space": f.net.Space}); status != 200 {
+		t.Fatalf("warm: %d %s", status, raw)
+	}
 }
 
 func TestReaderAuth(t *testing.T) {
 	t.Parallel()
 	f := setup(t)
-	q := url.Values{"space": {f.net.Space}, "q": {"x"}}
+	q := searchParams(f.net.Space, "x")
 
 	if status, body := f.get(t, nil, "", "garden.engram.searchMemories", q); status != 401 {
 		t.Fatalf("no credential: %d %v", status, body)
@@ -165,11 +237,14 @@ func TestReaderAuth(t *testing.T) {
 	if status, body := f.get(t, f.alice, f.alice.DID, "garden.engram.searchMemories", q); status != 401 || body["error"] != "BadSpaceSignature" {
 		t.Fatalf("wrong audience: %d %v", status, body)
 	}
-	if status, body := f.get(t, f.alice, serviceDID, "garden.engram.searchMemories", url.Values{"space": {"at://did:plc:x/space/garden.engram.space/other"}, "q": {"x"}}); status != 400 || body["error"] != "UnknownSpace" {
+	if status, body := f.get(t, f.alice, serviceDID, "garden.engram.searchMemories", searchParams("at://did:plc:x/space/garden.engram.space/other", "x")); status != 400 || body["error"] != "UnknownSpace" {
 		t.Fatalf("unindexed space: %d %v", status, body)
 	}
-	if status, body := f.get(t, f.alice, serviceDID, "garden.engram.searchMemories", url.Values{"space": {f.net.Space}}); status != 400 {
-		t.Fatalf("missing q: %d %v", status, body)
+	if status, body := f.get(t, f.alice, serviceDID, "garden.engram.searchMemories", url.Values{"space": {f.net.Space}, "q": {"x"}}); status != 400 {
+		t.Fatalf("missing vector: %d %v", status, body)
+	}
+	if status, _ := f.get(t, nil, "", "garden.engram.exportSpace", url.Values{"space": {f.net.Space}}); status != 401 {
+		t.Fatalf("export without a credential: %d", status)
 	}
 
 	// A tampered signature fails.
@@ -210,7 +285,7 @@ func TestNotificationsKeepTheIndexCurrent(t *testing.T) {
 		t.Fatalf("delivery statuses: %v", got)
 	}
 	f.srv.Jobs.Wait()
-	status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", url.Values{"space": {f.net.Space}, "q": {"milk"}})
+	status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", searchParams(f.net.Space, "milk"))
 	if status != 200 || len(memories(body)) != 1 {
 		t.Fatalf("notified write not indexed: %d %v", status, body)
 	}
@@ -236,7 +311,7 @@ func TestNotificationsKeepTheIndexCurrent(t *testing.T) {
 	if s := f.net.Deliver(svc, "com.atproto.space.notifySpaceDeleted", del, f.net.ServiceAuth(svc, "com.atproto.space.notifySpaceDeleted")); s != 200 {
 		t.Fatalf("notifySpaceDeleted: %d", s)
 	}
-	if status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", url.Values{"space": {f.net.Space}, "q": {"milk"}}); status != 400 || body["error"] != "UnknownSpace" {
+	if status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", searchParams(f.net.Space, "milk")); status != 400 || body["error"] != "UnknownSpace" {
 		t.Fatalf("read after deletion: %d %v", status, body)
 	}
 }
@@ -244,13 +319,14 @@ func TestNotificationsKeepTheIndexCurrent(t *testing.T) {
 func TestRunSyncsAndRegisters(t *testing.T) {
 	t.Parallel()
 	f := setup(t)
+	f.srv.Blob = blob.Dir{Root: t.TempDir()}
 	f.net.Put(f.alice, indexer.Collection, "a1", memory("polled in"))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { f.srv.Run(ctx, time.Hour, true); close(done) }()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", url.Values{"space": {f.net.Space}, "q": {"polled"}})
+		status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", searchParams(f.net.Space, "polled"))
 		if status == 200 && len(memories(body)) == 1 && len(f.net.Registrations()) == 1 {
 			break
 		}
@@ -261,6 +337,139 @@ func TestRunSyncsAndRegisters(t *testing.T) {
 	}
 	cancel()
 	<-done
+	if reg, err := routing.LoadRegistry(context.Background(), f.srv.Blob); err != nil || reg == nil || len(reg.Spaces) != 1 {
+		t.Fatalf("registry: %+v %v", reg, err)
+	}
+}
+
+func TestExportThenImportElsewhere(t *testing.T) {
+	t.Parallel()
+	f := setup(t)
+	ctx := context.Background()
+	f.net.Put(f.alice, indexer.Collection, "a1", memory("exported memory about tea"))
+	if err := f.srv.Indexer.SyncSpace(ctx, f.net.Space); err != nil {
+		t.Fatal(err)
+	}
+	status, tarball := do(t, f.net, f.url, http.MethodGet, f.bob, serviceDID, "garden.engram.exportSpace", url.Values{"space": {f.net.Space}}, nil)
+	if status != 200 || len(tarball) == 0 {
+		t.Fatalf("export: %d", status)
+	}
+	other := newNode(t, blob.Dir{Root: t.TempDir()}, nil)
+	if _, err := other.Import(ctx, bytes.NewReader(tarball)); err != nil {
+		t.Fatal(err)
+	}
+	res, err := other.Search(ctx, f.net.Space, spacestore.SearchQuery{Vector: vector("tea"), Model: model, Limit: 3})
+	if err != nil || len(res.Hits) != 1 || res.Hits[0].Text != "exported memory about tea" {
+		t.Fatalf("search on the importing appview: %+v %v", res, err)
+	}
+}
+
+// TestForwardingToOwner runs two nodes: requests to the node that doesn't
+// own the space are forwarded to the one that does.
+func TestForwardingToOwner(t *testing.T) {
+	t.Parallel()
+	n, client, accts := newNet(t)
+	alice, bob := accts[0], accts[1]
+	bs := blob.Dir{Root: t.TempDir()}
+	var handlers [2]http.Handler
+	var servers [2]*httptest.Server
+	for i := range servers {
+		servers[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handlers[i].ServeHTTP(w, r) }))
+		t.Cleanup(servers[i].Close)
+	}
+	nodes := []routing.Node{{ID: "a", URL: servers[0].URL}, {ID: "b", URL: servers[1].URL}}
+	var srvs [2]*Server
+	for i, id := range []string{"a", "b"} {
+		ring := &routing.Ring{Self: id, Nodes: nodes, Epoch: 1}
+		st := newNode(t, bs, ring.Lease)
+		srvs[i] = &Server{
+			Store: st, Indexer: &indexer.Indexer{Store: st, Client: client, Dir: n.Dir},
+			Dir: n.Dir, ServiceDID: serviceDID, Spaces: []string{n.Space}, Ring: ring,
+		}
+		handlers[i] = srvs[i].Handler()
+	}
+	ownerIdx := 0
+	if srvs[1].Ring.Owns(n.Space) {
+		ownerIdx = 1
+	}
+	owner, other := srvs[ownerIdx], servers[1-ownerIdx]
+	n.RegisterService(serviceDID, SyncerFragment, other.URL) // notifications arrive at the non-owner
+
+	n.Put(alice, indexer.Collection, "a1", memory("forwarded memory about kites"))
+	if _, err := owner.Indexer.Register(context.Background(), n.Space, owner.ServiceID()); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.DeliverWrite(n.Authority, ""); len(got) != 1 || got[0] != 200 {
+		t.Fatalf("config notification via the non-owner: %v", got)
+	}
+	if got := n.DeliverWrite(alice, ""); len(got) != 1 || got[0] != 200 {
+		t.Fatalf("notification via the non-owner: %v", got)
+	}
+	owner.Jobs.Wait()
+	srvs[1-ownerIdx].Jobs.Wait()
+	// The non-owner never loaded the space.
+	if _, err := srvs[1-ownerIdx].Store.Status(context.Background(), n.Space); err == nil {
+		t.Fatal("the non-owner loaded the space")
+	}
+	var body map[string]any
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		status, raw := do(t, n, other.URL, http.MethodGet, bob, serviceDID, "garden.engram.searchMemories", searchParams(n.Space, "kites"), nil)
+		_ = json.Unmarshal(raw, &body)
+		if status == 200 && len(memories(body)) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("forwarded search: %d %s", status, raw)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// A request already forwarded once isn't forwarded again.
+	req, _ := http.NewRequest(http.MethodGet, other.URL+"/xrpc/garden.engram.searchMemories?"+searchParams(n.Space, "x").Encode(), nil)
+	req.Header.Set(ForwardedHeader, "z")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("forwarding loop guard: %d", resp.StatusCode)
+	}
+}
+
+// TestNotificationFloodIsBounded holds a space at its sync cap: further
+// notifications start no work, but leave a follow-up so their writes still
+// get indexed.
+func TestNotificationFloodIsBounded(t *testing.T) {
+	t.Parallel()
+	f := setup(t)
+	f.srv.MaxSpaceSyncs = 1
+	if _, err := f.srv.Indexer.Register(context.Background(), f.net.Space, f.srv.ServiceID()); err != nil {
+		t.Fatal(err)
+	}
+	release, ok := f.srv.trySpaceSlot(f.net.Space)
+	if !ok {
+		t.Fatal("no slot")
+	}
+	f.net.Put(f.alice, indexer.Collection, "a1", memory("flooded memory about otters"))
+	for range 20 {
+		if got := f.net.DeliverWrite(f.alice, ""); got[0] != 200 {
+			t.Fatalf("delivery: %v", got)
+		}
+	}
+	f.srv.Jobs.Wait() // nothing started while the slot was held
+	if _, ok := f.srv.followUp.Load(f.net.Space); !ok {
+		t.Fatal("no follow-up recorded")
+	}
+	release()
+	// The next notification runs, and its follow-up syncs the space.
+	f.net.Put(f.bob, indexer.Collection, "b1", memory("later memory"))
+	f.net.DeliverWrite(f.bob, "")
+	f.srv.Jobs.Wait()
+	status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", searchParams(f.net.Space, "otters"))
+	if status != 200 || len(memories(body)) == 0 || memories(body)[0]["text"] != "flooded memory about otters" {
+		t.Fatalf("flooded write not indexed: %d %v", status, body)
+	}
 }
 
 func TestDIDDocument(t *testing.T) {

@@ -24,6 +24,36 @@
           "description": "Search results only: cosine similarity to the query, scaled to 0-1000."
         }
       }
+    },
+    "model": {
+      "type": "object",
+      "description": "An embedding model, identified exactly. Vectors are comparable only when all three fields match.",
+      "required": ["model", "modelDigest", "dims"],
+      "properties": {
+        "model": { "type": "string", "maxLength": 256, "description": "The model's name, such as nomic-embed-text." },
+        "modelDigest": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Pins the exact model build, such as Ollama's sha256 digest of the model. A name can point to different weights over time."
+        },
+        "dims": { "type": "integer", "minimum": 1, "maximum": 16000 }
+      }
+    },
+    "embedding": {
+      "type": "object",
+      "description": "A vector for a memory, computed by its author from the memory's text and tags (with the space's document prefix).",
+      "required": ["model", "modelDigest", "dims", "encoding", "vector"],
+      "properties": {
+        "model": { "type": "string", "maxLength": 256 },
+        "modelDigest": { "type": "string", "maxLength": 256 },
+        "dims": { "type": "integer", "minimum": 1, "maximum": 16000 },
+        "encoding": {
+          "type": "string",
+          "knownValues": ["f16le"],
+          "description": "f16le: little-endian IEEE half precision, 2 bytes per dimension."
+        },
+        "vector": { "type": "bytes", "maxLength": 32000 }
+      }
     }
   }
 }
