@@ -48,8 +48,10 @@ type Server struct {
 	ServiceDID string
 	// PublicURL is where this service is reachable, for its did:web document.
 	PublicURL string
-	// Spaces are the spaces this service indexes.
-	Spaces []string
+	// Spaces are the spaces the operator configured. Members can register
+	// more with garden.engram.registerSpace when OpenRegistration is set.
+	Spaces           []string
+	OpenRegistration bool
 	// Ring decides which node owns each space. Nil means a single node.
 	Ring *routing.Ring
 	// Blob, when set, holds the registry of indexed spaces.
@@ -71,6 +73,18 @@ type Server struct {
 	nodeSem  chan struct{}
 	spaceSem sync.Map // space -> chan struct{}
 	followUp sync.Map // space -> true: notifications arrived while at the cap
+
+	regMu       sync.RWMutex
+	registered  map[string]bool // spaces registered with registerSpace
+	lastRefresh time.Time       // when registrations were last reread for an unknown space
+	wakeOnce    sync.Once
+	wakeCh      chan struct{} // wakes the background loop early
+}
+
+// wake is the channel that starts a background tick early.
+func (s *Server) wake() chan struct{} {
+	s.wakeOnce.Do(func() { s.wakeCh = make(chan struct{}, 1) })
+	return s.wakeCh
 }
 
 // trySpaceSlot takes one of the space's notified-sync slots without
@@ -136,6 +150,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /xrpc/garden.engram.getSpaceStatus", s.owned(q, s.handleStatus))
 	mux.HandleFunc("GET /xrpc/garden.engram.exportSpace", s.owned(q, s.handleExport))
 	mux.HandleFunc("POST /xrpc/garden.engram.warmSpace", s.ownedBody(s.handleWarm))
+	mux.HandleFunc("POST /xrpc/garden.engram.registerSpace", s.ownedBody(s.handleRegister))
 	mux.HandleFunc("POST /xrpc/com.atproto.space.notifyWrite", s.ownedBody(s.handleNotifyWrite))
 	mux.HandleFunc("POST /xrpc/com.atproto.space.notifySpaceDeleted", s.ownedBody(s.handleNotifySpaceDeleted))
 	mux.HandleFunc("GET /.well-known/did.json", s.handleDIDDoc)
@@ -152,9 +167,21 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) owned(spaceOf func(*http.Request) string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sp := spaceOf(r)
-		if sp == "" || !s.indexes(sp) {
+		if sp == "" {
 			h(w, r) // the handler reports the error
 			return
+		}
+		if !s.knows(r.Context(), sp) {
+			// Unknown spaces are reported by the handler, except
+			// registrations, which go to the node that will own the space.
+			if r.URL.Path != "/xrpc/garden.engram.registerSpace" {
+				h(w, r)
+				return
+			}
+			if _, err := space.ParseRef(sp); err != nil {
+				h(w, r)
+				return
+			}
 		}
 		owner := s.ring().Owner(sp)
 		if owner.ID == s.ring().Self {
@@ -284,6 +311,22 @@ func (s *Server) authorizeReader(r *http.Request, spaceURI string, checkDeleted 
 	if !s.indexes(spaceURI) {
 		return errf(http.StatusBadRequest, "UnknownSpace", "this service does not index %s", spaceURI)
 	}
+	if err := s.verifyCredential(r, spaceURI); err != nil {
+		return err
+	}
+	if checkDeleted {
+		if deleted, err := s.Store.SpaceDeleted(r.Context(), spaceURI); err != nil {
+			return err
+		} else if deleted {
+			return errf(http.StatusBadRequest, "UnknownSpace", "space %s was deleted", spaceURI)
+		}
+	}
+	return nil
+}
+
+// verifyCredential checks the request presents a valid credential for the
+// space, signed for this service.
+func (s *Server) verifyCredential(r *http.Request, spaceURI string) error {
 	h := r.Header
 	for _, name := range []string{"Authorization", space.HeaderSpaceAudience} {
 		if len(h.Values(name)) != 1 {
@@ -311,13 +354,6 @@ func (s *Server) authorizeReader(r *http.Request, spaceURI string, checkDeleted 
 	if _, err := space.VerifySpaceSignature(h, tok.Payload.Cnf.Kid); err != nil {
 		return errf(http.StatusUnauthorized, "BadSpaceSignature", "%v", err)
 	}
-	if checkDeleted {
-		if deleted, err := s.Store.SpaceDeleted(r.Context(), spaceURI); err != nil {
-			return err
-		} else if deleted {
-			return errf(http.StatusBadRequest, "UnknownSpace", "space %s was deleted", spaceURI)
-		}
-	}
 	return nil
 }
 
@@ -327,7 +363,9 @@ func (s *Server) indexes(spaceURI string) bool {
 			return true
 		}
 	}
-	return false
+	s.regMu.RLock()
+	defer s.regMu.RUnlock()
+	return s.registered[spaceURI]
 }
 
 // ---- reads ----
@@ -739,12 +777,16 @@ func (s *Server) handleDIDDoc(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Run(ctx context.Context, poll time.Duration, register bool) {
 	renewAt := map[string]time.Time{}
 	tick := func() {
+		if err := s.LoadRegistrations(ctx); err != nil {
+			s.log().Warn("reading space registrations failed", "err", err)
+		}
+		spaces := s.allSpaces()
 		if s.Blob != nil {
-			if _, err := s.ring().WriteRegistry(ctx, s.Blob, s.Spaces); err != nil {
+			if _, err := s.ring().WriteRegistry(ctx, s.Blob, spaces); err != nil {
 				s.log().Warn("writing the registry failed", "err", err)
 			}
 		}
-		for _, sp := range s.Spaces {
+		for _, sp := range spaces {
 			if !s.ring().Owns(sp) {
 				continue
 			}
@@ -770,6 +812,8 @@ func (s *Server) Run(ctx context.Context, poll time.Duration, register bool) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			tick()
+		case <-s.wake():
 			tick()
 		}
 	}

@@ -129,8 +129,16 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	spaces := config.List("ENGRAM_SPACES")
-	if len(spaces) == 0 {
-		return errors.New("ENGRAM_SPACES is required: comma-separated space URIs to index")
+	var openRegistration bool
+	switch reg := config.Get("ENGRAM_REGISTRATION", "open"); reg {
+	case "open":
+		openRegistration = true
+	case "closed":
+		if len(spaces) == 0 {
+			return errors.New("ENGRAM_SPACES is required when ENGRAM_REGISTRATION=closed: comma-separated space URIs to index")
+		}
+	default:
+		return fmt.Errorf("ENGRAM_REGISTRATION must be open or closed, not %q", reg)
 	}
 	for _, sp := range spaces {
 		if _, err := space.ParseRef(sp); err != nil {
@@ -170,6 +178,11 @@ func run(log *slog.Logger) error {
 		Spaces:     spaces,
 		Ring:       ring,
 		Blob:       bs,
+
+		OpenRegistration: openRegistration,
+	}
+	if err := srv.LoadRegistrations(ctx); err != nil {
+		return fmt.Errorf("reading registered spaces: %w", err)
 	}
 
 	// Notifications need a public endpoint; without one, polling alone keeps
@@ -198,7 +211,7 @@ func run(log *slog.Logger) error {
 		_ = hs.Shutdown(shutdown)
 	}()
 	log.Info("engram-appview listening", "addr", addr, "service", srv.ServiceID(), "account", client.DID(),
-		"spaces", spaces, "node", ring.Self, "nodes", len(ring.Nodes), "epoch", ring.Epoch)
+		"spaces", srv.Spaces, "indexed", len(srv.IndexedSpaces()), "registration", openRegistration, "node", ring.Self, "nodes", len(ring.Nodes), "epoch", ring.Epoch)
 	err = hs.ListenAndServe()
 	// Stop the background loops (if the server failed on its own), wait
 	// for notification syncs, then publish every buffer.
