@@ -167,6 +167,15 @@ unused, alive indefinitely. Cocoon ends a confidential client's session after
   refused it; grant again).
 - `garden.engram.registerSpace` is removed. Granting registers the space.
 
+"Lapsed" is kept in memory by the node that owns the space, which is the
+node whose syncs use the grant and the node `getSpaceStatus` is forwarded
+to. A restarted node reports `granted` until its next sync tries the grant.
+
+Revoking a session waits for any use of it on the same node. A token
+refresh on another node can still save a session again after it's been
+revoked, so the coordinator node also sweeps sessions no grant uses
+(older than ten minutes): it revokes them and deletes them.
+
 ### Configuration
 
 | Variable | |

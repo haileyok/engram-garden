@@ -93,7 +93,7 @@ func (a *fakeAuth) Resume(_ context.Context, did syntax.DID, sid string) (*atcli
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.sessions[sid] != did.String() || a.revoked[sid] {
-		return nil, errors.New("no such session")
+		return nil, fmt.Errorf("loading OAuth session: %w", blob.ErrNotFound)
 	}
 	c := a.net.Session(a.net.AccountByDID(did.String()))
 	if a.refused[sid] {
@@ -563,6 +563,42 @@ func TestSweepAbandonedSignIns(t *testing.T) {
 	}
 	if n := count(); n != 0 {
 		t.Fatalf("%d abandoned sign-in objects left", n)
+	}
+}
+
+// TestSweepUnusedSessions: an OAuth session no grant uses (say, one a
+// refresh saved again after it was revoked) is revoked and deleted; the
+// grant's own session stays.
+func TestSweepUnusedSessions(t *testing.T) {
+	t.Parallel()
+	f := grantFixture(t, true)
+	ctx := context.Background()
+	st := BlobAuthStore{f.srv.Blob}
+	authority := syntax.DID(f.net.Authority.DID)
+	for _, sid := range []string{"live", "orphan"} {
+		f.auth.sessions[sid] = authority.String()
+		if err := st.SaveSession(ctx, oauth.ClientSessionData{AccountDID: authority, SessionID: sid}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.grants.Put(ctx, Grant{Space: f.net.Space, DID: authority.String(), SessionID: "live", GrantedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	// Recent sessions may belong to a grant still being made.
+	if err := f.grants.Sweep(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetSession(ctx, authority, "orphan"); err != nil || f.auth.isRevoked("orphan") {
+		t.Fatalf("swept a recent session: %v", err)
+	}
+	if err := f.grants.Sweep(ctx, time.Now().Add(pendingTTL+time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetSession(ctx, authority, "orphan"); err == nil || !f.auth.isRevoked("orphan") {
+		t.Fatalf("unused session left: %v revoked=%v", err, f.auth.isRevoked("orphan"))
+	}
+	if _, err := st.GetSession(ctx, authority, "live"); err != nil || f.auth.isRevoked("live") {
+		t.Fatalf("swept the grant's session: %v", err)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bluesky-social/indigo/atproto/atclient"
+	"github.com/bluesky-social/indigo/atproto/auth/oauth"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 
 	"github.com/haileyok/engram-garden/internal/blob"
@@ -180,7 +181,11 @@ func (g *Grants) DelegationToken(ctx context.Context, spaceURI string) (string, 
 	defer l.Unlock()
 	api, err := g.Auth.Resume(ctx, syntax.DID(gr.DID), gr.SessionID)
 	if err != nil {
-		g.setLapsed(spaceURI, "the grant's sign-in is gone: "+err.Error())
+		// A missing session won't come back; other failures (storage,
+		// network) may be passing.
+		if errors.Is(err, blob.ErrNotFound) {
+			g.setLapsed(spaceURI, "the grant's sign-in is gone")
+		}
 		return "", fmt.Errorf("resuming the grant for %s: %w", spaceURI, err)
 	}
 	tok, err := spaceclient.SessionDelegator{Session: api}.DelegationToken(ctx, spaceURI)
@@ -192,6 +197,16 @@ func (g *Grants) DelegationToken(ctx context.Context, spaceURI string) (string, 
 	}
 	g.setLapsed(spaceURI, "")
 	return tok, nil
+}
+
+// Revoke revokes a session and forgets it. It waits for any use of the
+// session on this node, so a token refresh can't save it again after it's
+// gone. (Another node's refresh can; Sweep catches that.)
+func (g *Grants) Revoke(ctx context.Context, mode string, did syntax.DID, sessionID string) error {
+	l := g.sessionLock(sessionID)
+	l.Lock()
+	defer l.Unlock()
+	return g.Auth.Revoke(ctx, mode, did, sessionID)
 }
 
 // refused reports whether the authority's servers refused the grant itself,
@@ -254,9 +269,11 @@ func (g *Grants) savePending(ctx context.Context, p pending) error {
 	return blob.PutBytes(ctx, g.Blob, pendingKey(p.State), raw, false)
 }
 
-// Sweep deletes sign-ins nobody finished: their records here and the OAuth
-// client's, older than pendingTTL at now. A callback deletes its own; these
-// are the ones abandoned or refused at the authorization server.
+// Sweep clears what sign-ins leave behind, older than pendingTTL at now:
+//   - sign-ins nobody finished (abandoned or refused at the authorization
+//     server; a callback deletes its own);
+//   - OAuth sessions no grant uses, such as one a token refresh on another
+//     node saved again after it was revoked. They're revoked, then deleted.
 func (g *Grants) Sweep(ctx context.Context, now time.Time) error {
 	for _, prefix := range []string{pendingPrefix, requestPrefix} {
 		objs, err := g.Blob.List(ctx, prefix)
@@ -269,6 +286,52 @@ func (g *Grants) Sweep(ctx context.Context, now time.Time) error {
 					return err
 				}
 			}
+		}
+	}
+	return g.sweepSessions(ctx, now)
+}
+
+func (g *Grants) sweepSessions(ctx context.Context, now time.Time) error {
+	sessions, err := g.Blob.List(ctx, sessionPrefix)
+	if err != nil || len(sessions) == 0 {
+		return err
+	}
+	used := map[string]bool{}
+	grants, err := g.Blob.List(ctx, grantPrefix)
+	if err != nil {
+		return err
+	}
+	for _, o := range grants {
+		raw, err := blob.GetBytes(ctx, g.Blob, o.Key)
+		if errors.Is(err, blob.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		var gr Grant
+		if err := json.Unmarshal(raw, &gr); err != nil {
+			return fmt.Errorf("reading %s: %w", o.Key, err)
+		}
+		used[sessionKey(syntax.DID(gr.DID), gr.SessionID)] = true
+	}
+	for _, o := range sessions {
+		if used[o.Key] || now.Sub(o.Modified) <= pendingTTL {
+			continue
+		}
+		raw, err := blob.GetBytes(ctx, g.Blob, o.Key)
+		if errors.Is(err, blob.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		var sess oauth.ClientSessionData
+		if json.Unmarshal(raw, &sess) == nil && sess.SessionID != "" {
+			_ = g.Revoke(ctx, modeGrant, sess.AccountDID, sess.SessionID)
+		}
+		if err := g.Blob.Delete(ctx, o.Key); err != nil {
+			return err
 		}
 	}
 	return nil

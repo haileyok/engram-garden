@@ -166,6 +166,14 @@ func (s *Server) completeGrant(w http.ResponseWriter, r *http.Request, p *pendin
 		s.writePageErr(w, err)
 		return
 	}
+	// Record the space as indexed first: a grant without a registration
+	// would never be synced, while a registration without a grant only
+	// reports that access is missing.
+	if err := s.register(ctx, p.Space); err != nil {
+		discard()
+		s.writePageErr(w, err)
+		return
+	}
 	g := Grant{Space: p.Space, DID: res.DID.String(), SessionID: res.SessionID, GrantedAt: time.Now().UTC()}
 	if err := s.Grants.Put(ctx, g); err != nil {
 		discard()
@@ -176,10 +184,7 @@ func (s *Server) completeGrant(w http.ResponseWriter, r *http.Request, p *pendin
 	if old != nil && old.SessionID != g.SessionID {
 		s.revoke(ctx, modeGrant, syntax.DID(old.DID), old.SessionID)
 	}
-	if err := s.register(ctx, p.Space); err != nil {
-		s.writePageErr(w, err)
-		return
-	}
+	s.startSync(p.Space)
 	s.log().Info("space granted", "space", p.Space, "by", g.DID)
 	s.finish(w, r, p.Return, http.StatusOK, "granted", "")
 }
@@ -205,8 +210,7 @@ func (s *Server) completeStop(w http.ResponseWriter, r *http.Request, p *pending
 	s.finish(w, r, p.Return, http.StatusOK, "stopped", "")
 }
 
-// register records the space as indexed and starts syncing it when this
-// node owns it. Other nodes pick it up at their next poll.
+// register records the space as indexed.
 func (s *Server) register(ctx context.Context, spaceURI string) error {
 	if s.Blob != nil {
 		raw, _ := json.Marshal(registration{Space: spaceURI, RegisteredAt: time.Now().UTC()})
@@ -215,8 +219,14 @@ func (s *Server) register(ctx context.Context, spaceURI string) error {
 		}
 	}
 	s.addRegistered(spaceURI)
+	return nil
+}
+
+// startSync starts syncing a newly granted space when this node owns it.
+// Other nodes pick it up at their next poll.
+func (s *Server) startSync(spaceURI string) {
 	if !s.ring().Owns(spaceURI) {
-		return nil
+		return
 	}
 	// Have the background loop register for notifications, and index the
 	// space now rather than at the next poll.
@@ -238,7 +248,6 @@ func (s *Server) register(ctx context.Context, spaceURI string) error {
 		defer releaseNode()
 		s.syncSpaceOnce(ctx, spaceURI)
 	}()
-	return nil
 }
 
 // checkGrant gets a credential for the space with a new grant's session.
@@ -258,7 +267,7 @@ func (s *Server) checkGrant(ctx context.Context, spaceURI string, res *AuthResul
 }
 
 func (s *Server) revoke(ctx context.Context, mode string, did syntax.DID, sessionID string) {
-	if err := s.Grants.Auth.Revoke(ctx, mode, did, sessionID); err != nil {
+	if err := s.Grants.Revoke(ctx, mode, did, sessionID); err != nil {
 		s.log().Warn("revoking a sign-in failed", "did", did, "err", err)
 	}
 }

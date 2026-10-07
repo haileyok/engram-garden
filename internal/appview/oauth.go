@@ -192,8 +192,10 @@ func hashKey(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
+const sessionPrefix = "oauth/sessions/"
+
 func sessionKey(did syntax.DID, sessionID string) string {
-	return "oauth/sessions/" + hashKey(did.String()) + "/" + hashKey(sessionID) + ".json"
+	return sessionPrefix + hashKey(did.String()) + "/" + hashKey(sessionID) + ".json"
 }
 
 const requestPrefix = "oauth/requests/"
