@@ -1,0 +1,30 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.registerSpace",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Ask the appview to index a space. Any member may ask, with the same authentication as garden.engram.searchMemories. The appview's own account must be a member of the space: adding it is how the space's authority agrees to have the space indexed. Registering a space that's already indexed succeeds and changes nothing.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["space"],
+          "properties": { "space": { "type": "string", "description": "The space URI, in canonical form." } }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["space"],
+          "properties": { "space": { "type": "string" } }
+        }
+      },
+      "errors": [
+        { "name": "RegistrationClosed", "description": "This appview indexes only the spaces its operator configures." },
+        { "name": "NotAMember", "description": "The appview's account isn't a member of the space." }
+      ]
+    }
+  }
+}

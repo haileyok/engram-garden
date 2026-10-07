@@ -62,8 +62,11 @@ type Net struct {
 	accounts      map[string]*Account
 	members       map[string]bool
 	registrations map[string]bool
-	clock         *syntax.TIDClock
-	calls         map[string]int
+	// extra holds spaces created with createSpace, beyond Space: their
+	// members. Only Space supports credentials and records.
+	extra map[string]map[string]bool
+	clock *syntax.TIDClock
+	calls map[string]int
 
 	// Tamper knobs.
 	CorruptCommits bool // sign commits over the wrong contents
@@ -78,6 +81,7 @@ func New(t testing.TB) *Net {
 		accounts:      map[string]*Account{},
 		members:       map[string]bool{},
 		registrations: map[string]bool{},
+		extra:         map[string]map[string]bool{},
 		clock:         syntax.NewTIDClock(0),
 		calls:         map[string]int{},
 	}
@@ -574,8 +578,163 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		w.Header().Set("Content-Type", "application/vnd.ipld.car")
 		_, _ = w.Write(buf.Bytes())
 		return nil, nil
+	case "com.atproto.space.listSpaces":
+		a := n.account(r.Header.Get("X-Test-Did"))
+		if a == nil {
+			return nil, &xerr{401, "AuthRequired", "no session"}
+		}
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		// Like a PDS: the spaces the account has a repo in or governs.
+		uris := []string{}
+		if a.rev != "" || a.DID == n.Authority.DID {
+			uris = append(uris, n.Space)
+		}
+		for uri := range n.extra {
+			if ref, _ := space.ParseRef(uri); ref.Authority == a.DID {
+				uris = append(uris, uri)
+			}
+		}
+		sort.Strings(uris)
+		out := []map[string]string{}
+		for _, u := range uris {
+			if t := q.Get("spaceType"); t != "" {
+				if ref, _ := space.ParseRef(u); ref.Type != t {
+					continue
+				}
+			}
+			out = append(out, map[string]string{"uri": u})
+		}
+		return map[string]any{"spaces": out}, nil
+
+	case "com.atproto.simplespace.createSpace":
+		a := n.account(r.Header.Get("X-Test-Did"))
+		if a == nil {
+			return nil, &xerr{401, "AuthRequired", "no session"}
+		}
+		var body struct {
+			SpaceType string `json:"spaceType"`
+			Skey      string `json:"skey"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SpaceType == "" {
+			return nil, &xerr{400, "InvalidRequest", "spaceType is required"}
+		}
+		if body.Skey == "" {
+			n.mu.Lock()
+			body.Skey = n.clock.Next().String()
+			n.mu.Unlock()
+		}
+		uri := "at://" + a.DID + "/space/" + body.SpaceType + "/" + body.Skey
+		if _, err := space.ParseRef(uri); err != nil {
+			return nil, &xerr{400, "InvalidRequest", err.Error()}
+		}
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		if _, ok := n.extra[uri]; ok || uri == n.Space {
+			return nil, &xerr{400, "SpaceAlreadyExists", "Space already exists"}
+		}
+		n.extra[uri] = map[string]bool{}
+		return map[string]string{"uri": uri}, nil
+
+	case "com.atproto.simplespace.getSpace", "com.atproto.simplespace.listMembers":
+		uri := q.Get("space")
+		members, e := n.ownedSpace(r, uri)
+		if e != nil {
+			return nil, e
+		}
+		if nsid == "com.atproto.simplespace.getSpace" {
+			policy := map[string]string{"$type": "com.atproto.simplespace.defs#memberListPolicy"}
+			return map[string]any{"uri": uri, "readPolicy": policy, "writePolicy": policy,
+				"appAccess": map[string]string{"$type": "com.atproto.simplespace.defs#open"}}, nil
+		}
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		dids := []string{}
+		for d, ok := range members {
+			if ok {
+				dids = append(dids, d)
+			}
+		}
+		sort.Strings(dids)
+		out := []map[string]any{}
+		for _, d := range dids {
+			out = append(out, map[string]any{"did": d, "read": true, "write": true})
+		}
+		return map[string]any{"members": out}, nil
+
+	case "com.atproto.simplespace.putMember", "com.atproto.simplespace.removeMember":
+		var body struct {
+			Space string `json:"space"`
+			Did   string `json:"did"`
+			Read  *bool  `json:"read"`
+			Write *bool  `json:"write"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			return nil, &xerr{400, "InvalidRequest", err.Error()}
+		}
+		if _, err := syntax.ParseDID(body.Did); err != nil {
+			return nil, &xerr{400, "InvalidRequest", "did must be a DID"}
+		}
+		members, e := n.ownedSpace(r, body.Space)
+		if e != nil {
+			return nil, e
+		}
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		if nsid == "com.atproto.simplespace.removeMember" {
+			delete(members, body.Did)
+			return map[string]any{}, nil
+		}
+		if body.Read == nil || body.Write == nil {
+			return nil, &xerr{400, "InvalidRequest", "Input must have the properties \"read\" and \"write\""}
+		}
+		members[body.Did] = *body.Read
+		return map[string]any{}, nil
 	}
 	return nil, &xerr{404, "MethodNotImplemented", nsid}
+}
+
+// ownedSpace checks the caller governs a space and returns its members.
+func (n *Net) ownedSpace(r *http.Request, uri string) (map[string]bool, *xerr) {
+	a := n.account(r.Header.Get("X-Test-Did"))
+	if a == nil {
+		return nil, &xerr{401, "AuthRequired", "no session"}
+	}
+	ref, err := space.ParseRef(uri)
+	if err != nil {
+		return nil, &xerr{400, "InvalidRequest", err.Error()}
+	}
+	if ref.Authority != a.DID {
+		return nil, &xerr{400, "NotSpaceOwner", "Not the space owner"}
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if uri == n.Space {
+		return n.members, nil
+	}
+	m, ok := n.extra[uri]
+	if !ok {
+		return nil, &xerr{400, "SpaceNotFound", "Space not found"}
+	}
+	return m, nil
+}
+
+// Members lists the DIDs that may read a space.
+func (n *Net) Members(uri string) []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	m := n.members
+	if uri != n.Space {
+		m = n.extra[uri]
+	}
+	var out []string
+	for d, ok := range m {
+		if ok {
+			out = append(out, d)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (n *Net) account(did string) *Account {

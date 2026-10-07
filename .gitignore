@@ -1,0 +1,5 @@
+node_modules/
+/internal/web/dist/app/
+/engram-data/
+/engram-cache/
+/engram-web-data/

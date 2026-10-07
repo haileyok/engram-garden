@@ -1,4 +1,4 @@
-.PHONY: build test lint fmt
+.PHONY: build test lint fmt web web-test
 
 build:
 	go build ./...
@@ -12,3 +12,11 @@ lint:
 
 fmt:
 	go fmt ./...
+
+# The web app's frontend, built into internal/web/dist/app for engram-web
+# to embed.
+web:
+	cd web && pnpm install --frozen-lockfile && pnpm build
+
+web-test:
+	cd web && pnpm test

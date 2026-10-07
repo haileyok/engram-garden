@@ -546,7 +546,10 @@ benchmark machine.
   are forwarded the same way, so sync and search for a space always run on
   the same node.
 - **Global state:** the list of indexed spaces and their owners is small,
-  and also rebuildable. Indexed spaces come from configuration, and each
+  and also rebuildable. Indexed spaces come from configuration plus the
+  spaces members registered with `garden.engram.registerSpace`, which are
+  write-once objects under `registered-spaces/` that every node rereads on
+  each tick and when asked about a space it doesn't know. Each
   owner renews its spaces' notification registrations every 12 hours or so
   regardless. The list lives in a single object
   (`registry-<epoch>-<generation>.json` at the bucket root, ordered like
@@ -651,7 +654,8 @@ document:
 7. **Export and import.**
 8. **Cluster index for very large spaces.**
 
-Afterwards: the web UI and live notifications.
+Afterwards: the web app (`engram-web`), with live updates that poll the
+appview while someone is watching a space.
 
 ## Open questions
 
