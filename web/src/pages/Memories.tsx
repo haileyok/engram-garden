@@ -28,7 +28,11 @@ export function Memories({ uri, onStatus }: { uri: string; onStatus: (s: SpaceSt
     api.memories(uri, filters).then(
       (r) => {
         if (cancelled) return;
-        setMemories(r.memories);
+        // Keep anything the live stream delivered while this page loaded.
+        setMemories((cur) => {
+          const page = new Set(r.memories.map((m) => m.uri));
+          return [...(cur ?? []).filter((m) => !page.has(m.uri)), ...r.memories];
+        });
         setCursor(r.cursor);
       },
       (e) => !cancelled && setError(describeError(e)),
@@ -47,9 +51,20 @@ export function Memories({ uri, onStatus }: { uri: string; onStatus: (s: SpaceSt
     setLive("connecting");
     const es = new EventSource(`/api/live?space=${encodeURIComponent(uri)}`);
     es.addEventListener("ready", () => setLive("live"));
-    es.addEventListener("status", (e) => onStatusRef.current(JSON.parse((e as MessageEvent).data)));
+    const parse = <T,>(e: Event): T | null => {
+      try {
+        return JSON.parse((e as MessageEvent).data) as T;
+      } catch {
+        return null;
+      }
+    };
+    es.addEventListener("status", (e) => {
+      const s = parse<SpaceStatus>(e);
+      if (s && typeof s.memories === "number") onStatusRef.current(s);
+    });
     es.addEventListener("memories", (e) => {
-      const { memories: incoming } = JSON.parse((e as MessageEvent).data) as { memories: Memory[] };
+      const incoming = parse<{ memories?: Memory[] }>(e)?.memories;
+      if (!Array.isArray(incoming)) return;
       setMemories((cur) => {
         const have = new Set((cur ?? []).map((m) => m.uri));
         return [...incoming.filter((m) => !have.has(m.uri)), ...(cur ?? [])];
@@ -74,7 +89,10 @@ export function Memories({ uri, onStatus }: { uri: string; onStatus: (s: SpaceSt
     setLoadingMore(true);
     try {
       const r = await api.memories(uri, filters, cursor);
-      setMemories((cur) => [...(cur ?? []), ...r.memories]);
+      setMemories((cur) => {
+        const have = new Set((cur ?? []).map((m) => m.uri));
+        return [...(cur ?? []), ...r.memories.filter((m) => !have.has(m.uri))];
+      });
       setCursor(r.cursor);
     } catch (e) {
       setError(describeError(e));

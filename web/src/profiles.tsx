@@ -20,9 +20,9 @@ function flush() {
       .then((r) => {
         for (const d of batch) handles.set(d, r.handles[d] ?? null);
       })
-      .catch(() => {
-        for (const d of batch) handles.set(d, null);
-      })
+      // A failed lookup isn't cached: the next page that shows these DIDs
+      // asks again.
+      .catch(() => {})
       .finally(() => listeners.forEach((l) => l()));
   }
 }

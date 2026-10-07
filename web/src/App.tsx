@@ -69,7 +69,12 @@ function Routes() {
   const { loc } = useRouter();
   const m = /^\/space\/([^/]+)\/([^/]+)\/?$/.exec(loc.path);
   if (m) {
-    const uri = spaceUri(decodeURIComponent(m[1]), decodeURIComponent(m[2]));
+    let uri: string;
+    try {
+      uri = spaceUri(decodeURIComponent(m[1]), decodeURIComponent(m[2]));
+    } catch {
+      return <p className="error">That isn't a valid space address.</p>;
+    }
     return <SpacePage key={uri} uri={uri} />;
   }
   if (loc.path === "/new") return <NewSpace />;
