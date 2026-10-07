@@ -1,0 +1,45 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.getSpaceStatus",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Summarize a space's index: its declared model, how many memories are indexed, and which authors have memories that weren't indexed because their vectors don't match the space's model. Same authentication as garden.engram.searchMemories.",
+      "parameters": {
+        "type": "params",
+        "required": ["space"],
+        "properties": { "space": { "type": "string", "description": "The space URI." } }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["memories", "skipped"],
+          "properties": {
+            "config": { "type": "unknown", "description": "The space's garden.engram.config, as last seen." },
+            "active": { "type": "ref", "ref": "garden.engram.defs#model" },
+            "building": { "type": "ref", "ref": "garden.engram.defs#model" },
+            "memories": { "type": "integer" },
+            "buildingMemories": {
+              "type": "integer",
+              "description": "During a model change: memories that already have a vector for the next model."
+            },
+            "skipped": {
+              "type": "array",
+              "items": { "type": "ref", "ref": "#skippedAuthor" }
+            }
+          }
+        }
+      },
+      "errors": [{ "name": "UnknownSpace", "description": "This service does not index the space." }]
+    },
+    "skippedAuthor": {
+      "type": "object",
+      "required": ["author", "count"],
+      "properties": {
+        "author": { "type": "string", "format": "did" },
+        "count": { "type": "integer" }
+      }
+    }
+  }
+}

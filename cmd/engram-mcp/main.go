@@ -1,5 +1,7 @@
 // Command engram-mcp gives one agent remember/recall tools over MCP (stdio)
-// for an Engram Garden memory space.
+// for an Engram Garden memory space. It embeds memories and queries itself,
+// with the model the space declares, through an OpenAI-compatible endpoint
+// (Ollama by default).
 package main
 
 import (
@@ -10,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/haileyok/cocoon/space"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -46,6 +49,10 @@ func run(log *slog.Logger) error {
 	}
 	// A did:web appview's DID follows from its host.
 	appviewDID := config.Get("ENGRAM_APPVIEW_DID", "did:web:"+u.Hostname())
+	provider, err := config.Provider()
+	if err != nil {
+		return err
+	}
 
 	dir := config.Directory()
 	session, err := config.Login(ctx, dir)
@@ -56,7 +63,15 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	tools := &mcpserver.Tools{Client: client, Space: spaceURI, AppviewURL: appviewURL, AppviewDID: appviewDID}
+	tools := &mcpserver.Tools{Client: client, Space: spaceURI, AppviewURL: appviewURL, AppviewDID: appviewDID, Provider: provider, Log: log}
+	if cfg, err := tools.Config(ctx, true); err != nil {
+		log.Warn("can't read the space's model yet", "err", err)
+	} else if _, err := provider.For(ctx, cfg.ModelInfo); err != nil {
+		log.Warn("the local embedding model doesn't match the space's; remember and recall will fail until it does", "err", err)
+	}
+	// Warm the space and keep this agent's memories embedded with the
+	// space's model(s), including during a model change.
+	go tools.Run(ctx, 15*time.Minute)
 	log.Info("engram-mcp ready", "account", client.DID(), "space", spaceURI, "appview", appviewURL)
 	return tools.NewServer().Run(ctx, &mcp.StdioTransport{})
 }

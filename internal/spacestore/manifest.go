@@ -13,39 +13,18 @@ import (
 	"time"
 
 	"github.com/haileyok/engram-garden/internal/blob"
+	"github.com/haileyok/engram-garden/internal/lex"
 )
 
 // ManifestFormat is the manifest version this package reads and writes.
 const ManifestFormat = 1
 
-// ModelInfo identifies an embedding model exactly. Vectors are comparable
-// only when all three fields match.
-type ModelInfo struct {
-	Model       string `json:"model"`
-	ModelDigest string `json:"modelDigest"`
-	Dims        int    `json:"dims"`
-}
-
-// Key is a stable identifier for the model.
-func (m ModelInfo) Key() string { return fmt.Sprintf("%s@%s/%d", m.Model, m.ModelDigest, m.Dims) }
-
-func (m ModelInfo) String() string {
-	return fmt.Sprintf("%s (%s, %d dims)", m.Model, m.ModelDigest, m.Dims)
-}
-
-// Valid reports whether the model is fully specified.
-func (m ModelInfo) Valid() bool {
-	return m.Model != "" && m.ModelDigest != "" && m.Dims > 0 && m.Dims <= 16000
-}
+// ModelInfo identifies an embedding model exactly.
+type ModelInfo = lex.ModelInfo
 
 // SpaceConfig is the space authority's declared model (its
 // garden.engram.config record), as last seen by the index.
-type SpaceConfig struct {
-	ModelInfo
-	DocumentPrefix string     `json:"documentPrefix,omitempty"`
-	QueryPrefix    string     `json:"queryPrefix,omitempty"`
-	Next           *ModelInfo `json:"next,omitempty"`
-}
+type SpaceConfig = lex.Config
 
 // SegmentInfo describes one segment in a manifest.
 type SegmentInfo struct {

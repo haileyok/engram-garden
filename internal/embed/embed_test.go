@@ -3,12 +3,16 @@ package embed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/haileyok/engram-garden/internal/lex"
 )
 
 func TestOpenAIBatchesAndReordersByIndex(t *testing.T) {
+	t.Parallel()
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -50,6 +54,7 @@ func TestOpenAIBatchesAndReordersByIndex(t *testing.T) {
 }
 
 func TestOpenAIRejectsWrongDimensions(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[1,2,3]}]}`))
 	}))
@@ -61,6 +66,7 @@ func TestOpenAIRejectsWrongDimensions(t *testing.T) {
 }
 
 func TestOpenAIReportsHTTPErrors(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", http.StatusTooManyRequests)
 	}))
@@ -72,6 +78,7 @@ func TestOpenAIReportsHTTPErrors(t *testing.T) {
 }
 
 func TestHashingIsDeterministicAndNormalized(t *testing.T) {
+	t.Parallel()
 	h := Hashing{Dims: 64}
 	a, _ := h.Embed(context.Background(), []string{"Deploy the API to pop1", "deploy THE api, to pop1!", "", "lunch menu"})
 	if dot(a[0], a[1]) < 0.99 {
@@ -93,4 +100,45 @@ func dot(a, b []float32) float32 {
 		s += a[i] * b[i]
 	}
 	return s
+}
+
+func TestOpenAIProviderChecksOllamaDigest(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"nomic-embed-text:latest","model":"nomic-embed-text:latest","digest":"0a109f42"}]}`))
+		case "/v1/embeddings":
+			_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[1,0,0]}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+	p := &OpenAIProvider{BaseURL: srv.URL + "/v1"}
+	want := lex.ModelInfo{Model: "nomic-embed-text", ModelDigest: "sha256:0a109f42", Dims: 3}
+	e, err := p.For(ctx, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, err := e.Embed(ctx, []string{"x"}); err != nil || len(v[0]) != 3 {
+		t.Fatalf("%v %v", v, err)
+	}
+	other := want
+	other.ModelDigest = "sha256:ffff"
+	var mm *ModelMismatchError
+	if _, err := p.For(ctx, other); !errors.As(err, &mm) || mm.Local != "sha256:0a109f42" {
+		t.Fatalf("mismatch: %v", err)
+	}
+	missing := want
+	missing.Model = "not-pulled"
+	if _, err := p.For(ctx, missing); !errors.As(err, &mm) || mm.Local != "" {
+		t.Fatalf("missing model: %v", err)
+	}
+	// Non-Ollama servers declare the digest.
+	declared := &OpenAIProvider{BaseURL: srv.URL + "/v1", Digest: "sha256:ffff"}
+	if _, err := declared.For(ctx, other); err != nil {
+		t.Fatal(err)
+	}
 }

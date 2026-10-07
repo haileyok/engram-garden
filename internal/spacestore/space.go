@@ -17,9 +17,6 @@ import (
 	"github.com/haileyok/engram-garden/internal/vec"
 )
 
-// MemoryCollection is the record type indexed as memories.
-const MemoryCollection = "garden.engram.memory"
-
 var (
 	// ErrNotFound reports a missing memory.
 	ErrNotFound = errors.New("not found")

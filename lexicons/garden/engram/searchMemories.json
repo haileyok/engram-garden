@@ -4,13 +4,24 @@
   "defs": {
     "main": {
       "type": "query",
-      "description": "Semantic search over a space's memories. Requires a space credential for the space, presented with an HTTP message signature whose audience is this service's DID.",
+      "description": "Vector search over a space's memories. The caller embeds its query with the space's model and query prefix. Requires a space credential for the space, presented with an HTTP message signature whose audience is this service's DID.",
       "parameters": {
         "type": "params",
-        "required": ["space", "q"],
+        "required": ["space", "vector", "model", "modelDigest"],
         "properties": {
           "space": { "type": "string", "description": "The space URI." },
-          "q": { "type": "string", "maxLength": 4000, "description": "What to look for, in natural language." },
+          "vector": {
+            "type": "string",
+            "maxLength": 43000,
+            "description": "The query's vector: little-endian IEEE half precision, base64url-encoded without padding."
+          },
+          "model": { "type": "string", "description": "Must match the space's model." },
+          "modelDigest": { "type": "string", "description": "Must match the space's model digest." },
+          "q": {
+            "type": "string",
+            "maxLength": 4000,
+            "description": "The query's text. Optional and not used for ranking yet; kept for keyword search later."
+          },
           "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 },
           "author": { "type": "string", "format": "did", "description": "Only memories written by this DID." },
           "tags": {
@@ -31,11 +42,21 @@
             "memories": {
               "type": "array",
               "items": { "type": "ref", "ref": "garden.engram.defs#memoryView" }
+            },
+            "approximate": {
+              "type": "boolean",
+              "description": "Set when the index couldn't re-rank in time, so results are ranked by a coarser comparison and may be less precise."
             }
           }
         }
       },
-      "errors": [{ "name": "UnknownSpace", "description": "This service does not index the space." }]
+      "errors": [
+        { "name": "UnknownSpace", "description": "This service does not index the space." },
+        { "name": "NoModel", "description": "The space's authority hasn't declared an embedding model." },
+        { "name": "ModelMismatch", "description": "The query's model isn't the space's model. Re-read the space's config." },
+        { "name": "IndexLoading", "description": "The space's index is loading. Retry shortly." },
+        { "name": "RateLimitExceeded", "description": "Too many searches for this space." }
+      ]
     }
   }
 }

@@ -1,0 +1,36 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.config",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "literal:self",
+      "description": "The embedding model every vector in a memory space must come from. Written by the space authority in its own repo in the space. Appviews only honor this record from the authority.",
+      "record": {
+        "type": "object",
+        "required": ["model", "modelDigest", "dims", "createdAt"],
+        "properties": {
+          "model": { "type": "string", "maxLength": 256 },
+          "modelDigest": { "type": "string", "maxLength": 256, "description": "Pins the exact model build." },
+          "dims": { "type": "integer", "minimum": 1, "maximum": 16000 },
+          "documentPrefix": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "Text to put before a memory's text when embedding it, for models trained with task prefixes (nomic-embed-text uses \"search_document: \")."
+          },
+          "queryPrefix": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "Text to put before a query when embedding it (nomic-embed-text uses \"search_query: \")."
+          },
+          "next": {
+            "type": "ref",
+            "ref": "garden.engram.defs#model",
+            "description": "The model a change is moving to. While set, agents also write nextEmbedding for their memories, and appviews build a second index. Promote it by making it the main model."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

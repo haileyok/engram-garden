@@ -1,0 +1,17 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.exportSpace",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Download a space's index: a tar of its newest manifest (manifest.json) and its segment files (seg-{id}.seg), in the storage format described in docs/design/storage.md. Another appview can import it with `engram-appview import`. Same authentication as garden.engram.searchMemories.",
+      "parameters": {
+        "type": "params",
+        "required": ["space"],
+        "properties": { "space": { "type": "string", "description": "The space URI." } }
+      },
+      "output": { "encoding": "application/x-tar" },
+      "errors": [{ "name": "UnknownSpace", "description": "This service does not index the space." }]
+    }
+  }
+}

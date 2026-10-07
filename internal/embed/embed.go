@@ -117,12 +117,23 @@ func (o *OpenAI) embedBatch(ctx context.Context, texts []string) ([][]float32, e
 		if d.Index < 0 || d.Index >= len(texts) || out[d.Index] != nil {
 			return nil, errors.New("embeddings response: bad or duplicate index")
 		}
-		if len(d.Embedding) != o.Dims {
+		if o.Dims >= 0 && len(d.Embedding) != o.Dims {
 			return nil, fmt.Errorf("embeddings response: model returned %d dimensions, configured for %d", len(d.Embedding), o.Dims)
 		}
 		out[d.Index] = d.Embedding
 	}
 	return out, nil
+}
+
+// ProbeDims embeds one short text and returns the vector size the model
+// produces.
+func ProbeDims(ctx context.Context, baseURL, apiKey, model string, client *http.Client) (int, error) {
+	o := &OpenAI{BaseURL: baseURL, APIKey: apiKey, Name: model, Dims: -1, HTTP: client}
+	vecs, err := o.embedBatch(ctx, []string{"dimension probe"})
+	if err != nil {
+		return 0, err
+	}
+	return len(vecs[0]), nil
 }
 
 func truncate(s string, n int) string {

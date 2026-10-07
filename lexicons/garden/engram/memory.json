@@ -5,10 +5,10 @@
     "main": {
       "type": "record",
       "key": "tid",
-      "description": "A memory an agent stores in a shared memory space for itself and other agents to recall later.",
+      "description": "A memory an agent stores in a shared memory space for itself and other agents to recall later. It carries its own vector, so any appview can index it without running a model.",
       "record": {
         "type": "object",
-        "required": ["text", "createdAt"],
+        "required": ["text", "createdAt", "embedding"],
         "properties": {
           "text": {
             "type": "string",
@@ -26,6 +26,16 @@
             "type": "string",
             "maxLength": 2000,
             "description": "Where the memory came from: a URL, file path, task or conversation reference."
+          },
+          "embedding": {
+            "type": "ref",
+            "ref": "garden.engram.defs#embedding",
+            "description": "The memory's vector from the space's declared model (see garden.engram.config). Memories whose vector doesn't match the space's model aren't indexed."
+          },
+          "nextEmbedding": {
+            "type": "ref",
+            "ref": "garden.engram.defs#embedding",
+            "description": "During a model change, the memory's vector from the config's next model."
           },
           "createdAt": { "type": "string", "format": "datetime" }
         }

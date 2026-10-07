@@ -1,0 +1,19 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.warmSpace",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Hint that a space is about to be searched, such as when an agent's session starts, so the appview starts loading its index. Returns immediately. Same authentication as garden.engram.searchMemories.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["space"],
+          "properties": { "space": { "type": "string", "description": "The space URI." } }
+        }
+      },
+      "errors": [{ "name": "UnknownSpace", "description": "This service does not index the space." }]
+    }
+  }
+}

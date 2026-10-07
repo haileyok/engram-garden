@@ -1,22 +1,30 @@
 // Package mcpserver exposes an agent's view of a memory space as MCP tools:
-// remember writes to the agent's own repo, and recall searches the whole
-// space through the appview.
+// remember embeds a memory and writes it to the agent's own repo, and
+// recall embeds the query and searches the whole space through the
+// appview. Embedding happens here, on the agent's side, with the model the
+// space declares.
 package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/bluesky-social/indigo/atproto/atdata"
 	"github.com/haileyok/cocoon/space"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/haileyok/engram-garden/internal/indexer"
+	"github.com/haileyok/engram-garden/internal/embed"
+	"github.com/haileyok/engram-garden/internal/lex"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
+	"github.com/haileyok/engram-garden/internal/vec"
 )
 
 // Tools are one agent's memory tools.
@@ -28,12 +36,30 @@ type Tools struct {
 	// AppviewURL and AppviewDID locate the appview that indexes the space.
 	AppviewURL string
 	AppviewDID string
+	// Provider embeds with the space's model, after checking the local
+	// model matches it.
+	Provider embed.Provider
+	Log      *slog.Logger
+	// ConfigTTL is how long the space's config is cached (default 5m).
+	ConfigTTL time.Duration
+
+	mu       sync.Mutex
+	cfg      *lex.Config
+	cfgAt    time.Time
+	reembeds int // memories rewritten with missing vectors, for tests
 }
 
 // Version is reported to MCP clients.
-var Version = "0.1.0"
+var Version = "0.2.0"
 
 const instructions = `Engram Garden is a memory space shared by a group of agents. Use recall before starting work that may have been done or discussed before, and remember durable facts, decisions, preferences and lessons other agents (or a future you) would want. Write each memory so it stands on its own: say who/what/why, not "as discussed above". Other agents can read everything you remember, so never store secrets or credentials.`
+
+func (t *Tools) log() *slog.Logger {
+	if t.Log == nil {
+		return slog.Default()
+	}
+	return t.Log
+}
 
 // NewServer builds an MCP server with the memory tools.
 func (t *Tools) NewServer() *mcp.Server {
@@ -67,6 +93,103 @@ func (t *Tools) NewServer() *mcp.Server {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// ---- the space's model ----
+
+func (t *Tools) authority() (string, error) {
+	ref, err := space.ParseRef(t.Space)
+	if err != nil {
+		return "", err
+	}
+	return ref.Authority, nil
+}
+
+// Config returns the space's declared model, from the authority's
+// garden.engram.config record, cached for ConfigTTL.
+func (t *Tools) Config(ctx context.Context, refresh bool) (*lex.Config, error) {
+	ttl := t.ConfigTTL
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	t.mu.Lock()
+	if !refresh && t.cfg != nil && time.Since(t.cfgAt) < ttl {
+		c := t.cfg
+		t.mu.Unlock()
+		return c, nil
+	}
+	t.mu.Unlock()
+	auth, err := t.authority()
+	if err != nil {
+		return nil, err
+	}
+	host, err := t.Client.PDSHost(ctx, auth)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Value json.RawMessage `json:"value"`
+	}
+	params := url.Values{"space": {t.Space}, "repo": {auth}, "collection": {lex.ConfigCollection}, "rkey": {lex.ConfigRkey}}
+	if err := t.Client.Query(ctx, host, t.Space, auth, "com.atproto.space.getRecord", params, &out); err != nil {
+		if spaceclient.IsError(err, "RecordNotFound") || spaceclient.IsError(err, "RepoNotFound") {
+			return nil, errors.New("the space hasn't declared an embedding model yet: its authority needs to run engram-config")
+		}
+		return nil, fmt.Errorf("reading the space's config: %w", err)
+	}
+	rec, err := atdata.UnmarshalJSON(out.Value)
+	if err != nil {
+		return nil, fmt.Errorf("the space's config: %w", err)
+	}
+	c, err := lex.ParseConfig(rec)
+	if err != nil {
+		return nil, err
+	}
+	t.mu.Lock()
+	t.cfg, t.cfgAt = c, time.Now()
+	t.mu.Unlock()
+	return c, nil
+}
+
+// embedOne embeds a text with a model, normalized.
+func (t *Tools) embedOne(ctx context.Context, m lex.ModelInfo, text string) ([]float32, error) {
+	e, err := t.Provider.For(ctx, m)
+	if err != nil {
+		return nil, err
+	}
+	vs, err := e.Embed(ctx, []string{text})
+	if err != nil {
+		return nil, fmt.Errorf("embedding: %w", err)
+	}
+	v := vs[0]
+	if len(v) != m.Dims {
+		return nil, fmt.Errorf("the model returned %d dimensions; the space expects %d", len(v), m.Dims)
+	}
+	if !vec.Normalize(v) {
+		return nil, errors.New("the model returned a zero vector")
+	}
+	return v, nil
+}
+
+// addEmbeddings sets a memory record's vectors for the space's model and,
+// during a model change, the next one. The next model is best effort: an
+// agent without it still writes a memory the active index can use.
+func (t *Tools) addEmbeddings(ctx context.Context, cfg *lex.Config, rec map[string]any, text string, tags []string) error {
+	v, err := t.embedOne(ctx, cfg.ModelInfo, lex.EmbedText(cfg.DocumentPrefix, text, tags))
+	if err != nil {
+		return err
+	}
+	rec["embedding"] = lex.EmbeddingRecord(cfg.ModelInfo, v)
+	delete(rec, "nextEmbedding")
+	if cfg.Next != nil {
+		nv, err := t.embedOne(ctx, *cfg.Next, lex.EmbedText(cfg.DocumentPrefix, text, tags))
+		if err != nil {
+			t.log().Warn("the space is moving to a new model this agent can't use; writing the current model's vector only", "next", cfg.Next, "err", err)
+			return nil
+		}
+		rec["nextEmbedding"] = lex.EmbeddingRecord(*cfg.Next, nv)
+	}
+	return nil
+}
 
 // Memory is a memory as tools return it.
 type Memory struct {
@@ -104,7 +227,7 @@ func (t *Tools) remember(ctx context.Context, _ *mcp.CallToolRequest, in Remembe
 		return nil, RememberOut{}, errors.New("at most 16 tags")
 	}
 	rec := map[string]any{
-		"$type":     indexer.Collection,
+		"$type":     lex.MemoryCollection,
 		"text":      text,
 		"createdAt": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 	}
@@ -123,8 +246,15 @@ func (t *Tools) remember(ctx context.Context, _ *mcp.CallToolRequest, in Remembe
 	if s := strings.TrimSpace(in.Source); s != "" {
 		rec["source"] = s
 	}
+	cfg, err := t.Config(ctx, false)
+	if err != nil {
+		return nil, RememberOut{}, err
+	}
+	if err := t.addEmbeddings(ctx, cfg, rec, text, tags); err != nil {
+		return nil, RememberOut{}, fmt.Errorf("not stored: %w", err)
+	}
 	var out RememberOut
-	body := map[string]any{"space": t.Space, "repo": t.Client.DID().String(), "collection": indexer.Collection, "record": rec}
+	body := map[string]any{"space": t.Space, "repo": t.Client.DID().String(), "collection": lex.MemoryCollection, "record": rec}
 	if err := t.Client.Session.Post(ctx, "com.atproto.space.createRecord", body, &out); err != nil {
 		return nil, out, fmt.Errorf("storing memory: %w", err)
 	}
@@ -144,26 +274,63 @@ type RecallIn struct {
 type MemoriesOut struct {
 	Memories []Memory `json:"memories"`
 	Cursor   string   `json:"cursor,omitempty"`
+	// Note explains results that may be less precise than usual.
+	Note string `json:"note,omitempty"`
 }
 
 func (t *Tools) recall(ctx context.Context, _ *mcp.CallToolRequest, in RecallIn) (*mcp.CallToolResult, MemoriesOut, error) {
 	if strings.TrimSpace(in.Query) == "" {
 		return nil, MemoriesOut{}, errors.New("query is required")
 	}
-	params := url.Values{"space": {t.Space}, "q": {in.Query}}
-	if in.Limit != 0 {
-		params.Set("limit", strconv.Itoa(min(max(in.Limit, 1), 50)))
+	var out struct {
+		MemoriesOut
+		Approximate bool `json:"approximate"`
 	}
-	if in.Author != "" {
-		params.Set("author", in.Author)
+	for attempt := range 2 {
+		cfg, err := t.Config(ctx, attempt > 0)
+		if err != nil {
+			return nil, MemoriesOut{}, err
+		}
+		v, err := t.embedOne(ctx, cfg.ModelInfo, cfg.QueryPrefix+in.Query)
+		if err != nil {
+			return nil, MemoriesOut{}, err
+		}
+		params := url.Values{
+			"space": {t.Space}, "q": {truncate(in.Query, 4000)}, "vector": {lex.EncodeQueryVector(v)},
+			"model": {cfg.Model}, "modelDigest": {cfg.ModelDigest},
+		}
+		if in.Limit != 0 {
+			params.Set("limit", strconv.Itoa(min(max(in.Limit, 1), 50)))
+		}
+		if in.Author != "" {
+			params.Set("author", in.Author)
+		}
+		if in.Since != "" {
+			params.Set("since", in.Since)
+		}
+		params["tags"] = in.Tags
+		err = t.query(ctx, "garden.engram.searchMemories", params, &out)
+		var xe *spaceclient.Error
+		if attempt == 0 && errors.As(err, &xe) && xe.Name == "ModelMismatch" {
+			continue // the space changed models: re-read the config
+		}
+		if err != nil {
+			return nil, MemoriesOut{}, unwrap(err)
+		}
+		break
 	}
-	if in.Since != "" {
-		params.Set("since", in.Since)
+	res := normalize(out.MemoriesOut)
+	if out.Approximate {
+		res.Note = "The index was still loading, so these results are ranked coarsely and may be less precise. Recalling again shortly gives exact ranking."
 	}
-	params["tags"] = in.Tags
-	var out MemoriesOut
-	err := t.query(ctx, "garden.engram.searchMemories", params, &out)
-	return nil, normalize(out), err
+	return nil, res, nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 // ---- get_memory ----
@@ -182,7 +349,7 @@ func (t *Tools) getMemory(ctx context.Context, _ *mcp.CallToolRequest, in GetIn)
 	if out.Memory.Tags == nil {
 		out.Memory.Tags = []string{}
 	}
-	return nil, out, err
+	return nil, out, unwrap(err)
 }
 
 // ---- list_memories ----
@@ -208,7 +375,7 @@ func (t *Tools) listMemories(ctx context.Context, _ *mcp.CallToolRequest, in Lis
 	params["tags"] = in.Tags
 	var out MemoriesOut
 	err := t.query(ctx, "garden.engram.listMemories", params, &out)
-	return nil, normalize(out), err
+	return nil, normalize(out), unwrap(err)
 }
 
 // ---- forget ----
@@ -229,7 +396,7 @@ func (t *Tools) forget(ctx context.Context, _ *mcp.CallToolRequest, in ForgetIn)
 	if author != t.Client.DID().String() {
 		return nil, ForgetOut{}, fmt.Errorf("that memory belongs to %s; you can only forget your own", author)
 	}
-	if coll != indexer.Collection {
+	if coll != lex.MemoryCollection {
 		return nil, ForgetOut{}, fmt.Errorf("not a memory: %s", in.URI)
 	}
 	body := map[string]any{"space": t.Space, "repo": author, "collection": coll, "rkey": rkey}
@@ -254,7 +421,11 @@ func (t *Tools) parseURI(uri string) (string, string, string, error) {
 }
 
 func (t *Tools) query(ctx context.Context, nsid string, params url.Values, out any) error {
-	err := t.Client.Query(ctx, t.AppviewURL, t.Space, t.AppviewDID, nsid, params, out)
+	return t.Client.Query(ctx, t.AppviewURL, t.Space, t.AppviewDID, nsid, params, out)
+}
+
+// unwrap turns an XRPC error into a short message for the agent.
+func unwrap(err error) error {
 	var xe *spaceclient.Error
 	if errors.As(err, &xe) && xe.Message != "" {
 		return fmt.Errorf("%s: %s", xe.Name, xe.Message)
@@ -272,4 +443,120 @@ func normalize(out MemoriesOut) MemoriesOut {
 		}
 	}
 	return out
+}
+
+// ---- session start and model changes ----
+
+// Warm asks the appview to start loading the space's index, so the first
+// recall is fast.
+func (t *Tools) Warm(ctx context.Context) error {
+	return t.Client.Procedure(ctx, t.AppviewURL, t.Space, t.AppviewDID, "garden.engram.warmSpace", map[string]string{"space": t.Space}, nil)
+}
+
+// Reembed rewrites this agent's memories that lack a vector for the space's
+// model or, during a model change, for the next model. It returns how many
+// it rewrote.
+func (t *Tools) Reembed(ctx context.Context) (int, error) {
+	cfg, err := t.Config(ctx, true)
+	if err != nil {
+		return 0, err
+	}
+	want := []lex.ModelInfo{cfg.ModelInfo}
+	if cfg.Next != nil {
+		want = append(want, *cfg.Next)
+	}
+	me := t.Client.DID().String()
+	rewritten := 0
+	cursor := ""
+	for {
+		params := map[string]any{"space": t.Space, "repo": me, "collection": lex.MemoryCollection, "limit": 100}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		var page struct {
+			Cursor  string `json:"cursor"`
+			Records []struct {
+				URI   string          `json:"uri"`
+				Value json.RawMessage `json:"value"`
+			} `json:"records"`
+		}
+		if err := t.Client.Session.Get(ctx, "com.atproto.space.listRecords", params, &page); err != nil {
+			return rewritten, fmt.Errorf("listing my memories: %w", err)
+		}
+		for _, r := range page.Records {
+			rec, err := atdata.UnmarshalJSON(r.Value)
+			if err != nil {
+				continue
+			}
+			have := map[string]bool{}
+			for _, e := range lex.ParseEmbeddings(rec) {
+				have[e.Key()] = true
+			}
+			missing := false
+			for _, m := range want {
+				missing = missing || !have[m.Key()]
+			}
+			if !missing {
+				continue
+			}
+			text, _ := rec["text"].(string)
+			if strings.TrimSpace(text) == "" {
+				continue
+			}
+			var tags []string
+			if ts, ok := rec["tags"].([]any); ok {
+				for _, tg := range ts {
+					if s, ok := tg.(string); ok {
+						tags = append(tags, s)
+					}
+				}
+			}
+			// Rewrite from the JSON form, which keeps $bytes and $link
+			// values intact.
+			var out map[string]any
+			if err := json.Unmarshal(r.Value, &out); err != nil {
+				continue
+			}
+			if err := t.addEmbeddings(ctx, cfg, out, text, tags); err != nil {
+				return rewritten, err
+			}
+			_, _, rkey, err := t.parseURI(r.URI)
+			if err != nil {
+				continue
+			}
+			body := map[string]any{"space": t.Space, "repo": me, "collection": lex.MemoryCollection, "rkey": rkey, "record": out}
+			if err := t.Client.Session.Post(ctx, "com.atproto.space.putRecord", body, nil); err != nil {
+				return rewritten, fmt.Errorf("rewriting %s: %w", r.URI, err)
+			}
+			rewritten++
+		}
+		if page.Cursor == "" || len(page.Records) == 0 {
+			break
+		}
+		cursor = page.Cursor
+	}
+	t.mu.Lock()
+	t.reembeds += rewritten
+	t.mu.Unlock()
+	return rewritten, nil
+}
+
+// Run warms the space, then keeps this agent's memories embedded with the
+// space's model(s) until ctx ends.
+func (t *Tools) Run(ctx context.Context, every time.Duration) {
+	if err := t.Warm(ctx); err != nil {
+		t.log().Debug("warming the space failed", "err", err)
+	}
+	for {
+		if n, err := t.Reembed(ctx); err != nil {
+			t.log().Warn("re-embedding memories failed", "err", err)
+		} else if n > 0 {
+			t.log().Info("re-embedded memories for the space's model", "count", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		}
+	}
 }

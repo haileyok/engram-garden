@@ -1,6 +1,7 @@
 // Package indexer keeps the memory index in step with a space: it pulls each
 // member's repo changes, verifies them against the member's signed commit,
-// embeds new memories and writes them to the store.
+// and hands the memories, with the vectors their records carry, to the
+// index.
 package indexer
 
 import (
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,25 +22,20 @@ import (
 	"github.com/haileyok/cocoon/space"
 	"github.com/ipfs/go-cid"
 
-	"github.com/haileyok/engram-garden/internal/embed"
+	"github.com/haileyok/engram-garden/internal/lex"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
-	"github.com/haileyok/engram-garden/internal/store"
+	"github.com/haileyok/engram-garden/internal/spacestore"
 )
 
 // Collection is the record type indexed as memories.
-const Collection = "garden.engram.memory"
+const Collection = lex.MemoryCollection
 
-// maxEmbedChars bounds the text sent to the embedder, to stay inside common
-// models' input limits.
-const maxEmbedChars = 24000
-
-// Indexer syncs spaces into the store.
+// Indexer syncs spaces into the index.
 type Indexer struct {
-	Store    *store.Store
-	Embedder embed.Embedder
-	Client   *spaceclient.Client
-	Dir      identity.Directory
-	Log      *slog.Logger
+	Store  *spacestore.Node
+	Client *spaceclient.Client
+	Dir    identity.Directory
+	Log    *slog.Logger
 	// PageSize is the listRepoOps page size.
 	PageSize int
 
@@ -46,6 +43,7 @@ type Indexer struct {
 
 	mu        sync.Mutex
 	spaceRevs map[string]string // last spaceRev seen per space, for gap detection
+	resync    map[string]bool   // spaces whose config change needs a full sync
 }
 
 func (ix *Indexer) log() *slog.Logger {
@@ -62,9 +60,49 @@ func (ix *Indexer) lock(spaceURI, did string) func() {
 	return mu.Unlock
 }
 
+func (ix *Indexer) markResync(spaceURI string) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if ix.resync == nil {
+		ix.resync = map[string]bool{}
+	}
+	ix.resync[spaceURI] = true
+}
+
+func (ix *Indexer) takeResync(spaceURI string) bool {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	r := ix.resync[spaceURI]
+	delete(ix.resync, spaceURI)
+	return r
+}
+
+type listedRepo struct {
+	DID      string `json:"did"`
+	RepoRev  string `json:"repoRev"`
+	SpaceRev string `json:"spaceRev"`
+}
+
 // SyncSpace lists the space's writers at the authority and syncs every repo
-// whose latest write the index hasn't seen.
+// whose latest write the index hasn't seen. The authority's repo goes
+// first, since its config record says which vectors to index.
 func (ix *Indexer) SyncSpace(ctx context.Context, spaceURI string) error {
+	var err error
+	// A config change met during the pass asks for a full pass; two passes
+	// cover it.
+	for range 2 {
+		ix.takeResync(spaceURI)
+		if err = ix.syncSpaceOnce(ctx, spaceURI); err != nil {
+			return err
+		}
+		if !ix.takeResync(spaceURI) {
+			return nil
+		}
+	}
+	return err
+}
+
+func (ix *Indexer) syncSpaceOnce(ctx context.Context, spaceURI string) error {
 	ref, err := space.ParseRef(spaceURI)
 	if err != nil {
 		return err
@@ -73,30 +111,16 @@ func (ix *Indexer) SyncSpace(ctx context.Context, spaceURI string) error {
 	if err != nil {
 		return err
 	}
-	known := map[string]string{}
-	states, err := ix.Store.Repos(ctx, spaceURI)
-	if err != nil {
-		return err
-	}
-	for _, st := range states {
-		known[st.DID] = st.SpaceRev
-	}
-	var errs []error
+	var listed []listedRepo
 	cursor := ""
-	maxRev := ""
-	listed := map[string]bool{}
 	for {
 		params := url.Values{"space": {spaceURI}, "limit": {"100"}}
 		if cursor != "" {
 			params.Set("cursor", cursor)
 		}
 		var out struct {
-			Repos []struct {
-				DID      string `json:"did"`
-				RepoRev  string `json:"repoRev"`
-				SpaceRev string `json:"spaceRev"`
-			} `json:"repos"`
-			Cursor string `json:"cursor"`
+			Repos  []listedRepo `json:"repos"`
+			Cursor string       `json:"cursor"`
 		}
 		if err := ix.Client.Query(ctx, host, spaceURI, ref.Authority, "com.atproto.space.listRepos", params, &out); err != nil {
 			if spaceclient.IsError(err, "SpaceDeleted") {
@@ -104,26 +128,36 @@ func (ix *Indexer) SyncSpace(ctx context.Context, spaceURI string) error {
 			}
 			return fmt.Errorf("listRepos: %w", err)
 		}
-		for _, r := range out.Repos {
-			listed[r.DID] = true
-			maxRev = max(maxRev, r.SpaceRev)
-			if rev, ok := known[r.DID]; ok && rev >= r.SpaceRev {
-				continue
-			}
-			if err := ix.SyncRepo(ctx, spaceURI, r.DID, r.SpaceRev); err != nil {
-				ix.log().Warn("repo sync failed", "space", spaceURI, "repo", r.DID, "err", err)
-				errs = append(errs, fmt.Errorf("%s: %w", r.DID, err))
-			}
-		}
+		listed = append(listed, out.Repos...)
 		if out.Cursor == "" || len(out.Repos) == 0 {
 			break
 		}
 		cursor = out.Cursor
 	}
+	sort.SliceStable(listed, func(i, j int) bool { return listed[i].DID == ref.Authority && listed[j].DID != ref.Authority })
+
+	known, err := ix.Store.Repos(ctx, spaceURI)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	maxRev := ""
+	isListed := map[string]bool{}
+	for _, r := range listed {
+		isListed[r.DID] = true
+		maxRev = max(maxRev, r.SpaceRev)
+		if p, ok := known[r.DID]; ok && p.SpaceRev >= r.SpaceRev {
+			continue
+		}
+		if err := ix.SyncRepo(ctx, spaceURI, r.DID, r.SpaceRev); err != nil {
+			ix.log().Warn("repo sync failed", "space", spaceURI, "repo", r.DID, "err", err)
+			errs = append(errs, fmt.Errorf("%s: %w", r.DID, err))
+		}
+	}
 	// The listing completed: a repo the authority no longer lists has left
 	// the space, so its memories go too.
 	for did := range known {
-		if listed[did] {
+		if isListed[did] {
 			continue
 		}
 		unlock := ix.lock(spaceURI, did)
@@ -137,6 +171,11 @@ func (ix *Indexer) SyncSpace(ctx context.Context, spaceURI string) error {
 	}
 	if len(errs) == 0 {
 		ix.noteSpaceRev(spaceURI, maxRev)
+	}
+	if st, err := ix.Store.Status(ctx, spaceURI); err == nil {
+		for author, n := range st.Skipped {
+			ix.log().Warn("memories not indexed: their vectors don't match the space's model", "space", spaceURI, "author", author, "count", n)
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -192,16 +231,25 @@ type Notification struct {
 }
 
 // HandleWrite syncs the repo a notification names. It reports whether the
-// notification shows a gap, meaning others were missed and the caller should
-// run SyncSpace.
-func (ix *Indexer) HandleWrite(ctx context.Context, n Notification) (gap bool, err error) {
+// caller should run SyncSpace: a notification went missing, or the space's
+// model changed and every repo needs a full sync.
+func (ix *Indexer) HandleWrite(ctx context.Context, n Notification) (needSpaceSync bool, err error) {
 	if n.SpaceRev != "" {
 		prev := ix.noteSpaceRev(n.Space, n.SpaceRev)
 		// prevSpaceRev names the write before this one in the space. If it
 		// isn't the newest one we saw, a notification went missing.
-		gap = prev != "" && n.PrevSpaceRev != prev && n.PrevSpaceRev > prev
+		needSpaceSync = prev != "" && n.PrevSpaceRev != prev && n.PrevSpaceRev > prev
 	}
-	return gap, ix.SyncRepo(ctx, n.Space, n.Repo, n.SpaceRev)
+	err = ix.SyncRepo(ctx, n.Space, n.Repo, n.SpaceRev)
+	if ix.takeResync(n.Space) {
+		needSpaceSync = true
+	}
+	// Without the authority's config nothing can be indexed; a space sync
+	// reads it first.
+	if cfg, cerr := ix.Store.Config(ctx, n.Space); cerr == nil && cfg == nil {
+		needSpaceSync = true
+	}
+	return needSpaceSync, err
 }
 
 // SyncRepo brings one member's repo up to date: incrementally from the
@@ -219,20 +267,20 @@ func (ix *Indexer) SyncRepo(ctx context.Context, spaceURI, did, spaceRev string)
 		return err
 	}
 	if st != nil && st.SetHash != nil {
-		err := ix.syncIncremental(ctx, *st, spaceRev)
+		err := ix.syncIncremental(ctx, spaceURI, did, *st, spaceRev)
 		if err == nil {
 			return nil
 		}
 		if !errors.Is(err, errResync) {
 			return err
 		}
-		ix.log().Info("incremental sync did not verify, re-exporting repo", "space", spaceURI, "repo", did, "reason", err)
+		ix.log().Info("incremental sync can't be applied, re-exporting repo", "space", spaceURI, "repo", did, "reason", err)
 	}
 	return ix.syncFull(ctx, spaceURI, did, spaceRev)
 }
 
-// errResync marks an incremental sync that can't be trusted; a full export
-// replaces it.
+// errResync marks an incremental sync that can't be trusted or applied; a
+// full export replaces it.
 var errResync = errors.New("resync needed")
 
 type opEntry struct {
@@ -249,8 +297,8 @@ type pathState struct {
 	value json.RawMessage
 }
 
-func (ix *Indexer) syncIncremental(ctx context.Context, st store.RepoState, spaceRev string) error {
-	host, err := ix.Client.PDSHost(ctx, st.DID)
+func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st spacestore.RepoPosition, spaceRev string) error {
+	host, err := ix.Client.PDSHost(ctx, did)
 	if err != nil {
 		return err
 	}
@@ -267,7 +315,7 @@ func (ix *Indexer) syncIncremental(ctx context.Context, st store.RepoState, spac
 	var commit *space.SignedCommit
 	cursor := ""
 	for commit == nil {
-		params := url.Values{"space": {st.Space}, "repo": {st.DID}, "limit": {fmt.Sprint(pageSize)}}
+		params := url.Values{"space": {spaceURI}, "repo": {did}, "limit": {fmt.Sprint(pageSize)}}
 		if cursor != "" {
 			params.Set("cursor", cursor)
 		} else if st.Rev != "" {
@@ -278,7 +326,7 @@ func (ix *Indexer) syncIncremental(ctx context.Context, st store.RepoState, spac
 			Cursor string              `json:"cursor"`
 			Commit *space.SignedCommit `json:"commit"`
 		}
-		if err := ix.Client.Query(ctx, host, st.Space, st.DID, "com.atproto.space.listRepoOps", params, &out); err != nil {
+		if err := ix.Client.Query(ctx, host, spaceURI, did, "com.atproto.space.listRepoOps", params, &out); err != nil {
 			return fmt.Errorf("listRepoOps: %w", err)
 		}
 		for _, op := range out.Ops {
@@ -301,53 +349,98 @@ func (ix *Indexer) syncIncremental(ctx context.Context, st store.RepoState, spac
 			cursor = out.Cursor
 		}
 	}
-	if err := ix.verifyCommit(ctx, st.Space, st.DID, *commit, repo); err != nil {
+	if err := ix.verifyCommit(ctx, spaceURI, did, *commit, repo); err != nil {
 		return err
 	}
 
-	ref, _ := space.ParseRef(st.Space)
-	var upserts []store.Memory
+	ref, _ := space.ParseRef(spaceURI)
+	var upserts []spacestore.Memory
 	var deletes []string
 	for _, path := range order {
 		ps := final[path]
 		coll, rkey, err := space.ParseRecordPath(path)
-		if err != nil || coll != Collection {
-			continue
-		}
-		uri := ref.RecordURI(st.DID, coll, rkey)
-		if ps.cid == nil {
-			deletes = append(deletes, uri)
-			continue
-		}
-		if len(ps.value) == 0 {
-			return fmt.Errorf("%w: no value for the latest version of %s", errResync, path)
-		}
-		rec, err := atdata.UnmarshalJSON(ps.value)
 		if err != nil {
-			return fmt.Errorf("%w: %s: %v", errResync, path, err)
+			continue
 		}
-		ser, err := space.SerializeRecord(coll, rkey, rec)
-		if err != nil || !ser.Cid.Equals(*ps.cid) {
-			return fmt.Errorf("%w: %s: value does not match its cid", errResync, path)
+		isConfig := did == ref.Authority && coll == lex.ConfigCollection && rkey == lex.ConfigRkey
+		if coll != Collection && !isConfig {
+			continue
 		}
-		if m, ok := memoryFromRecord(st.Space, st.DID, rkey, ps.cid.String(), uri, rec); ok {
+		var rec map[string]any
+		if ps.cid != nil {
+			if len(ps.value) == 0 {
+				return fmt.Errorf("%w: no value for the latest version of %s", errResync, path)
+			}
+			if rec, err = atdata.UnmarshalJSON(ps.value); err != nil {
+				return fmt.Errorf("%w: %s: %v", errResync, path, err)
+			}
+			ser, err := space.SerializeRecord(coll, rkey, rec)
+			if err != nil || !ser.Cid.Equals(*ps.cid) {
+				return fmt.Errorf("%w: %s: value does not match its cid", errResync, path)
+			}
+		}
+		if isConfig {
+			resync, err := ix.applyConfig(ctx, spaceURI, rec)
+			if err != nil {
+				return err
+			}
+			if resync {
+				// The space now needs vectors from records this sync didn't
+				// read; export this repo, and the others on the next pass.
+				return fmt.Errorf("%w: the space's model changed", errResync)
+			}
+			continue
+		}
+		if ps.cid == nil {
+			deletes = append(deletes, rkey)
+			continue
+		}
+		if m, ok := memoryFromRecord(did, rkey, ps.cid.String(), rec); ok {
 			upserts = append(upserts, m)
 		} else {
 			// Not a usable memory: make sure no older version lingers.
-			deletes = append(deletes, uri)
+			deletes = append(deletes, rkey)
 		}
 	}
-	if err := ix.embedAll(ctx, upserts); err != nil {
-		return err
-	}
-	next := store.RepoState{Space: st.Space, DID: st.DID, Rev: commit.Rev, SetHash: repo.SetHash.State(), SpaceRev: max(st.SpaceRev, spaceRev)}
-	if err := ix.Store.ApplyRepoChanges(ctx, next, upserts, deletes, false); err != nil {
+	next := spacestore.RepoPosition{Rev: commit.Rev, SetHash: repo.SetHash.State(), SpaceRev: max(st.SpaceRev, spaceRev)}
+	if err := ix.apply(ctx, spaceURI, did, next, upserts, deletes, false); err != nil {
 		return err
 	}
 	if len(upserts)+len(deletes) > 0 {
-		ix.log().Info("synced repo", "space", st.Space, "repo", st.DID, "upserts", len(upserts), "deletes", len(deletes), "rev", commit.Rev)
+		ix.log().Info("synced repo", "space", spaceURI, "repo", did, "upserts", len(upserts), "deletes", len(deletes), "rev", commit.Rev)
 	}
 	return nil
+}
+
+func (ix *Indexer) apply(ctx context.Context, spaceURI, did string, pos spacestore.RepoPosition, upserts []spacestore.Memory, deletes []string, replace bool) error {
+	err := ix.Store.ApplyRepoChanges(ctx, spaceURI, did, pos, upserts, deletes, replace)
+	if errors.Is(err, spacestore.ErrOverLimit) {
+		ix.log().Warn("space is over a limit; some memories were not indexed", "space", spaceURI, "repo", did)
+		return nil
+	}
+	return err
+}
+
+// applyConfig records the authority's config record (nil when deleted).
+func (ix *Indexer) applyConfig(ctx context.Context, spaceURI string, rec map[string]any) (bool, error) {
+	var cfg *lex.Config
+	if rec != nil {
+		c, err := lex.ParseConfig(rec)
+		if err != nil {
+			ix.log().Warn("ignoring invalid space config", "space", spaceURI, "err", err)
+			return false, nil
+		}
+		cfg = c
+	}
+	resync, err := ix.Store.SetConfig(ctx, spaceURI, cfg)
+	if err != nil {
+		return false, err
+	}
+	if resync {
+		ix.log().Info("space model changed; syncing every repo again", "space", spaceURI, "model", cfg.ModelInfo, "next", cfg.Next)
+		ix.markResync(spaceURI)
+	}
+	return resync, nil
 }
 
 func parseOp(op opEntry) (space.RepoOp, error) {
@@ -447,21 +540,28 @@ func (ix *Indexer) syncFull(ctx context.Context, spaceURI, did, spaceRev string)
 	}
 
 	ref, _ := space.ParseRef(spaceURI)
-	var upserts []store.Memory
+	if did == ref.Authority {
+		var cfgRec map[string]any
+		for _, r := range vr.Records {
+			if r.Collection == lex.ConfigCollection && r.Rkey == lex.ConfigRkey {
+				cfgRec = r.Record
+			}
+		}
+		if _, err := ix.applyConfig(ctx, spaceURI, cfgRec); err != nil {
+			return err
+		}
+	}
+	var upserts []spacestore.Memory
 	for _, r := range vr.Records {
 		if r.Collection != Collection {
 			continue
 		}
-		uri := ref.RecordURI(did, r.Collection, r.Rkey)
-		if m, ok := memoryFromRecord(spaceURI, did, r.Rkey, r.Cid.String(), uri, r.Record); ok {
+		if m, ok := memoryFromRecord(did, r.Rkey, r.Cid.String(), r.Record); ok {
 			upserts = append(upserts, m)
 		}
 	}
-	if err := ix.embedAll(ctx, upserts); err != nil {
-		return err
-	}
-	next := store.RepoState{Space: spaceURI, DID: did, Rev: vr.Commit.Rev, SetHash: vr.Repo.SetHash.State(), SpaceRev: spaceRev}
-	if err := ix.Store.ApplyRepoChanges(ctx, next, upserts, nil, true); err != nil {
+	next := spacestore.RepoPosition{Rev: vr.Commit.Rev, SetHash: vr.Repo.SetHash.State(), SpaceRev: spaceRev}
+	if err := ix.apply(ctx, spaceURI, did, next, upserts, nil, true); err != nil {
 		return err
 	}
 	ix.log().Info("exported repo", "space", spaceURI, "repo", did, "memories", len(upserts), "rev", vr.Commit.Rev)
@@ -469,13 +569,14 @@ func (ix *Indexer) syncFull(ctx context.Context, spaceURI, did, spaceRev string)
 }
 
 // memoryFromRecord reads a garden.engram.memory record. Records without
-// text are not indexed.
-func memoryFromRecord(spaceURI, did, rkey, cidStr, uri string, rec map[string]any) (store.Memory, bool) {
+// text are not indexed. Its vectors are passed on keyed by model; the index
+// decides which match the space's model.
+func memoryFromRecord(did, rkey, cidStr string, rec map[string]any) (spacestore.Memory, bool) {
 	text, _ := rec["text"].(string)
 	if strings.TrimSpace(text) == "" {
-		return store.Memory{}, false
+		return spacestore.Memory{}, false
 	}
-	m := store.Memory{URI: uri, Space: spaceURI, Author: did, Rkey: rkey, CID: cidStr, Text: text}
+	m := spacestore.Memory{Author: did, Rkey: rkey, CID: cidStr, Text: text, Vectors: map[string][]float32{}}
 	if tags, ok := rec["tags"].([]any); ok {
 		for _, t := range tags {
 			if s, ok := t.(string); ok && s != "" {
@@ -492,36 +593,8 @@ func memoryFromRecord(spaceURI, did, rkey, cidStr, uri string, rec map[string]an
 	if m.CreatedAt.IsZero() {
 		m.CreatedAt = time.Now().UTC()
 	}
+	for _, e := range lex.ParseEmbeddings(rec) {
+		m.Vectors[e.Key()] = e.Vector
+	}
 	return m, true
-}
-
-// EmbedText is what gets embedded for a memory: its text, plus its tags so
-// they help retrieval.
-func EmbedText(text string, tags []string) string {
-	if len(text) > maxEmbedChars {
-		text = text[:maxEmbedChars]
-	}
-	if len(tags) > 0 {
-		text += "\n\nTags: " + strings.Join(tags, ", ")
-	}
-	return text
-}
-
-func (ix *Indexer) embedAll(ctx context.Context, ms []store.Memory) error {
-	if len(ms) == 0 {
-		return nil
-	}
-	texts := make([]string, len(ms))
-	for i, m := range ms {
-		texts[i] = EmbedText(m.Text, m.Tags)
-	}
-	vecs, err := ix.Embedder.Embed(ctx, texts)
-	if err != nil {
-		return fmt.Errorf("embedding: %w", err)
-	}
-	for i := range ms {
-		ms[i].Embedding = vecs[i]
-		ms[i].Model = ix.Embedder.Model()
-	}
-	return nil
 }

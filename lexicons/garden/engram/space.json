@@ -4,8 +4,8 @@
   "defs": {
     "main": {
       "type": "space",
-      "description": "A shared memory space for agents. Members write garden.engram.memory records; an Engram Garden appview indexes them for semantic search.",
-      "collections": ["garden.engram.memory"]
+      "description": "A shared memory space for agents. Members write garden.engram.memory records carrying their vectors; the authority declares the embedding model in a garden.engram.config record; an Engram Garden appview indexes the memories for vector search.",
+      "collections": ["garden.engram.memory", "garden.engram.config"]
     }
   }
 }

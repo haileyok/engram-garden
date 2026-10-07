@@ -6,45 +6,54 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/haileyok/engram-garden/internal/appview"
+	"github.com/haileyok/engram-garden/internal/blob"
 	"github.com/haileyok/engram-garden/internal/embed"
 	"github.com/haileyok/engram-garden/internal/indexer"
+	"github.com/haileyok/engram-garden/internal/lex"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
+	"github.com/haileyok/engram-garden/internal/spacestore"
 	"github.com/haileyok/engram-garden/internal/spacetest"
-	"github.com/haileyok/engram-garden/internal/store/storetest"
 )
 
-const (
-	dims       = 256
-	serviceDID = "did:web:engram.test"
+const serviceDID = "did:web:engram.test"
+
+var (
+	model     = lex.ModelInfo{Model: "hashing-256", ModelDigest: embed.HashingDigest, Dims: 256}
+	nextModel = lex.ModelInfo{Model: "hashing-128", ModelDigest: embed.HashingDigest, Dims: 128}
 )
 
 type world struct {
 	net *spacetest.Net
 	av  *appview.Server
+	url string
 }
 
-func newWorld(t *testing.T) (*world, *mcp.ClientSession, *mcp.ClientSession) {
+func newWorld(t *testing.T, declare bool) *world {
 	t.Helper()
-	st := storetest.New(t, dims)
 	n := spacetest.New(t)
 	avAcct := n.NewAccount("did:plc:appview")
 	alice := n.NewAccount("did:plc:alice")
 	bob := n.NewAccount("did:plc:bob")
-	for _, a := range []*spacetest.Account{avAcct, alice, bob} {
+	for _, a := range []*spacetest.Account{n.Authority, avAcct, alice, bob} {
 		n.AddMember(a.DID)
 	}
 	avClient, err := spaceclient.New(n.Session(avAcct), n.Dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	emb := embed.Hashing{Dims: dims}
+	st, err := spacestore.New(spacestore.Options{Blob: blob.Dir{Root: t.TempDir()}, CacheDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close(context.Background()) })
 	av := &appview.Server{
-		Store: st, Embedder: emb, Dir: n.Dir, ServiceDID: serviceDID, Spaces: []string{n.Space},
-		Indexer: &indexer.Indexer{Store: st, Embedder: emb, Client: avClient, Dir: n.Dir},
+		Store: st, Dir: n.Dir, ServiceDID: serviceDID, Spaces: []string{n.Space},
+		Indexer: &indexer.Indexer{Store: st, Client: avClient, Dir: n.Dir},
 	}
 	hs := httptest.NewServer(av.Handler())
 	t.Cleanup(hs.Close)
@@ -52,17 +61,31 @@ func newWorld(t *testing.T) (*world, *mcp.ClientSession, *mcp.ClientSession) {
 	if _, err := av.Indexer.Register(context.Background(), n.Space, av.ServiceID()); err != nil {
 		t.Fatal(err)
 	}
-	w := &world{net: n, av: av}
-	return w, w.connect(t, alice, hs.URL), w.connect(t, bob, hs.URL)
+	w := &world{net: n, av: av, url: hs.URL}
+	if declare {
+		w.declare(t, lex.Config{ModelInfo: model, DocumentPrefix: "search_document: ", QueryPrefix: "search_query: "})
+	}
+	return w
 }
 
-func (w *world) connect(t *testing.T, a *spacetest.Account, appviewURL string) *mcp.ClientSession {
+// declare writes the authority's config and delivers its notification.
+func (w *world) declare(t *testing.T, c lex.Config) {
 	t.Helper()
-	c, err := spaceclient.New(w.net.Session(a), w.net.Dir, nil)
+	w.net.Put(w.net.Authority, lex.ConfigCollection, lex.ConfigRkey, c.Record(time.Now()))
+	w.deliver(t, w.net.Authority.DID)
+}
+
+func (w *world) tools(t *testing.T, did string, p embed.Provider) *Tools {
+	t.Helper()
+	c, err := spaceclient.New(w.net.Session(w.net.AccountByDID(did)), w.net.Dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tools := &Tools{Client: c, Space: w.net.Space, AppviewURL: appviewURL, AppviewDID: serviceDID}
+	return &Tools{Client: c, Space: w.net.Space, AppviewURL: w.url, AppviewDID: serviceDID, Provider: p, ConfigTTL: time.Millisecond}
+}
+
+func connect(t *testing.T, tools *Tools) *mcp.ClientSession {
+	t.Helper()
 	ct, st := mcp.NewInMemoryTransports()
 	ctx := context.Background()
 	if _, err := tools.NewServer().Connect(ctx, st, nil); err != nil {
@@ -112,7 +135,9 @@ func (w *world) deliver(t *testing.T, did string) {
 
 func TestAgentsShareMemories(t *testing.T) {
 	t.Parallel()
-	w, alice, bob := newWorld(t)
+	w := newWorld(t, true)
+	alice := connect(t, w.tools(t, "did:plc:alice", embed.HashingProvider{}))
+	bob := connect(t, w.tools(t, "did:plc:bob", embed.HashingProvider{}))
 
 	tools, err := alice.ListTools(context.Background(), nil)
 	if err != nil {
@@ -141,6 +166,12 @@ func TestAgentsShareMemories(t *testing.T) {
 	}
 	call(t, alice, "remember", map[string]any{"text": "Hailey prefers compact answers"}, nil)
 	w.deliver(t, "did:plc:alice")
+
+	// The records carried their vectors, so both were indexed.
+	st, _ := w.av.Store.Status(context.Background(), w.net.Space)
+	if st.Memories != 2 || len(st.Skipped) != 0 {
+		t.Fatalf("appview status: %+v", st)
+	}
 
 	// Bob recalls what Alice remembered.
 	var got MemoriesOut
@@ -181,5 +212,82 @@ func TestAgentsShareMemories(t *testing.T) {
 	}
 	if msg := call(t, alice, "forget", map[string]any{"uri": "at://elsewhere/x"}, nil); !strings.Contains(msg, "not a record URI") {
 		t.Fatalf("bad uri: %q", msg)
+	}
+	// Warming the space is accepted.
+	if err := w.tools(t, "did:plc:alice", embed.HashingProvider{}).Warm(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// otherModel is a provider whose local model never matches.
+type otherModel struct{}
+
+func (otherModel) For(_ context.Context, m lex.ModelInfo) (embed.Embedder, error) {
+	return nil, &embed.ModelMismatchError{Want: m, LocalName: m.Model, Local: "sha256:different"}
+}
+
+func TestRefusesAWrongModel(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t, true)
+	alice := connect(t, w.tools(t, "did:plc:alice", otherModel{}))
+	msg := call(t, alice, "remember", map[string]any{"text": "anything"}, nil)
+	if !strings.Contains(msg, "not stored") || !strings.Contains(msg, "sha256:different") {
+		t.Fatalf("remember with the wrong model: %q", msg)
+	}
+	if n := w.net.Calls("com.atproto.space.createRecord"); n != 0 {
+		t.Fatalf("a record was written anyway (%d)", n)
+	}
+	if msg := call(t, alice, "recall", map[string]any{"query": "anything"}, nil); msg == "" {
+		t.Fatal("recall with the wrong model succeeded")
+	}
+}
+
+func TestNoDeclaredModel(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t, false)
+	alice := connect(t, w.tools(t, "did:plc:alice", embed.HashingProvider{}))
+	if msg := call(t, alice, "remember", map[string]any{"text": "anything"}, nil); !strings.Contains(msg, "engram-config") {
+		t.Fatalf("remember without a config: %q", msg)
+	}
+}
+
+func TestModelChangeReembeds(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t, true)
+	at := w.tools(t, "did:plc:alice", embed.HashingProvider{})
+	alice := connect(t, at)
+	call(t, alice, "remember", map[string]any{"text": "the kettle is in the left cupboard"}, nil)
+	call(t, alice, "remember", map[string]any{"text": "tea bags are next to the kettle"}, nil)
+	w.deliver(t, "did:plc:alice")
+
+	// The authority announces a new model; alice's agent re-embeds.
+	w.declare(t, lex.Config{ModelInfo: model, Next: &nextModel})
+	n, err := at.Reembed(context.Background())
+	if err != nil || n != 2 {
+		t.Fatalf("reembed: %d %v", n, err)
+	}
+	if n, _ := at.Reembed(context.Background()); n != 0 {
+		t.Fatalf("second reembed rewrote %d", n)
+	}
+	w.deliver(t, "did:plc:alice")
+	st, _ := w.av.Store.Status(context.Background(), w.net.Space)
+	if st.Building == nil || st.BuildingMemories != 2 {
+		t.Fatalf("building index: %+v", st)
+	}
+	// New memories carry both vectors right away.
+	call(t, alice, "remember", map[string]any{"text": "milk is in the fridge door"}, nil)
+	w.deliver(t, "did:plc:alice")
+	if st, _ = w.av.Store.Status(context.Background(), w.net.Space); st.BuildingMemories != 3 {
+		t.Fatalf("new memory missing its next vector: %+v", st)
+	}
+
+	// Promote: recall switches to the new model after re-reading the config.
+	w.declare(t, lex.Config{ModelInfo: nextModel})
+	var got MemoriesOut
+	if msg := call(t, alice, "recall", map[string]any{"query": "where is the kettle", "limit": 1}, &got); msg != "" {
+		t.Fatal(msg)
+	}
+	if len(got.Memories) != 1 || !strings.Contains(got.Memories[0].Text, "kettle") {
+		t.Fatalf("recall after promotion: %+v", got)
 	}
 }
