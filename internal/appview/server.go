@@ -151,6 +151,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /xrpc/garden.engram.exportSpace", s.owned(q, s.handleExport))
 	mux.HandleFunc("POST /xrpc/garden.engram.warmSpace", s.ownedBody(s.handleWarm))
 	mux.HandleFunc("POST /xrpc/garden.engram.registerSpace", s.ownedBody(s.handleRegister))
+	mux.HandleFunc("GET /xrpc/garden.engram.describeService", s.handleDescribe)
 	mux.HandleFunc("POST /xrpc/com.atproto.space.notifyWrite", s.ownedBody(s.handleNotifyWrite))
 	mux.HandleFunc("POST /xrpc/com.atproto.space.notifySpaceDeleted", s.ownedBody(s.handleNotifySpaceDeleted))
 	mux.HandleFunc("GET /.well-known/did.json", s.handleDIDDoc)

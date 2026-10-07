@@ -124,6 +124,19 @@ func (s *Server) knows(ctx context.Context, spaceURI string) bool {
 	return s.indexes(spaceURI)
 }
 
+// handleDescribe tells clients how to have a space indexed: the account to
+// add as a member, and whether registration is open.
+func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request) {
+	out := map[string]any{"did": s.ServiceDID, "registration": "closed"}
+	if s.OpenRegistration {
+		out["registration"] = "open"
+	}
+	if s.Indexer != nil && s.Indexer.Client != nil {
+		out["account"] = s.Indexer.Client.DID().String()
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // handleRegister indexes a new space. Any member may ask, with a credential
 // for the space. The appview's own account must be a member: adding it is
 // how the authority agrees to have the space indexed.

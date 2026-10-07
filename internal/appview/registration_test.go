@@ -69,6 +69,15 @@ func TestRegisterSpace(t *testing.T) {
 	}
 }
 
+func TestDescribeService(t *testing.T) {
+	t.Parallel()
+	f := registrationFixture(t, true)
+	status, body := f.get(t, nil, "", "garden.engram.describeService", nil)
+	if status != 200 || body["did"] != serviceDID || body["account"] != f.client.DID().String() || body["registration"] != "open" {
+		t.Fatalf("describe: %d %v", status, body)
+	}
+}
+
 func TestRegisterSpaceClosed(t *testing.T) {
 	t.Parallel()
 	f := registrationFixture(t, false)

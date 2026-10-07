@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/bluesky-social/indigo/atproto/atclient"
@@ -81,40 +80,33 @@ func run() error {
 		return nil
 	}
 
-	var cfg lex.Config
+	var action lex.ConfigAction
+	var m lex.ModelInfo
 	switch {
 	case *model != "":
-		m, err := describe(ctx, *model, *dims)
-		if err != nil {
+		action = lex.Declare
+		if m, err = describe(ctx, *model, *dims); err != nil {
 			return err
 		}
-		cfg = lex.Config{ModelInfo: m}
-		cfg.DocumentPrefix, cfg.QueryPrefix = prefixes(*model, *docPrefix, *queryPrefix)
 	case *next != "":
 		if cur == nil {
 			return errors.New("declare a model with -model first")
 		}
-		m, err := describe(ctx, *next, *dims)
-		if err != nil {
+		action = lex.StartNext
+		if m, err = describe(ctx, *next, *dims); err != nil {
 			return err
 		}
-		cfg = *cur
-		cfg.Next = &m
 	case *promote:
-		if cur == nil || cur.Next == nil {
-			return errors.New("no model change in progress")
-		}
-		cfg = lex.Config{ModelInfo: *cur.Next}
-		cfg.DocumentPrefix, cfg.QueryPrefix = prefixes(cur.Next.Model, *docPrefix, *queryPrefix)
+		action = lex.Promote
 	case *cancelNext:
-		if cur == nil {
-			return errors.New("no config")
-		}
-		cfg = *cur
-		cfg.Next = nil
+		action = lex.CancelNext
 	default:
 		flag.Usage()
 		return errors.New("choose -show, -model, -next, -promote or -cancel-next")
+	}
+	cfg, err := lex.ChangeConfig(cur, action, m, *docPrefix, *queryPrefix)
+	if err != nil {
+		return err
 	}
 	body := map[string]any{
 		"space": spaceURI, "repo": ref.Authority, "collection": lex.ConfigCollection, "rkey": lex.ConfigRkey,
@@ -177,12 +169,4 @@ func describe(ctx context.Context, name string, dims int) (lex.ModelInfo, error)
 		return lex.ModelInfo{}, fmt.Errorf("embedding a probe with %s: %w", name, err)
 	}
 	return lex.ModelInfo{Model: name, ModelDigest: digest, Dims: n}, nil
-}
-
-// prefixes fills in a model's known task prefixes unless given.
-func prefixes(model, doc, query string) (string, string) {
-	if doc == "" && query == "" && strings.HasPrefix(model, "nomic-embed-text") {
-		return "search_document: ", "search_query: "
-	}
-	return doc, query
 }
