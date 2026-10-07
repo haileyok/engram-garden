@@ -254,6 +254,26 @@ func (g *Grants) savePending(ctx context.Context, p pending) error {
 	return blob.PutBytes(ctx, g.Blob, pendingKey(p.State), raw, false)
 }
 
+// Sweep deletes sign-ins nobody finished: their records here and the OAuth
+// client's, older than pendingTTL at now. A callback deletes its own; these
+// are the ones abandoned or refused at the authorization server.
+func (g *Grants) Sweep(ctx context.Context, now time.Time) error {
+	for _, prefix := range []string{pendingPrefix, requestPrefix} {
+		objs, err := g.Blob.List(ctx, prefix)
+		if err != nil {
+			return err
+		}
+		for _, o := range objs {
+			if now.Sub(o.Modified) > pendingTTL {
+				if err := g.Blob.Delete(ctx, o.Key); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // takePending returns and forgets a sign-in in progress, or nil if there
 // is none or it expired.
 func (g *Grants) takePending(ctx context.Context, state string) (*pending, error) {

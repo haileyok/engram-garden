@@ -814,6 +814,12 @@ func (s *Server) Run(ctx context.Context, poll time.Duration, register bool) {
 				s.log().Warn("writing the registry failed", "err", err)
 			}
 		}
+		// One node clears abandoned sign-ins: the registry's coordinator.
+		if s.Grants != nil && s.ring().IsCoordinator() {
+			if err := s.Grants.Sweep(ctx, time.Now()); err != nil {
+				s.log().Warn("clearing abandoned sign-ins failed", "err", err)
+			}
+		}
 		for _, sp := range spaces {
 			if !s.ring().Owns(sp) || !s.granted(ctx, sp) {
 				continue

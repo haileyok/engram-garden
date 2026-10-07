@@ -196,7 +196,9 @@ func sessionKey(did syntax.DID, sessionID string) string {
 	return "oauth/sessions/" + hashKey(did.String()) + "/" + hashKey(sessionID) + ".json"
 }
 
-func requestKey(state string) string { return "oauth/requests/" + hashKey(state) + ".json" }
+const requestPrefix = "oauth/requests/"
+
+func requestKey(state string) string { return requestPrefix + hashKey(state) + ".json" }
 
 // GetSession implements oauth.ClientAuthStore.
 func (b BlobAuthStore) GetSession(ctx context.Context, did syntax.DID, sessionID string) (*oauth.ClientSessionData, error) {

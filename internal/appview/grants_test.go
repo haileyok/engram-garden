@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bluesky-social/indigo/atproto/atclient"
+	"github.com/bluesky-social/indigo/atproto/auth/oauth"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 
 	"github.com/haileyok/engram-garden/internal/blob"
@@ -523,6 +524,45 @@ func TestOtherNodeLearnsRegistration(t *testing.T) {
 	other := &Server{Store: f.srv.Store, Indexer: f.srv.Indexer, Dir: f.srv.Dir, ServiceDID: serviceDID, Blob: f.srv.Blob}
 	if !other.knows(context.Background(), f.net.Space) {
 		t.Fatal("other node didn't find the registration")
+	}
+}
+
+// TestSweepAbandonedSignIns: sign-ins nobody finished don't pile up in the
+// bucket.
+func TestSweepAbandonedSignIns(t *testing.T) {
+	t.Parallel()
+	f := grantFixture(t, true)
+	ctx := context.Background()
+	f.start(t, browser(t), modeGrant, "") // abandoned at the authorization server
+	st := BlobAuthStore{f.srv.Blob}
+	if err := st.SaveAuthRequestInfo(ctx, oauth.AuthRequestData{State: "abandoned"}); err != nil {
+		t.Fatal(err)
+	}
+	count := func() int {
+		n := 0
+		for _, prefix := range []string{pendingPrefix, requestPrefix} {
+			objs, err := f.srv.Blob.List(ctx, prefix)
+			if err != nil {
+				t.Fatal(err)
+			}
+			n += len(objs)
+		}
+		return n
+	}
+	if n := count(); n != 2 {
+		t.Fatalf("%d sign-in objects", n)
+	}
+	if err := f.grants.Sweep(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(); n != 2 {
+		t.Fatalf("swept fresh sign-ins: %d left", n)
+	}
+	if err := f.grants.Sweep(ctx, time.Now().Add(pendingTTL+time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(); n != 0 {
+		t.Fatalf("%d abandoned sign-in objects left", n)
 	}
 }
 
