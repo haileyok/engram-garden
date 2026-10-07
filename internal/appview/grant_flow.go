@@ -15,9 +15,11 @@ import (
 	"time"
 
 	"github.com/bluesky-social/indigo/atproto/syntax"
+	"github.com/haileyok/cocoon/oauth/scopes"
 	"github.com/haileyok/cocoon/space"
 
 	"github.com/haileyok/engram-garden/internal/blob"
+	"github.com/haileyok/engram-garden/internal/spaceclient"
 )
 
 // grantCookie ties a grant's callback to the browser that started it, so
@@ -117,7 +119,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		s.page(w, http.StatusBadRequest, "Start again", "This sign-in expired or was already used. Start again from the web app.")
 		return
 	}
-	res, err := s.Grants.Auth.Finish(ctx, q)
+	res, err := s.Grants.Auth.Finish(ctx, p.Mode, q)
 	if errors.Is(err, ErrDeclined) {
 		s.finish(w, r, p.Return, http.StatusBadRequest, "", "You declined, so nothing changed.")
 		return
@@ -129,7 +131,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	ref, _ := space.ParseRef(p.Space)
 	if res.DID.String() != ref.Authority {
-		s.revoke(ctx, res.DID, res.SessionID)
+		s.revoke(ctx, p.Mode, res.DID, res.SessionID)
 		s.finish(w, r, p.Return, http.StatusForbidden, "",
 			fmt.Sprintf("Only the space's authority (%s) can do this, and you signed in as %s.", ref.Authority, res.DID))
 		return
@@ -143,43 +145,36 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) completeGrant(w http.ResponseWriter, r *http.Request, p *pending, res *AuthResult) {
 	ctx := r.Context()
-	if !hasScope(res.Scopes, GrantScopes[1]) {
+	discard := func() { s.revoke(ctx, modeGrant, res.DID, res.SessionID) }
+	if !readsSpace(res.Scopes, res.DID.String(), p.Space) {
 		s.log().Info("a grant came back without read access", "space", p.Space, "scopes", res.Scopes)
-		s.revoke(ctx, res.DID, res.SessionID)
+		discard()
 		s.finish(w, r, p.Return, http.StatusForbidden, "", "Your account's server didn't give read access to your memory spaces, so the appview can't index this one.")
+		return
+	}
+	// Check the new grant really reads the space before it replaces
+	// anything.
+	if err := s.checkGrant(ctx, p.Space, res); err != nil {
+		s.log().Info("a grant couldn't read its space", "space", p.Space, "err", err)
+		discard()
+		s.finish(w, r, p.Return, http.StatusForbidden, "", "The appview couldn't read the space with your grant. Try again.")
 		return
 	}
 	old, err := s.Grants.Get(ctx, p.Space)
 	if err != nil {
-		s.revoke(ctx, res.DID, res.SessionID)
+		discard()
 		s.writePageErr(w, err)
 		return
 	}
 	g := Grant{Space: p.Space, DID: res.DID.String(), SessionID: res.SessionID, GrantedAt: time.Now().UTC()}
 	if err := s.Grants.Put(ctx, g); err != nil {
-		s.revoke(ctx, res.DID, res.SessionID)
+		discard()
 		s.writePageErr(w, err)
 		return
 	}
-	// Check the grant really reads the space before keeping it.
-	client := s.Indexer.Client
-	client.Invalidate(p.Space)
-	if _, err := client.Credential(ctx, p.Space); err != nil {
-		s.log().Info("a grant couldn't read its space", "space", p.Space, "err", err)
-		if old != nil {
-			err = s.Grants.Put(ctx, *old)
-		} else {
-			err = s.Grants.Delete(ctx, p.Space)
-		}
-		if err != nil {
-			s.log().Error("restoring the earlier grant failed", "space", p.Space, "err", err)
-		}
-		s.revoke(ctx, res.DID, res.SessionID)
-		s.finish(w, r, p.Return, http.StatusForbidden, "", "The appview couldn't read the space with your grant.")
-		return
-	}
+	s.Indexer.Client.Invalidate(p.Space)
 	if old != nil && old.SessionID != g.SessionID {
-		s.revoke(ctx, syntax.DID(old.DID), old.SessionID)
+		s.revoke(ctx, modeGrant, syntax.DID(old.DID), old.SessionID)
 	}
 	if err := s.register(ctx, p.Space); err != nil {
 		s.writePageErr(w, err)
@@ -192,7 +187,7 @@ func (s *Server) completeGrant(w http.ResponseWriter, r *http.Request, p *pendin
 func (s *Server) completeStop(w http.ResponseWriter, r *http.Request, p *pending, res *AuthResult) {
 	ctx := r.Context()
 	// The stop sign-in only proved who's asking.
-	defer s.revoke(ctx, res.DID, res.SessionID)
+	defer s.revoke(ctx, modeStop, res.DID, res.SessionID)
 	g, err := s.Grants.Get(ctx, p.Space)
 	if err != nil {
 		s.writePageErr(w, err)
@@ -203,7 +198,7 @@ func (s *Server) completeStop(w http.ResponseWriter, r *http.Request, p *pending
 			s.writePageErr(w, err)
 			return
 		}
-		s.revoke(ctx, syntax.DID(g.DID), g.SessionID)
+		s.revoke(ctx, modeGrant, syntax.DID(g.DID), g.SessionID)
 	}
 	s.Indexer.Client.Invalidate(p.Space)
 	s.log().Info("space indexing stopped", "space", p.Space, "by", res.DID)
@@ -246,15 +241,47 @@ func (s *Server) register(ctx context.Context, spaceURI string) error {
 	return nil
 }
 
-func (s *Server) revoke(ctx context.Context, did syntax.DID, sessionID string) {
-	if err := s.Grants.Auth.Revoke(ctx, did, sessionID); err != nil {
+// checkGrant gets a credential for the space with a new grant's session.
+func (s *Server) checkGrant(ctx context.Context, spaceURI string, res *AuthResult) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	api, err := s.Grants.Auth.Resume(ctx, res.DID, res.SessionID)
+	if err != nil {
+		return err
+	}
+	c, err := spaceclient.NewDelegated(spaceclient.SessionDelegator{Session: api}, s.Indexer.Client.Dir, s.Indexer.Client.HTTP)
+	if err != nil {
+		return err
+	}
+	_, err = c.Credential(ctx, spaceURI)
+	return err
+}
+
+func (s *Server) revoke(ctx context.Context, mode string, did syntax.DID, sessionID string) {
+	if err := s.Grants.Auth.Revoke(ctx, mode, did, sessionID); err != nil {
 		s.log().Warn("revoking a sign-in failed", "did", did, "err", err)
 	}
 }
 
-func hasScope(granted []string, want string) bool {
+// readsSpace reports whether granted OAuth scopes let did read the space.
+// Authorization servers rewrite scopes when they issue a token (Cocoon
+// resolves authority=self to the user's DID and writes each scope
+// canonically), so this reads what each scope means.
+func readsSpace(granted []string, did, spaceURI string) bool {
+	ref, err := space.ParseRef(spaceURI)
+	if err != nil {
+		return false
+	}
+	want := scopes.SpaceMatch{Type: ref.Type, Authority: ref.Authority, Skey: ref.Skey, Action: "read"}
 	for _, g := range granted {
-		if g == want {
+		p := scopes.ParseSpacePermission(g)
+		if p == nil {
+			continue
+		}
+		if p.IsSelfAuthority() {
+			p = p.WithResolvedAuthority(did)
+		}
+		if p.Matches(want) {
 			return true
 		}
 	}

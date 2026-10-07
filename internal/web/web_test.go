@@ -71,7 +71,7 @@ func (a *autoGrant) Start(_ context.Context, did syntax.DID, mode string) (strin
 	return a.callback + "?" + url.Values{"state": {state}, "iss": {"https://pds.test"}, "code": {"c"}}.Encode(), state, nil
 }
 
-func (a *autoGrant) Finish(_ context.Context, q url.Values) (*appview.AuthResult, error) {
+func (a *autoGrant) Finish(_ context.Context, _ string, q url.Values) (*appview.AuthResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	p, ok := a.pending[q.Get("state")]
@@ -90,7 +90,7 @@ func (a *autoGrant) Resume(_ context.Context, did syntax.DID, _ string) (*atclie
 	return a.net.Session(a.net.AccountByDID(did.String())), nil
 }
 
-func (a *autoGrant) Revoke(context.Context, syntax.DID, string) error { return nil }
+func (a *autoGrant) Revoke(context.Context, string, syntax.DID, string) error { return nil }
 
 type fixture struct {
 	net     *spacetest.Net

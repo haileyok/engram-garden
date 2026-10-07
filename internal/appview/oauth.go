@@ -97,15 +97,21 @@ func (s stateCapture) SaveAuthRequestInfo(ctx context.Context, info oauth.AuthRe
 	return s.ClientAuthStore.SaveAuthRequestInfo(ctx, info)
 }
 
+// app is the client for a flow. They differ in the scopes they ask for, and
+// for a development client in its ID too, so each flow's callback and
+// revocation must go through the client that started it.
+func (o *OAuthClient) app(mode string) *oauth.ClientApp {
+	if mode == modeStop {
+		return o.stop
+	}
+	return o.grant
+}
+
 // Start implements Authorizer. Starting from the DID makes indigo check the
 // token's subject is that account.
 func (o *OAuthClient) Start(ctx context.Context, did syntax.DID, mode string) (string, string, error) {
-	app := o.grant
-	if mode == modeStop {
-		app = o.stop
-	}
 	var state string
-	redirect, err := app.StartAuthFlow(context.WithValue(ctx, stateKey{}, &state), did.String())
+	redirect, err := o.app(mode).StartAuthFlow(context.WithValue(ctx, stateKey{}, &state), did.String())
 	if err != nil {
 		return "", "", err
 	}
@@ -116,8 +122,8 @@ func (o *OAuthClient) Start(ctx context.Context, did syntax.DID, mode string) (s
 }
 
 // Finish implements Authorizer.
-func (o *OAuthClient) Finish(ctx context.Context, q url.Values) (*AuthResult, error) {
-	sess, err := o.grant.ProcessCallback(ctx, q)
+func (o *OAuthClient) Finish(ctx context.Context, mode string, q url.Values) (*AuthResult, error) {
+	sess, err := o.app(mode).ProcessCallback(ctx, q)
 	if err != nil {
 		var ce *oauth.AuthRequestCallbackError
 		if errors.As(err, &ce) && ce.ErrorCode == "access_denied" {
@@ -138,8 +144,8 @@ func (o *OAuthClient) Resume(ctx context.Context, did syntax.DID, sessionID stri
 }
 
 // Revoke implements Authorizer.
-func (o *OAuthClient) Revoke(ctx context.Context, did syntax.DID, sessionID string) error {
-	return o.grant.Logout(ctx, did, sessionID)
+func (o *OAuthClient) Revoke(ctx context.Context, mode string, did syntax.DID, sessionID string) error {
+	return o.app(mode).Logout(ctx, did, sessionID)
 }
 
 // ServeMetadata serves the client metadata document.

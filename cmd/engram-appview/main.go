@@ -126,7 +126,7 @@ func runImport(log *slog.Logger, path string) error {
 
 // grantCookieKey derives the key that ties grant sign-ins to browsers from
 // the OAuth key, so every node shares it. A development client has no key,
-// and gets a random one.
+// and gets a random one, so a development appview runs as one node.
 func grantCookieKey(key atcrypto.PrivateKey) ([]byte, error) {
 	if key == nil {
 		k := make([]byte, 32)

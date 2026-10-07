@@ -60,7 +60,7 @@ func (a *fakeAuth) Start(_ context.Context, did syntax.DID, mode string) (string
 	return "https://pds.test/authorize?state=" + state, state, nil
 }
 
-func (a *fakeAuth) Finish(_ context.Context, q url.Values) (*AuthResult, error) {
+func (a *fakeAuth) Finish(_ context.Context, _ string, q url.Values) (*AuthResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	state := q.Get("state")
@@ -101,7 +101,7 @@ func (a *fakeAuth) Resume(_ context.Context, did syntax.DID, sid string) (*atcli
 	return c, nil
 }
 
-func (a *fakeAuth) Revoke(_ context.Context, _ syntax.DID, sid string) error {
+func (a *fakeAuth) Revoke(_ context.Context, _ string, _ syntax.DID, sid string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.revoked[sid] = true
@@ -338,6 +338,36 @@ func TestGrantNeedsReadScope(t *testing.T) {
 	}
 }
 
+// TestGrantScopesAsIssued: authorization servers rewrite scopes when they
+// issue a token (Cocoon resolves authority=self to the user's DID and
+// writes the scope canonically), so the check reads what the scopes mean
+// rather than comparing strings.
+func TestGrantScopesAsIssued(t *testing.T) {
+	t.Parallel()
+	authority := spacetest.New(t).Authority.DID // same DID in every network
+	for _, c := range []struct {
+		scopes []string
+		ok     bool
+	}{
+		{[]string{"atproto", "space:garden.engram.space?authority=" + authority + "&action=read"}, true},
+		{[]string{"atproto", "space:garden.engram.space?action=read"}, true},
+		{[]string{"atproto", "space:garden.engram.space?authority=*&action=read&action=delete&collection=garden.engram.memory"}, true},
+		{[]string{"atproto", "space:garden.engram.space?authority=did:plc:someoneelse&action=read"}, false},
+		{[]string{"atproto", "space:garden.engram.space?authority=" + authority + "&action=read_self"}, false},
+		{[]string{"atproto", "space:other.app.space?authority=" + authority + "&action=read"}, false},
+		{[]string{"atproto"}, false},
+	} {
+		f := grantFixture(t, true)
+		b := browser(t)
+		_, state := f.start(t, b, modeGrant, "")
+		f.auth.scopes[state] = c.scopes
+		resp, page := f.callback(t, b, state, nil)
+		if got := resp.StatusCode == http.StatusOK; got != c.ok {
+			t.Errorf("scopes %q: %d %s", c.scopes, resp.StatusCode, page)
+		}
+	}
+}
+
 func TestGrantClosedRegistration(t *testing.T) {
 	t.Parallel()
 	f := grantFixture(t, false)
@@ -421,6 +451,32 @@ func TestGrantLapsed(t *testing.T) {
 	}
 	if !f.auth.isRevoked(g.SessionID) {
 		t.Fatal("the old session wasn't revoked")
+	}
+}
+
+// TestFailedRegrantKeepsGrant: granting again with a sign-in that can't
+// read the space leaves the working grant in place.
+func TestFailedRegrantKeepsGrant(t *testing.T) {
+	t.Parallel()
+	f := grantFixture(t, true)
+	f.flow(t, modeGrant, "")
+	f.srv.Jobs.Wait()
+	g, _ := f.grants.Get(context.Background(), f.net.Space)
+
+	b := browser(t)
+	_, state := f.start(t, b, modeGrant, "")
+	f.auth.refuse("session-" + state)
+	if resp, _ := f.callback(t, b, state, nil); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("a grant that can't read: %d", resp.StatusCode)
+	}
+	if g2, _ := f.grants.Get(context.Background(), f.net.Space); g2 == nil || g2.SessionID != g.SessionID {
+		t.Fatalf("grant replaced: %+v", g2)
+	}
+	if f.auth.isRevoked(g.SessionID) || !f.auth.isRevoked("session-"+state) {
+		t.Fatal("revoked the wrong session")
+	}
+	if a := f.access(t); a["state"] != "granted" {
+		t.Fatalf("access: %v", a)
 	}
 }
 

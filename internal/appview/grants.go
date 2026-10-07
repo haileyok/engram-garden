@@ -59,13 +59,13 @@ type Authorizer interface {
 	// StopScopes (modeStop). It returns where to send the browser, and the
 	// OAuth state that will come back to the callback.
 	Start(ctx context.Context, did syntax.DID, mode string) (redirect, state string, err error)
-	// Finish completes a callback.
-	Finish(ctx context.Context, query url.Values) (*AuthResult, error)
-	// Resume returns an API client for a kept session. It refreshes tokens
-	// as needed.
+	// Finish completes the callback of a sign-in started with mode.
+	Finish(ctx context.Context, mode string, query url.Values) (*AuthResult, error)
+	// Resume returns an API client for a grant's session. It refreshes
+	// tokens as needed.
 	Resume(ctx context.Context, did syntax.DID, sessionID string) (*atclient.APIClient, error)
-	// Revoke revokes a session's tokens and forgets it.
-	Revoke(ctx context.Context, did syntax.DID, sessionID string) error
+	// Revoke revokes the tokens of a session made with mode and forgets it.
+	Revoke(ctx context.Context, mode string, did syntax.DID, sessionID string) error
 }
 
 // Grant lets the appview read one space as its authority.
