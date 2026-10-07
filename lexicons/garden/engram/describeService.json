@@ -12,11 +12,15 @@
           "required": ["did", "registration"],
           "properties": {
             "did": { "type": "string", "format": "did", "description": "The service DID requests are addressed to." },
-            "account": { "type": "string", "format": "did", "description": "The appview's account. Add it to a space as a member to let the appview index it." },
+            "grantUrl": {
+              "type": "string",
+              "format": "uri",
+              "description": "Where a space's authority lets the appview read the space, so it indexes it. Open it in a browser with ?space=<space URI>&mode=grant (or mode=stop to take that back) and optionally return=<URL to come back to>, on an origin the appview allows."
+            },
             "registration": {
               "type": "string",
               "knownValues": ["open", "closed"],
-              "description": "open: members can register spaces with garden.engram.registerSpace. closed: the operator chooses the spaces."
+              "description": "open: any space's authority can have it indexed at grantUrl. closed: only the spaces the operator chooses."
             }
           }
         }

@@ -5,13 +5,13 @@ import { useRouter } from "../router";
 import { spacePath, validSpaceName } from "../lib/uri";
 import { describeError } from "../ui";
 import { ModelForm } from "../components/ModelForm";
+import { goToGrant } from "../components/Indexing";
 import { rememberSpace } from "./Home";
 
 type Step = { label: string; state: "todo" | "doing" | "done" | "failed" | "skipped"; note?: string };
 
-// Creating a memory space: create it at your PDS, add the appview's account
-// so it can read the space, declare the model, and ask the appview to
-// index it.
+// Creating a memory space: create it at your PDS, declare the model, then
+// let the appview read it (on the appview's grant page) so it indexes it.
 export function NewSpace() {
   const session = useSession();
   const { navigate } = useRouter();
@@ -30,9 +30,7 @@ export function NewSpace() {
     e.preventDefault();
     const plan: Step[] = [
       { label: "Create the space", state: "todo" },
-      { label: "Let the appview read it", state: "todo" },
       { label: "Declare the model", state: model ? "todo" : "skipped", note: model ? undefined : "do it later under Manage" },
-      { label: "Start indexing", state: "todo" },
     ];
     setSteps([...plan]);
     const set = (i: number, state: Step["state"], note?: string) => {
@@ -49,32 +47,19 @@ export function NewSpace() {
     } catch (err) {
       return set(0, "failed", describeError(err));
     }
-    try {
-      set(1, "doing");
-      if (!service?.account) throw new Error("the appview didn't say which account to add");
-      await api.putMember(uri, service.account, true, false);
-      set(1, "done");
-    } catch (err) {
-      set(1, "failed", describeError(err));
-    }
     if (model) {
       try {
-        set(2, "doing");
+        set(1, "doing");
         await api.putConfig(uri, "declare", model, prefixes);
-        set(2, "done");
+        set(1, "done");
       } catch (err) {
-        set(2, "failed", describeError(err));
+        set(1, "failed", describeError(err));
       }
     }
-    try {
-      set(3, "doing");
-      if (service?.registration !== "open") throw new Error("this appview indexes only spaces its operator adds");
-      await api.register(uri);
-      set(3, "done");
-    } catch (err) {
-      set(3, "failed", describeError(err));
-    }
   };
+
+  const finished = created && steps?.every((s) => s.state !== "doing" && s.state !== "todo");
+  const canGrant = service?.grantUrl && service.registration === "open";
 
   const nameOk = validSpaceName(name);
   return (
@@ -117,10 +102,27 @@ export function NewSpace() {
               </li>
             ))}
           </ol>
-          {created && steps.every((s) => s.state !== "doing" && s.state !== "todo") && (
-            <button className="primary" onClick={() => navigate(spacePath(created))}>
-              Open the space
-            </button>
+          {finished && (
+            <>
+              {canGrant ? (
+                <p>
+                  Last, let the appview read the space so it can index it. You'll confirm on your account's sign-in
+                  page; it gets read-only access to the memory spaces you run.
+                </p>
+              ) : (
+                <p className="muted">This appview indexes only the spaces its operator adds.</p>
+              )}
+              <div className="row">
+                {canGrant && (
+                  <button className="primary" onClick={() => goToGrant(service!, created!, "grant")}>
+                    Let the appview index it
+                  </button>
+                )}
+                <button className={canGrant ? "" : "primary"} onClick={() => navigate(spacePath(created!))}>
+                  {canGrant ? "Not now" : "Open the space"}
+                </button>
+              </div>
+            </>
           )}
         </section>
       )}

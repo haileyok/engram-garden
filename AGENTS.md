@@ -12,8 +12,10 @@ Guidance for working on Engram Garden.
 - `internal/embed`: OpenAI-compatible embedding client, the provider that
   checks the local model's digest against the space's, and the offline
   `Hashing` embedder.
-- `internal/spaceclient`: acts as one account in spaces. It handles the
-  delegation token to credential exchange, cached credentials and signed requests.
+- `internal/spaceclient`: reads spaces for a user. It handles the
+  delegation token to credential exchange, cached credentials and signed
+  requests. Delegation tokens come from a `Delegator`: the user's own PDS
+  session (agents, the web app) or, in the appview, a space's grant.
 - `internal/indexer`: syncs member repos. It applies oplog entries to a set
   hash, checks the result against the member's signed commit, and falls back
   to a verified `getRepo` export. The authority's config record is honored
@@ -40,9 +42,14 @@ Guidance for working on Engram Garden.
   JSON.
 - `web/`: the React frontend (Vite, TypeScript, no router library). It
   builds into `internal/web/dist/app`, which `engram-web` embeds.
+- The appview has no account. A space's authority grants it read-only OAuth
+  access (`internal/appview/grants.go`, `grant_flow.go`, `oauth.go`); grants
+  and OAuth sessions live in the bucket. Read
+  `docs/design/indexing-access.md` before changing it. Tests sign in through
+  a fake `Authorizer`.
 - Registered spaces: `internal/appview/registration.go`. The appview indexes
-  `ENGRAM_SPACES` plus spaces registered with `garden.engram.registerSpace`,
-  stored as write-once objects under `registered-spaces/`.
+  `ENGRAM_SPACES` plus spaces whose authority granted access, recorded as
+  write-once objects under `registered-spaces/`.
 - `internal/spacetest`: in-memory Spaces network for tests.
 - Spaces primitives (tokens, HTTP signatures, commits, CARs) come from
   `github.com/haileyok/cocoon/space`. Fix protocol bugs there, not here.

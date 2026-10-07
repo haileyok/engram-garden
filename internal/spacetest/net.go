@@ -403,7 +403,9 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 			return nil, &xerr{400, "InvalidDelegationToken", "wrong space"}
 		}
 		n.mu.Lock()
-		member := n.members[tok.Payload.Iss]
+		// The authority is always admitted, as in Cocoon, so it can't lock
+		// itself out.
+		member := n.members[tok.Payload.Iss] || tok.Payload.Iss == n.Authority.DID
 		n.mu.Unlock()
 		if !member {
 			return nil, &xerr{403, "Forbidden", "not a member"}

@@ -7,6 +7,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,10 +16,12 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/bluesky-social/indigo/atproto/atcrypto"
 	"github.com/haileyok/cocoon/space"
 
 	"github.com/haileyok/engram-garden/internal/appview"
@@ -120,6 +124,23 @@ func runImport(log *slog.Logger, path string) error {
 	return nil
 }
 
+// grantCookieKey derives the key that ties grant sign-ins to browsers from
+// the OAuth key, so every node shares it. A development client has no key,
+// and gets a random one.
+func grantCookieKey(key atcrypto.PrivateKey) ([]byte, error) {
+	if key == nil {
+		k := make([]byte, 32)
+		_, err := rand.Read(k)
+		return k, err
+	}
+	exp, ok := key.(atcrypto.PrivateKeyExportable)
+	if !ok {
+		return nil, errors.New("ENGRAM_OAUTH_KEY: can't derive a cookie key from this key type")
+	}
+	h := sha256.Sum256(append([]byte("engram-appview grant cookies\x00"), exp.Bytes()...))
+	return h[:], nil
+}
+
 func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -145,7 +166,13 @@ func run(log *slog.Logger) error {
 			return fmt.Errorf("ENGRAM_SPACES: %s: %w", sp, err)
 		}
 	}
-	publicURL := config.Get("ENGRAM_PUBLIC_URL", "")
+	// The public URL is also the OAuth client the authorities grant access
+	// to, so the appview can't read any space without it.
+	publicURL, err := config.Require("ENGRAM_PUBLIC_URL")
+	if err != nil {
+		return err
+	}
+	publicURL = strings.TrimSuffix(publicURL, "/")
 	poll, err := time.ParseDuration(config.Get("ENGRAM_POLL_INTERVAL", "5m"))
 	if err != nil || poll <= 0 {
 		return fmt.Errorf("ENGRAM_POLL_INTERVAL must be a positive duration, like 5m")
@@ -160,11 +187,24 @@ func run(log *slog.Logger) error {
 	}
 
 	dir := config.Directory()
-	session, err := config.Login(ctx, dir)
-	if err != nil {
-		return fmt.Errorf("logging in: %w", err)
+	var key atcrypto.PrivateKey
+	if raw := config.Get("ENGRAM_OAUTH_KEY", ""); raw != "" {
+		if key, err = atcrypto.ParsePrivateMultibase(raw); err != nil {
+			return fmt.Errorf("ENGRAM_OAUTH_KEY: %w", err)
+		}
 	}
-	client, err := spaceclient.New(session, dir, nil)
+	oauthClient, err := appview.NewOAuthClient(appview.OAuthConfig{
+		PublicURL: publicURL, Key: key, Store: appview.BlobAuthStore{Blob: bs}, Dir: dir,
+	})
+	if err != nil {
+		return fmt.Errorf("ENGRAM_PUBLIC_URL / ENGRAM_OAUTH_KEY: %w", err)
+	}
+	cookieKey, err := grantCookieKey(key)
+	if err != nil {
+		return err
+	}
+	grants := &appview.Grants{Blob: bs, Auth: oauthClient}
+	client, err := spaceclient.NewDelegated(grants, dir, nil)
 	if err != nil {
 		return err
 	}
@@ -180,16 +220,19 @@ func run(log *slog.Logger) error {
 		Blob:       bs,
 
 		OpenRegistration: openRegistration,
+		Grants:           grants,
+		ReturnOrigins:    config.List("ENGRAM_RETURN_ORIGINS"),
+		CookieKey:        cookieKey,
 	}
 	if err := srv.LoadRegistrations(ctx); err != nil {
 		return fmt.Errorf("reading registered spaces: %w", err)
 	}
 
-	// Notifications need a public endpoint; without one, polling alone keeps
-	// the index current.
-	register := publicURL != ""
+	// Space hosts deliver notifications only to public HTTPS endpoints;
+	// otherwise polling alone keeps the index current.
+	register := strings.HasPrefix(publicURL, "https://")
 	if !register {
-		log.Warn("ENGRAM_PUBLIC_URL unset: not registering for notifications, relying on polling", "interval", poll)
+		log.Warn("ENGRAM_PUBLIC_URL isn't https: not registering for notifications, relying on polling", "interval", poll)
 	}
 	var bg sync.WaitGroup
 	bg.Add(2)
@@ -210,7 +253,7 @@ func run(log *slog.Logger) error {
 		defer cancel()
 		_ = hs.Shutdown(shutdown)
 	}()
-	log.Info("engram-appview listening", "addr", addr, "service", srv.ServiceID(), "account", client.DID(),
+	log.Info("engram-appview listening", "addr", addr, "service", srv.ServiceID(), "grants", srv.GrantURL(),
 		"spaces", srv.Spaces, "indexed", len(srv.IndexedSpaces()), "registration", openRegistration, "node", ring.Self, "nodes", len(ring.Nodes), "epoch", ring.Epoch)
 	err = hs.ListenAndServe()
 	// Stop the background loops (if the server failed on its own), wait

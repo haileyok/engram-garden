@@ -34,9 +34,11 @@ and `recall` tools.
   for the space, carrying its vector, so every memory is attributed to the
   agent that wrote it, and an agent can only delete its own. The agent
   embeds memories and queries itself; the appview never runs a model.
-- **The appview** has an account of its own, which is also a member. It
-  exchanges that account's delegation token for a space credential,
-  registers with the authority for write notifications, and reads each
+- **The appview** has no account. The space's authority grants it
+  read-only OAuth access to the spaces they govern (once, in the web app).
+  The appview uses that grant to get delegation tokens from the
+  authority's PDS, exchanges them for space credentials, registers with the
+  authority for write notifications, and reads each
   member's repo changes. Every change is checked against the member's signed
   commit before it's indexed. When a sync can't be verified, it falls back to
   a full verified export of that repo. Memories whose vector doesn't match
@@ -61,11 +63,10 @@ and `recall` tools.
 | `garden.engram.searchMemories` | query | Vector search with `vector`, `model`, `modelDigest`, `limit`, `author`, `tags` and `since` |
 | `garden.engram.getMemory` | query | One memory by URI |
 | `garden.engram.listMemories` | query | Newest first, paged, with `author` and `tags` filters |
-| `garden.engram.getSpaceStatus` | query | The space's model, memory count, and authors whose vectors don't match |
+| `garden.engram.getSpaceStatus` | query | The space's model, memory count, authors whose vectors don't match, and whether the appview's access is granted, missing or lapsed |
 | `garden.engram.warmSpace` | procedure | Start loading a space's index ahead of searches |
 | `garden.engram.exportSpace` | query | Download the space's index as a tar |
-| `garden.engram.registerSpace` | procedure | Ask the appview to index a space. Any member may ask; the appview's account must be a member |
-| `garden.engram.describeService` | query | The appview's account (add it to a space so the appview can index it) and whether registration is open |
+| `garden.engram.describeService` | query | The appview's DID, whether registration is open, and `grantUrl`, where a space's authority lets the appview index it |
 
 They live in [`lexicons/`](lexicons/garden/engram).
 
@@ -74,11 +75,11 @@ They live in [`lexicons/`](lexicons/garden/engram).
 | Variable | Default | |
 |---|---|---|
 | `ENGRAM_SPACES` | | Comma-separated space URIs to always index (required when registration is closed) |
-| `ENGRAM_REGISTRATION` | `open` | `open`: members can register more spaces with `garden.engram.registerSpace`, as long as the appview's account is a member of the space. `closed`: only `ENGRAM_SPACES`. |
-| `ENGRAM_SERVICE_DID` | | The appview's DID, e.g. `did:web:engram.garden` (required) |
-| `ENGRAM_PUBLIC_URL` | | Public HTTPS URL. When set, the appview serves its `did:web` document and registers for notifications. When unset, it polls. |
-| `ENGRAM_IDENTIFIER` / `ENGRAM_PASSWORD` | | The appview account's handle or DID, and its password (required) |
-| `ENGRAM_PDS_HOST` | resolved | Skip PDS resolution for the account |
+| `ENGRAM_REGISTRATION` | `open` | `open`: any space's authority can have the appview index it by granting access. `closed`: only `ENGRAM_SPACES` (which still need their authority's grant). |
+| `ENGRAM_SERVICE_DID` | | The appview's DID, e.g. `did:web:api.engram.garden` (required) |
+| `ENGRAM_PUBLIC_URL` | | Where the appview is served, e.g. `https://api.engram.garden` (required). It serves the `did:web` document and is the OAuth client authorities grant access to. An https URL also registers for notifications; `http://127.0.0.1:<port>` makes a development client and only polls. |
+| `ENGRAM_OAUTH_KEY` | | The appview's OAuth client key, P-256 multibase (`goat key generate -t P-256`). Required for https. |
+| `ENGRAM_RETURN_ORIGINS` | | Comma-separated origins a grant may return to, e.g. `https://engram.garden` |
 | `ENGRAM_LISTEN` | `:8080` | |
 | `ENGRAM_POLL_INTERVAL` | `5m` | Full space sync interval. This is a backstop for missed notifications. |
 | `ENGRAM_STORAGE` | `dir` | `dir` (a local directory) or `s3` |
@@ -102,8 +103,16 @@ At startup the appview checks whether the bucket honors conditional writes,
 and uses them only if it does.
 
 Space hosts deliver notifications only to public HTTPS endpoints. Cocoon,
-for example, refuses private and loopback addresses. A local appview without
-`ENGRAM_PUBLIC_URL` stays current by polling.
+for example, refuses private and loopback addresses. A local appview at
+`http://127.0.0.1:<port>` stays current by polling.
+
+**Indexing a space.** The appview reads a space only with its authority's
+permission: the authority opens the appview's grant page (the web app's
+**Let the appview index this space** button) and approves read-only access
+to the memory spaces they govern on their own account's sign-in page. The
+appview keeps that OAuth session in the bucket and uses it to get delegation
+tokens. Stopping works the same way. See
+[`docs/design/indexing-access.md`](docs/design/indexing-access.md).
 
 **Several nodes.** Give every node the same `ENGRAM_NODES` and
 `ENGRAM_NODES_EPOCH`, and each its own `ENGRAM_NODE_ID`. Each space is owned
@@ -153,7 +162,7 @@ the space's model through an OpenAI-compatible endpoint:
 |---|---|---|
 | `ENGRAM_SPACE` | | The memory space URI (required) |
 | `ENGRAM_IDENTIFIER` / `ENGRAM_PASSWORD` | | The agent account's handle or DID, and its password (required) |
-| `ENGRAM_APPVIEW_URL` | `https://engram.garden` | |
+| `ENGRAM_APPVIEW_URL` | `https://api.engram.garden` | |
 | `ENGRAM_APPVIEW_DID` | `did:web:<appview host>` | |
 | `ENGRAM_EMBED_URL` | `http://localhost:11434/v1` | Any OpenAI-compatible endpoint; Ollama's by default |
 | `ENGRAM_EMBED_API_KEY` | | If the endpoint needs one |
@@ -196,7 +205,7 @@ The tools:
 - browse a space's memories newest first, filtered by author, tag and date, with new memories appearing as agents write them;
 - check the space's status: its model, how many memories are indexed, progress during a model change, and authors whose vectors don't match;
 - delete your own memories;
-- as a space's authority: create spaces, add and remove members (including the appview's account), declare or change the model (it can read the model's digest and size from the Ollama on your computer), and have the appview index the space.
+- as a space's authority: create spaces, add and remove members, declare or change the model (it can read the model's digest and size from the Ollama on your computer), and let the appview index the space or stop it.
 
 There's no search by meaning in the web app yet: that needs a query vector from the space's model, and the browser doesn't have one.
 
@@ -214,8 +223,10 @@ The server keeps OAuth tokens; the browser holds only a signed session cookie. A
 | `ENGRAM_WEB_LISTEN` | `:8090` | |
 | `ENGRAM_WEB_DATA` | `engram-web-data` | Sessions and pending sign-ins, one file each. Keep it private. |
 | `ENGRAM_WEB_COOKIE_KEY` | generated in the data directory | Hex, at least 32 bytes. Signs session cookies. |
-| `ENGRAM_APPVIEW_URL` / `ENGRAM_APPVIEW_DID` | `https://engram.garden` / `did:web:<appview host>` | |
+| `ENGRAM_APPVIEW_URL` / `ENGRAM_APPVIEW_DID` | `https://api.engram.garden` / `did:web:<appview host>` | |
 | `ENGRAM_WEB_ALLOW_PRIVATE` | on for `127.0.0.1` | Allow requests to private addresses, for a local PDS. |
+
+Put the web app's origin in the appview's `ENGRAM_RETURN_ORIGINS`, so granting and stopping come back to it.
 
 ```bash
 make web                     # build the frontend into the binary
@@ -232,16 +243,16 @@ That serves the app against an in-memory network with a few agents writing memor
 
 ## Setting up a space
 
-The quickest way is the web app: **New space** creates the space, adds the appview's account, declares the model and registers the space with the appview. By hand:
+The quickest way is the web app: **New space** creates the space and declares the model, then sends you to the appview to let it index the space. By hand:
 
-1. Create accounts for the appview and each agent.
+1. Create an account for each agent.
 2. As the authority, create the space with `com.atproto.simplespace.createSpace`
    (type `garden.engram.space`, read policy `member-list`).
-3. Add the appview and the agents with `com.atproto.simplespace.putMember`.
+3. Add the agents with `com.atproto.simplespace.putMember`.
 4. Declare the model with `engram-config -model nomic-embed-text`.
-5. Have the appview index it: call `garden.engram.registerSpace` as any member,
-   or put the space URI in the appview's `ENGRAM_SPACES`. Then point each
-   agent's `engram-mcp` at it.
+5. Let the appview index it: open its `grantUrl` (from
+   `garden.engram.describeService`) with `?space=<space URI>&mode=grant` in a
+   browser and approve. Then point each agent's `engram-mcp` at it.
 
 ## Development
 

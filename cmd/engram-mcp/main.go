@@ -42,7 +42,7 @@ func run(log *slog.Logger) error {
 	if _, err := space.ParseRef(spaceURI); err != nil {
 		return fmt.Errorf("ENGRAM_SPACE: %w", err)
 	}
-	appviewURL := config.Get("ENGRAM_APPVIEW_URL", "https://engram.garden")
+	appviewURL := config.Get("ENGRAM_APPVIEW_URL", "https://api.engram.garden")
 	u, err := url.Parse(appviewURL)
 	if err != nil || u.Host == "" {
 		return fmt.Errorf("ENGRAM_APPVIEW_URL: not a URL: %q", appviewURL)

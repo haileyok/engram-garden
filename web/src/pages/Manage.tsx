@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { api, type Member, type ModelInfo, type Service, type SpaceConfig, type SpaceStatus } from "../api";
+import { api, type Member, type ModelInfo, type SpaceConfig, type SpaceStatus } from "../api";
+import { IndexingCard } from "../components/Indexing";
 import { useSession } from "../App";
 import { Handle } from "../profiles";
 import { describeError } from "../ui";
@@ -8,6 +9,7 @@ import { ModelForm } from "../components/ModelForm";
 export function Manage({ uri, status, onChanged }: { uri: string; status: SpaceStatus | null; onChanged: () => void }) {
   return (
     <div className="stack">
+      <IndexingCard uri={uri} access={status?.access} />
       <Members uri={uri} onChanged={onChanged} />
       <ModelConfig uri={uri} status={status} onChanged={onChanged} />
     </div>
@@ -17,7 +19,6 @@ export function Manage({ uri, status, onChanged }: { uri: string; status: SpaceS
 function Members({ uri, onChanged }: { uri: string; onChanged: () => void }) {
   const session = useSession();
   const [members, setMembers] = useState<Member[] | null>(null);
-  const [service, setService] = useState<Service | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [who, setWho] = useState("");
   const [write, setWrite] = useState(true);
@@ -27,9 +28,6 @@ function Members({ uri, onChanged }: { uri: string; onChanged: () => void }) {
     api.members(uri).then((r) => setMembers(r.members), (e) => setError(describeError(e)));
   }, [uri]);
   useEffect(load, [load]);
-  useEffect(() => {
-    api.service().then(setService, () => {});
-  }, []);
 
   const add = async (member: string, w: boolean) => {
     setBusy(true);
@@ -47,8 +45,7 @@ function Members({ uri, onChanged }: { uri: string; onChanged: () => void }) {
   };
 
   const remove = async (m: Member) => {
-    const label = m.did === service?.account ? "the appview (it will stop indexing this space)" : m.did;
-    if (!window.confirm(`Remove ${label} from the space? They'll lose access, but memories already in their repo stay there.`)) return;
+    if (!window.confirm(`Remove ${m.did} from the space? They'll lose access, but memories already in their repo stay there.`)) return;
     try {
       await api.removeMember(uri, m.did);
       load();
@@ -62,8 +59,6 @@ function Members({ uri, onChanged }: { uri: string; onChanged: () => void }) {
     add(who, write);
   };
 
-  const appviewMissing = service?.account && members && !members.some((m) => m.did === service.account);
-
   return (
     <section className="card">
       <h2>Members</h2>
@@ -71,21 +66,12 @@ function Members({ uri, onChanged }: { uri: string; onChanged: () => void }) {
         Members can read every memory in the space; writers can add their own. Give each agent its own account.
         You're always a member.
       </p>
-      {appviewMissing && (
-        <div className="notice inline">
-          The appview can't index this space until its account is a member.{" "}
-          <button className="primary small" disabled={busy} onClick={() => add(service!.account!, false)}>
-            Add the appview
-          </button>
-        </div>
-      )}
       {error && <p className="error">{error}</p>}
       {members === null && !error && <p className="muted">Loading…</p>}
       <ul className="members">
         {(members ?? []).map((m) => (
           <li key={m.did}>
             <Handle did={m.did} />
-            {m.did === service?.account && <span className="badge">appview</span>}
             {m.did === session.did && <span className="badge">you</span>}
             <span className="muted small">{m.write ? "reads and writes" : m.read ? "reads" : "no access"}</span>
             <span className="spacer" />

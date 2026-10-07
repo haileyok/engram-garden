@@ -50,7 +50,7 @@ func run(log *slog.Logger) error {
 	}
 	dev := pu.Scheme == "http" && pu.Hostname() == "127.0.0.1"
 
-	appviewURL := strings.TrimSuffix(config.Get("ENGRAM_APPVIEW_URL", "https://engram.garden"), "/")
+	appviewURL := strings.TrimSuffix(config.Get("ENGRAM_APPVIEW_URL", "https://api.engram.garden"), "/")
 	au, err := url.Parse(appviewURL)
 	if err != nil || au.Host == "" {
 		return fmt.Errorf("ENGRAM_APPVIEW_URL: not a URL: %q", appviewURL)

@@ -35,6 +35,8 @@ type fixture struct {
 	bob     *spacetest.Account
 	mallory *spacetest.Account
 	client  *spaceclient.Client
+	grants  *Grants
+	auth    *fakeAuth
 }
 
 func newNode(t *testing.T, bs blob.Store, lease func(string) (uint64, bool)) *spacestore.Node {
@@ -47,40 +49,50 @@ func newNode(t *testing.T, bs blob.Store, lease func(string) (uint64, bool)) *sp
 	return n
 }
 
-func newNet(t *testing.T) (*spacetest.Net, *spaceclient.Client, [3]*spacetest.Account) {
+// newNet is a space with three accounts, two of them members, and an
+// appview that reads it through the authority's grant.
+func newNet(t *testing.T) (*spacetest.Net, *Grants, *fakeAuth, *spaceclient.Client, [3]*spacetest.Account) {
 	t.Helper()
 	n := spacetest.New(t)
-	appview := n.NewAccount("did:plc:appview")
 	alice := n.NewAccount("did:plc:alice")
 	bob := n.NewAccount("did:plc:bob")
 	mallory := n.NewAccount("did:plc:mallory")
-	for _, a := range []*spacetest.Account{n.Authority, appview, alice, bob} {
+	for _, a := range []*spacetest.Account{alice, bob} {
 		n.AddMember(a.DID)
 	}
 	n.Put(n.Authority, lex.ConfigCollection, lex.ConfigRkey, lex.Config{ModelInfo: model}.Record(time.Now()))
-	client, err := spaceclient.New(n.Session(appview), n.Dir, nil)
+	auth := newFakeAuth(n)
+	auth.sessions["seed"] = n.Authority.DID
+	grants := &Grants{Blob: blob.Dir{Root: t.TempDir()}, Auth: auth}
+	if err := grants.Put(context.Background(), Grant{Space: n.Space, DID: n.Authority.DID, SessionID: "seed", GrantedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	client, err := spaceclient.NewDelegated(grants, n.Dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return n, client, [3]*spacetest.Account{alice, bob, mallory}
+	return n, grants, auth, client, [3]*spacetest.Account{alice, bob, mallory}
 }
 
 func setup(t *testing.T) *fixture {
 	t.Helper()
-	n, client, accts := newNet(t)
+	n, grants, auth, client, accts := newNet(t)
 	st := newNode(t, blob.Dir{Root: t.TempDir()}, nil)
 	s := &Server{
-		Store:      st,
-		Indexer:    &indexer.Indexer{Store: st, Client: client, Dir: n.Dir},
-		Dir:        n.Dir,
-		ServiceDID: serviceDID,
-		Spaces:     []string{n.Space},
+		Store:         st,
+		Indexer:       &indexer.Indexer{Store: st, Client: client, Dir: n.Dir},
+		Dir:           n.Dir,
+		ServiceDID:    serviceDID,
+		Spaces:        []string{n.Space},
+		Grants:        grants,
+		ReturnOrigins: []string{webOrigin},
+		CookieKey:     []byte("0123456789abcdef0123456789abcdef"),
 	}
 	hs := httptest.NewServer(s.Handler())
 	t.Cleanup(hs.Close)
 	s.PublicURL = hs.URL
 	n.RegisterService(serviceDID, SyncerFragment, hs.URL)
-	return &fixture{net: n, srv: s, url: hs.URL, alice: accts[0], bob: accts[1], mallory: accts[2], client: client}
+	return &fixture{net: n, srv: s, url: hs.URL, alice: accts[0], bob: accts[1], mallory: accts[2], client: client, grants: grants, auth: auth}
 }
 
 func vector(text string) []float32 {
@@ -368,7 +380,7 @@ func TestExportThenImportElsewhere(t *testing.T) {
 // own the space are forwarded to the one that does.
 func TestForwardingToOwner(t *testing.T) {
 	t.Parallel()
-	n, client, accts := newNet(t)
+	n, _, _, client, accts := newNet(t)
 	alice, bob := accts[0], accts[1]
 	bs := blob.Dir{Root: t.TempDir()}
 	var handlers [2]http.Handler

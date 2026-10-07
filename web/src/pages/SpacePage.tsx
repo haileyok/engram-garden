@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, ApiError, type Service, type SpaceStatus } from "../api";
+import { api, ApiError, type SpaceStatus } from "../api";
+import { goToGrant, IndexingNotice, useService } from "../components/Indexing";
 import { useSession } from "../App";
 import { useRouter } from "../router";
 import { Handle } from "../profiles";
@@ -50,11 +51,14 @@ export function SpacePage({ uri }: { uri: string }) {
           </button>
         </p>
       </div>
+      <GrantOutcome />
       {unindexed ? (
-        <NotIndexed uri={uri} isAuthority={isAuthority} onRegistered={load} onManage={() => navigate(spacePath(uri) + "?tab=manage")} />
+        <NotIndexed uri={uri} isAuthority={isAuthority} />
       ) : statusError ? (
         <p className="error">{describeError(statusError)}</p>
-      ) : null}
+      ) : (
+        <IndexingNotice uri={uri} access={status?.access} isAuthority={isAuthority} />
+      )}
       <nav className="tabs">
         {tabs.map(([t, label]) => (
           <button key={t} className={t === tab ? "tab active" : "tab"} onClick={() => navigate(spacePath(uri) + (t === "memories" ? "" : `?tab=${t}`))}>
@@ -69,52 +73,42 @@ export function SpacePage({ uri }: { uri: string }) {
   );
 }
 
+// The outcome of a grant or stop, when the appview sends the browser back.
+function GrantOutcome() {
+  const { loc } = useRouter();
+  const outcome = loc.query.get("indexing");
+  const error = loc.query.get("indexing_error");
+  if (error) return <p className="error">{error}</p>;
+  if (outcome === "granted") return <div className="notice inline">The appview can read this space now. It's indexing it.</div>;
+  if (outcome === "stopped") return <div className="notice inline">The appview has stopped indexing this space.</div>;
+  return null;
+}
+
 // The appview doesn't index the space yet.
-function NotIndexed({ uri, isAuthority, onRegistered, onManage }: { uri: string; isAuthority: boolean; onRegistered: () => void; onManage: () => void }) {
-  const [service, setService] = useState<Service | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    api.service().then(setService, () => {});
-  }, []);
-
-  const register = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.register(uri);
-      onRegistered();
-    } catch (e) {
-      if (e instanceof ApiError && e.code === "NotAMember") {
-        setError(isAuthority ? "Add the appview's account as a member first (under Manage)." : "The space's authority needs to add the appview's account as a member first.");
-      } else {
-        setError(describeError(e));
-      }
-    } finally {
-      setBusy(false);
-    }
-  };
-
+function NotIndexed({ uri, isAuthority }: { uri: string; isAuthority: boolean }) {
+  const service = useService();
   return (
     <div className="card notice">
       <h2>Not indexed yet</h2>
       {service?.registration === "closed" ? (
         <p>This appview indexes only the spaces its operator adds. Ask them to add this one.</p>
-      ) : (
+      ) : isAuthority ? (
         <>
           <p>
-            The appview hasn't been asked to index this space. It needs to be a member of the space
-            {service?.account && <> (its account is <Handle did={service.account} />)</>}, then any member can register the space.
+            The appview needs your permission to read this space before it can index it. You'll confirm on your
+            account's sign-in page; it gets read-only access to the memory spaces you run.
           </p>
-          <div className="row">
-            <button className="primary" onClick={register} disabled={busy}>
-              {busy ? "Registering…" : "Index this space"}
+          {service?.grantUrl ? (
+            <button className="primary" onClick={() => goToGrant(service, uri, "grant")}>
+              Let the appview index this space
             </button>
-            {isAuthority && <button onClick={onManage}>Manage members</button>}
-          </div>
+          ) : (
+            service !== undefined && <p className="muted">This appview isn't set up to index spaces you grant it.</p>
+          )}
         </>
+      ) : (
+        <p>The appview hasn't been allowed to index this space. Its authority can allow it from the space's Manage tab.</p>
       )}
-      {error && <p className="error">{error}</p>}
     </div>
   );
 }

@@ -24,6 +24,17 @@ export function spacePath(uri: string): string {
   return `/space/${encodeURIComponent(ref.authority)}/${encodeURIComponent(ref.name)}`;
 }
 
+// The appview's page where a space's authority grants it access to index
+// the space (mode "grant") or takes that back ("stop"). It comes back to
+// returnTo, which must be on an origin the appview allows.
+export function grantLink(grantUrl: string, space: string, mode: "grant" | "stop", returnTo: string): string {
+  const u = new URL(grantUrl);
+  u.searchParams.set("space", space);
+  u.searchParams.set("mode", mode);
+  u.searchParams.set("return", returnTo);
+  return u.toString();
+}
+
 // The author of a memory, from its URI: <space>/<author>/<collection>/<rkey>.
 export function memoryAuthor(spaceUri: string, memoryUri: string): string | null {
   if (!memoryUri.startsWith(spaceUri + "/")) return null;

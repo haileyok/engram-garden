@@ -27,11 +27,27 @@
             "skipped": {
               "type": "array",
               "items": { "type": "ref", "ref": "#skippedAuthor" }
-            }
+            },
+            "access": { "type": "ref", "ref": "#access" }
           }
         }
       },
       "errors": [{ "name": "UnknownSpace", "description": "This service does not index the space." }]
+    },
+    "access": {
+      "type": "object",
+      "description": "Whether the appview may read the space, to keep its index current.",
+      "required": ["state"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "knownValues": ["granted", "missing", "lapsed"],
+          "description": "granted: the authority granted read access. missing: nobody has; the index isn't updated. lapsed: the authority's server refused the grant the last time it was used; grant again."
+        },
+        "grantedBy": { "type": "string", "format": "did" },
+        "grantedAt": { "type": "string", "format": "datetime" },
+        "error": { "type": "string", "description": "Why the grant lapsed." }
+      }
     },
     "skippedAuthor": {
       "type": "object",
