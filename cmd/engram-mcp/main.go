@@ -3,7 +3,7 @@
 // with the model the space declares, through an OpenAI-compatible endpoint
 // (Ollama by default).
 //
-// It reads the settings `engram init` writes (~/.config/engram/config.json,
+// It reads the settings the engram CLI writes (~/.config/engram/config.json,
 // or $ENGRAM_CONFIG_DIR), and ENGRAM_* environment variables override them:
 // ENGRAM_SPACES, ENGRAM_SPACE, ENGRAM_IDENTIFIER / ENGRAM_PASSWORD, ENGRAM_APPVIEW_URL,
 // ENGRAM_APPVIEW_DID, ENGRAM_PDS_HOST and ENGRAM_EMBED_*.
@@ -30,8 +30,8 @@ import (
 const usage = `engram-mcp: Engram Garden memory tools (list_spaces, remember, recall,
 get_memory, list_memories, forget) for an MCP client, over stdio.
 
-Set it up once with the engram CLI (engram init --space <space URI>; add more
-spaces with engram use <space URI>), then configure your MCP client to run it:
+Set it up once with the engram CLI (engram login, then engram spaces add
+<space URI> or engram create <name>), then configure your MCP client to run it:
 
   {"mcpServers": {"engram": {"command": "engram-mcp"}}}
 
@@ -73,6 +73,19 @@ func run(log *slog.Logger) error {
 	}
 	if exp := settings.Account.Expires(); !exp.IsZero() && time.Until(exp) < 3*24*time.Hour {
 		log.Warn("the agent's sign-in ends soon; run `engram login` to renew it", "ends", exp.Format(time.RFC3339))
+	}
+	// A space created through create_space is saved to the settings file
+	// (not ENGRAM_* overrides, which stay the environment's).
+	path := filepath.Join(dir, "config.json")
+	a.Save = func(current agent.Settings) error {
+		file, err := agent.LoadSettings(path, nil)
+		if err != nil {
+			return err
+		}
+		for _, e := range current.Spaces {
+			_, _ = file.AddSpace(e.URI, "")
+		}
+		return file.Save(path)
 	}
 	names := make([]string, 0, len(settings.Spaces))
 	for _, e := range settings.Spaces {

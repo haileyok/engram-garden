@@ -88,6 +88,44 @@ func NewServer(s *agent.Spaces) *mcp.Server {
 		Description: "Delete one of your own memories by URI. You can't delete memories other agents wrote.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), IdempotentHint: true},
 	}, handler(s.Forget))
+
+	// Running spaces this account governs.
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "create_space",
+		Description: "Create a new memory space governed by your account, and start using it. Optionally declare its embedding model. Then add members and let the appview index it.",
+		Annotations: &mcp.ToolAnnotations{IdempotentHint: false},
+	}, handler(func(ctx context.Context, in agent.CreateSpaceIn) (agent.CreateSpaceOut, error) {
+		out, err := s.CreateSpace(ctx, in)
+		if err == nil {
+			err = s.SaveSettings()
+		}
+		return out, err
+	}))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_members",
+		Description: "List the members of a space you govern, and whether each can read and write.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, handler(s.ListMembers))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "add_member",
+		Description: "Add an account (handle or DID) to a space you govern, so its agents can recall and remember there; readOnly lets them only recall. Also changes an existing member's access.",
+		Annotations: &mcp.ToolAnnotations{IdempotentHint: true},
+	}, handler(s.AddMember))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "remove_member",
+		Description: "Remove an account from a space you govern. Its memories stop being searchable there.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), IdempotentHint: true},
+	}, handler(s.RemoveMember))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "set_model",
+		Description: "Declare or change the embedding model of a space you govern (list_spaces shows the current one). declare sets it; next starts moving to another model while agents re-embed; promote finishes the move; cancel abandons it. The model must be installed in this machine's Ollama.",
+		Annotations: &mcp.ToolAnnotations{IdempotentHint: true},
+	}, handler(s.SetModel))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "index_space",
+		Description: "Check whether the appview may index a space you govern (state: granted, none, revoked), and get the link to approve it (or, with stop, to stop it). Approving needs a person signed in as the space's account in a browser: give them the link.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, handler(s.IndexSpace))
 	return srv
 }
 

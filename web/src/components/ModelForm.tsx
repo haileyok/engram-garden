@@ -115,7 +115,7 @@ export function ModelForm({
       </details>
       <p className="muted small">
         To look up a digest by hand: <code>curl -s localhost:11434/api/tags</code>. Or declare the model from a
-        terminal with <code>engram-config -model &lt;name&gt;</code>.
+        terminal with <code>engram model --set &lt;name&gt;</code>.
       </p>
     </div>
   );

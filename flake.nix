@@ -11,14 +11,14 @@
     in
     {
       packages = forAll (pkgs: rec {
-        # The agent tools: engram (the CLI), engram-mcp (the MCP server)
-        # and engram-config (for a space's authority).
+        # The agent tools: engram (the CLI, which also runs spaces) and
+        # engram-mcp (the MCP server).
         engram = pkgs.buildGoModule {
           pname = "engram";
           inherit version;
           src = self;
           vendorHash = "sha256-gZgpYzqJ6o9nkH86f8FoveJIAkQJqZ1p4985q9l60rQ=";
-          subPackages = [ "cmd/engram" "cmd/engram-mcp" "cmd/engram-config" ];
+          subPackages = [ "cmd/engram" "cmd/engram-mcp" ];
           env.CGO_ENABLED = 0;
           ldflags = [ "-s" "-w" ];
           # The tests start in-process servers; run them with `go test`.

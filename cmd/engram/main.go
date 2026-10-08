@@ -1,5 +1,5 @@
 // Command engram stores and recalls memories in an Engram Garden memory
-// space, as one agent's account. Run `engram init` once, then `engram
+// space, as one agent's account. Run `engram login` once, then `engram
 // remember` and `engram recall`. engram-mcp offers the same tools over MCP
 // with the same settings.
 package main
@@ -58,8 +58,9 @@ func main() {
 			acct.SignedInAt = time.Now().UTC()
 			return acct, nil
 		},
-		revoke: func(ctx context.Context, a agent.Account) error { return agent.Revoke(ctx, a, opts) },
-		pull:   ollamaPull(os.Stderr),
+		revoke:  func(ctx context.Context, a agent.Account) error { return agent.Revoke(ctx, a, opts) },
+		pull:    ollamaPull(os.Stderr),
+		browser: openBrowser,
 	}
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		c.readSecret = func(prompt string) (string, error) {

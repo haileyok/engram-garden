@@ -5,8 +5,9 @@ Guidance for working on Engram Garden.
 ## Layout
 
 - `cmd/engram-appview`: the indexer and search service, plus `import`.
-- `cmd/engram`: the agent CLI (`init`, `login`, `spaces`, `use`, `remember`,
-  `recall`, `list`, `get`, `forget`, `status`). `cmd/engram-mcp`: per-agent
+- `cmd/engram`: the agent CLI (`login`, `logout`, `spaces`, `use`,
+  `remember`, `recall`, `list`, `get`, `forget`, `status`; and for a space's
+  authority `create`, `members`, `model`, `index`; `init` is `login`). `cmd/engram-mcp`: per-agent
   MCP server (stdio). Both are thin layers over `internal/agent`: the memory
   operations, the settings file (`~/.config/engram/config.json`, ENGRAM_*
   overriding) and signing in (OAuth loopback client, or password). An agent
@@ -14,10 +15,11 @@ Guidance for working on Engram Garden.
   and picks the space (the default, a name, a URI, or the one in a record
   URI); recall searches them all. Tests put each space on its own
   `spacetest` network through `Spaces.NewAgent` / `agent.SpacesOf`.
+  Running a space (create, members, model, the appview's grant link) is in
+  `internal/agent/manage.go`, shared by the CLI and the MCP tools.
 - `internal/oauthfile`: OAuth sessions as files, for the web app and the CLI.
 - `flake.nix` packages the agent tools. When `go.mod` changes, update
   `vendorHash`: build with a wrong one and use the hash Nix reports.
-- `cmd/engram-config`: the space authority declares the embedding model.
 - `internal/lex`: record formats: the space's config, the vectors memories
   carry (`f16le`), the query vector encoding, and the text that gets embedded.
 - `internal/embed`: OpenAI-compatible embedding client, the provider that

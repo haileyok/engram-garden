@@ -30,6 +30,9 @@ import (
 var Scopes = []string{
 	"atproto",
 	"space:" + lex.SpaceType + "?authority=*&collection=" + lex.MemoryCollection + "&action=read&action=create&action=update&action=delete",
+	// In spaces the account governs: create them, manage their members and
+	// write their model (the web app asks for the same).
+	"space:" + lex.SpaceType + "?collection=" + lex.ConfigCollection + "&action=read&action=create&action=update&manage=create&manage=update",
 }
 
 // Options are what opening an agent needs besides its settings.

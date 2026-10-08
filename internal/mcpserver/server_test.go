@@ -218,6 +218,87 @@ func TestSeveralSpaces(t *testing.T) {
 	}
 }
 
+// TestRunningASpace: the space's authority creates a space, manages members
+// and declares a model over MCP; other accounts are told they can't.
+func TestRunningASpace(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t, false)
+	sp := agent.SpacesOf(w.tools(t, w.net.Authority.DID, embed.HashingProvider{}))
+	sp.Settings.Embed.Provider = "hashing"
+	var saved []string
+	sp.Save = func(s agent.Settings) error {
+		saved = saved[:0]
+		for _, e := range s.Spaces {
+			saved = append(saved, e.Name)
+		}
+		return nil
+	}
+	ct, st := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := NewServer(sp).Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owner.Close() })
+
+	var created agent.CreateSpaceOut
+	if msg := call(t, owner, "create_space", map[string]any{"name": "runbooks"}, &created); msg != "" {
+		t.Fatal(msg)
+	}
+	if created.Space.Name != "runbooks" || !strings.HasSuffix(created.Space.URI, "/garden.engram.space/runbooks") || len(saved) != 2 {
+		t.Fatalf("create_space: %+v, saved %v", created, saved)
+	}
+	var added agent.MemberOut
+	if msg := call(t, owner, "add_member", map[string]any{"space": "runbooks", "member": "did:plc:alice", "readOnly": true}, &added); msg != "" {
+		t.Fatal(msg)
+	}
+	var members agent.MembersOut
+	if msg := call(t, owner, "list_members", map[string]any{"space": "runbooks"}, &members); msg != "" {
+		t.Fatal(msg)
+	}
+	if len(members.Members) != 1 || members.Members[0].DID != "did:plc:alice" {
+		t.Fatalf("list_members: %+v", members)
+	}
+	if msg := call(t, owner, "remove_member", map[string]any{"space": "runbooks", "member": "did:plc:alice"}, nil); msg != "" {
+		t.Fatal(msg)
+	}
+
+	// The model of the original space (the test network keeps records only
+	// there).
+	var m agent.ModelOut
+	if msg := call(t, owner, "set_model", map[string]any{"space": "memory", "action": "declare", "model": "hashing-64", "dims": 64}, &m); msg != "" {
+		t.Fatal(msg)
+	}
+	if m.Model == nil || m.Model.Dims != 64 || m.Model.Model != "hashing-64" {
+		t.Fatalf("set_model: %+v", m)
+	}
+	var spaces ListSpacesOut
+	if msg := call(t, owner, "list_spaces", nil, &spaces); msg != "" {
+		t.Fatal(msg)
+	}
+	for _, s := range spaces.Spaces {
+		if s.Name == "memory" && (s.Model == nil || s.Model.Dims != 64) {
+			t.Fatalf("list_spaces after set_model: %+v", s)
+		}
+	}
+	if msg := call(t, owner, "set_model", map[string]any{"space": "memory", "action": "bogus"}, nil); !strings.Contains(msg, "action must be") {
+		t.Fatalf("bad action: %q", msg)
+	}
+	// This appview takes no grants, and says so.
+	if msg := call(t, owner, "index_space", map[string]any{"space": "memory"}, nil); !strings.Contains(msg, "grants") {
+		t.Fatalf("index_space without grants: %q", msg)
+	}
+
+	// A member who isn't the authority can't run the space.
+	alice := connect(t, w.tools(t, "did:plc:alice", embed.HashingProvider{}))
+	if msg := call(t, alice, "add_member", map[string]any{"member": "did:plc:bob"}, nil); !strings.Contains(msg, "authority") {
+		t.Fatalf("add_member as a member: %q", msg)
+	}
+}
+
 func TestAgentsShareMemories(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t, true)
@@ -331,7 +412,7 @@ func TestNoDeclaredModel(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t, false)
 	alice := connect(t, w.tools(t, "did:plc:alice", embed.HashingProvider{}))
-	if msg := call(t, alice, "remember", map[string]any{"text": "anything"}, nil); !strings.Contains(msg, "engram-config") {
+	if msg := call(t, alice, "remember", map[string]any{"text": "anything"}, nil); !strings.Contains(msg, "engram model --set") {
 		t.Fatalf("remember without a config: %q", msg)
 	}
 }

@@ -245,9 +245,10 @@ func TestInitSavesSettings(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
 	a := w.agent(t)
-	a.stdin = w.net.Space + "\nalice.test\n" // answered at the prompts
+	a.stdin = "alice.test\n" // answered at the prompt
 	var r checkResult
-	if err := json.Unmarshal([]byte(a.mustRun("init", "--json")), &r); err != nil {
+	// init still works, as login.
+	if err := json.Unmarshal([]byte(a.mustRun("init", "--space", w.net.Space, "--json")), &r); err != nil {
 		t.Fatal(err)
 	}
 	if !r.OK || r.DID != "did:plc:alice" || len(r.Spaces) != 1 || r.Spaces[0].Memories == nil || !r.Spaces[0].Default || r.Expires == nil {
@@ -273,8 +274,8 @@ func TestInitPastedAddress(t *testing.T) {
 	a := w.agent(t)
 	a.pastes = true
 	const pasted = "http://127.0.0.1:1234/callback?state=s&code=c"
-	a.stdin = w.net.Space + "\nalice.test\n" + pasted + "\n"
-	a.mustRun("init")
+	a.stdin = "alice.test\n" + pasted + "\n"
+	a.mustRun("login", "--space", w.net.Space)
 	if len(a.pasted) != 1 || a.pasted[0] != pasted {
 		t.Fatalf("pasted: %q", a.pasted)
 	}
@@ -315,13 +316,13 @@ func TestNotSetUp(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
 	a := w.agent(t)
-	if code, _, errOut := a.run("recall", "anything"); code != 1 || !strings.Contains(errOut, "engram init") {
+	if code, _, errOut := a.run("recall", "anything"); code != 1 || !strings.Contains(errOut, "engram spaces add") {
 		t.Fatalf("recall before init: %d %s", code, errOut)
 	}
 	if code, _, errOut := a.run("remember"); code != 2 || !strings.Contains(errOut, "nothing to remember") {
 		t.Fatalf("empty remember: %d %s", code, errOut)
 	}
-	if code, out, _ := a.run("help"); code != 0 || !strings.Contains(out, "engram init") {
+	if code, out, _ := a.run("help"); code != 0 || !strings.Contains(out, "engram login") || strings.Contains(out, "engram init") {
 		t.Fatalf("help: %d %s", code, out)
 	}
 }
@@ -434,6 +435,68 @@ func TestEnvOverridesSettings(t *testing.T) {
 	s, err := agent.LoadSettings(a.path, func(k string) string { return a.env[k] })
 	if def, _ := s.Default(); err != nil || s.Account.SignIn != agent.SignInPassword || def.URI != w.net.Space {
 		t.Fatalf("env settings: %+v %v", s, err)
+	}
+}
+
+// TestRunningASpaceFromCLI: sign in with no spaces, create one, manage its
+// members and model, then sign out.
+func TestRunningASpaceFromCLI(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	a := w.agent(t)
+	// The authority of the world's space signs in, with nothing set up yet.
+	if out := a.mustRun("login", "--handle", "authority.test"); !strings.Contains(out, "engram create <name>") {
+		t.Fatalf("login with no spaces: %s", out)
+	}
+	if out := a.mustRun("create", "runbooks"); !strings.Contains(out, "Created at://did:plc:authority/space/garden.engram.space/runbooks") || !strings.Contains(out, "your default space") {
+		t.Fatalf("create: %s", out)
+	}
+	if s, _ := agent.LoadSettings(a.path, nil); len(s.Spaces) != 1 || s.Spaces[0].Name != "runbooks" {
+		t.Fatalf("created space not saved: %+v", s.Spaces)
+	}
+	if out := a.mustRun("members", "add", "did:plc:alice", "--read-only"); !strings.Contains(out, "can now recall (not remember)") {
+		t.Fatalf("members add: %s", out)
+	}
+	var members agent.MembersOut
+	// (The test network lists every member as read and write.)
+	if err := json.Unmarshal([]byte(a.mustRun("members", "--json")), &members); err != nil || len(members.Members) != 1 || members.Members[0].DID != "did:plc:alice" {
+		t.Fatalf("members: %+v %v", members, err)
+	}
+	a.mustRun("members", "remove", "did:plc:alice")
+
+	// The model of the world's own space, where the test network keeps
+	// records.
+	a.mustRun("spaces", "add", w.net.Space)
+	if out := a.mustRun("model", "--space", "memory"); !strings.Contains(out, "hashing-256") {
+		t.Fatalf("model: %s", out)
+	}
+	if out := a.mustRun("model", "--space", "memory", "--set", "hashing-64", "--dims", "64"); !strings.Contains(out, "hashing-64") {
+		t.Fatalf("model --set: %s", out)
+	}
+	if code, _, errOut := a.run("model", "--promote", "--cancel"); code != 2 || !strings.Contains(errOut, "choose one") {
+		t.Fatalf("two actions: %d %s", code, errOut)
+	}
+	// This appview takes no grants.
+	if code, _, errOut := a.run("index", "--space", "memory"); code != 1 || !strings.Contains(errOut, "grants") {
+		t.Fatalf("index: %d %s", code, errOut)
+	}
+
+	// Someone else can't run it.
+	b := w.agent(t)
+	b.mustRun("login", "--space", w.net.Space, "--handle", "alice.test")
+	if code, _, errOut := b.run("members", "add", "did:plc:bob"); code != 1 || !strings.Contains(errOut, "authority") {
+		t.Fatalf("members add as a member: %d %s", code, errOut)
+	}
+
+	// logout ends the sign-in and forgets the account; spaces stay.
+	before := len(a.revoked)
+	a.mustRun("logout")
+	s, _ := agent.LoadSettings(a.path, nil)
+	if len(a.revoked) != before+1 || s.Account.SignIn != "" || len(s.Spaces) != 2 {
+		t.Fatalf("after logout: revoked %v, settings %+v", a.revoked, s)
+	}
+	if code, _, errOut := a.run("recall", "x"); code != 1 || !strings.Contains(errOut, "engram login") {
+		t.Fatalf("recall signed out: %d %s", code, errOut)
 	}
 }
 

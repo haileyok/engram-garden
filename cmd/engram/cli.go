@@ -38,6 +38,10 @@ type cli struct {
 	revoke func(ctx context.Context, a agent.Account) error
 	// pull fetches an embedding model (`ollama pull`); nil when unavailable.
 	pull func(ctx context.Context, model string) error
+	// browser opens a URL; nil, or a failure, leaves it to the person.
+	browser func(string) error
+	// wait is how often engram index checks the appview (default 2s).
+	wait time.Duration
 
 	json bool
 	buf  *bufio.Reader
@@ -101,15 +105,22 @@ type reportedError struct{ error }
 
 const usage = `engram: shared memory for agents, on Engram Garden
 
-Set up once:
-  engram init --space <space URI>     sign in as the agent's account and check everything works
-  engram login                        sign in again (OAuth sign-ins last two weeks)
+Account:
+  engram login [--handle h] [--password]   sign in as the agent's account and check its spaces (OAuth sign-ins last two weeks)
+  engram logout                            end the sign-in and forget the account
 
 Spaces:
   engram spaces                       the spaces you use, each one's embedding model, and others you belong to
   engram use <name|URI>               make a space the default (a new URI is added first)
   engram spaces add <URI> [--name n]  use another space
   engram spaces remove <name>         stop using a space
+
+Spaces you run (--space picks one; otherwise the default):
+  engram create <name> [--model m]           make a new space (and declare its embedding model)
+  engram members                             who's in it
+  engram members add <handle> [--read-only]  add an account; members remove <handle> takes one out
+  engram model [--set m | --next m | --promote | --cancel]   show or change its embedding model
+  engram index [--stop]                      let the appview index it (approve in the browser)
 
 Use (--space <name|URI> picks a space; otherwise the default):
   engram remember <text> [-t tag]... [--source s]   store a memory (text from stdin if omitted)
@@ -154,9 +165,10 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		return 0
 	}
 	cmds := map[string]func(context.Context, []string) error{
-		"init": c.cmdInit, "login": c.cmdLogin, "remember": c.cmdRemember, "recall": c.cmdRecall,
+		"init": c.cmdLogin, "login": c.cmdLogin, "logout": c.cmdLogout, "remember": c.cmdRemember, "recall": c.cmdRecall,
 		"list": c.cmdList, "get": c.cmdGet, "forget": c.cmdForget, "status": c.cmdStatus,
 		"spaces": c.cmdSpaces, "use": c.cmdUse,
+		"create": c.cmdCreate, "members": c.cmdMembers, "model": c.cmdModel, "index": c.cmdIndex,
 	}
 	cmd, ok := cmds[rest[0]]
 	if !ok {
@@ -254,14 +266,16 @@ func (c *cli) print(v any, human func(io.Writer)) {
 
 // ---- setup ----
 
-func (c *cli) cmdInit(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	spaceURI := fs.String("space", "", "the memory space's URI (at://…/space/garden.engram.space/…)")
-	handle := fs.String("handle", "", "the agent's account handle")
+// cmdLogin signs in to the agent's account (`engram init` is the same
+// command), then checks the spaces set up, if any.
+func (c *cli) cmdLogin(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("login", flag.ContinueOnError)
+	spaceURI := fs.String("space", "", "also use this space (by URI), as the default")
+	handle := fs.String("handle", "", "the agent's account handle (default: the one signed in before)")
 	password := fs.Bool("password", false, "sign in with the account's password instead of OAuth (for machines without a browser)")
 	appview := fs.String("appview", "", "the appview's URL (default "+agent.DefaultAppviewURL+")")
 	embedURL := fs.String("embed-url", "", "OpenAI-compatible embedding endpoint (default Ollama at http://localhost:11434/v1)")
-	yes := fs.Bool("yes", false, "answer yes to questions (pulling the model)")
+	yes := fs.Bool("yes", false, "answer yes to questions (pulling a space's model)")
 	if _, err := parse(fs, args); err != nil {
 		return err
 	}
@@ -275,12 +289,6 @@ func (c *cli) cmdInit(ctx context.Context, args []string) error {
 	if *embedURL != "" {
 		s.Embed.URL = *embedURL
 	}
-	if *spaceURI == "" && len(s.Spaces) == 0 {
-		if *spaceURI, err = c.ask("Memory space URI (from the space's page in the web app): "); err != nil {
-			return err
-		}
-	}
-	// The space set up here becomes the default; others stay.
 	checkSpace := ""
 	if *spaceURI != "" {
 		e, err := s.UseSpace(*spaceURI)
@@ -289,15 +297,18 @@ func (c *cli) cmdInit(ctx context.Context, args []string) error {
 		}
 		checkSpace = e.Name
 	}
-	if *handle == "" {
-		*handle = s.Account.Handle
+	h := *handle
+	if h == "" {
+		h = s.Account.Handle
 	}
-	if *handle == "" {
-		if *handle, err = c.ask("The agent's account handle: "); err != nil {
+	if h == "" {
+		if h, err = c.ask("The agent's account handle: "); err != nil {
 			return err
 		}
 	}
-	acct, err := c.doSignIn(ctx, *handle, *password)
+	// Keep the way the account signed in last time unless told otherwise.
+	usePassword := *password || (s.Account.SignIn == agent.SignInPassword && !flagSet(fs, "password") && h == s.Account.Handle)
+	acct, err := c.doSignIn(ctx, h, usePassword)
 	if err != nil {
 		return err
 	}
@@ -308,8 +319,18 @@ func (c *cli) cmdInit(ctx context.Context, args []string) error {
 	if s, err = c.settings(); err != nil {
 		return err
 	}
+	signedIn := fmt.Sprintf("Signed in as %s (%s).", acct.Handle, acct.DID)
+	if exp := acct.Expires(); !exp.IsZero() {
+		signedIn += fmt.Sprintf(" The sign-in lasts until %s.", exp.Local().Format("Jan 2 15:04"))
+	}
+	if len(s.Spaces) == 0 {
+		c.print(map[string]any{"handle": acct.Handle, "did": acct.DID, "signIn": acct.SignIn, "expires": timeOrNil(acct.Expires()), "spaces": []any{}}, func(w io.Writer) {
+			fmt.Fprintf(w, "%s Settings saved to %s.\n\nNext:\n  engram spaces              the spaces this account belongs to\n  engram spaces add <URI>    use one\n  engram create <name>       make a new space\n", signedIn, c.configPath)
+		})
+		return nil
+	}
 	if !c.json {
-		fmt.Fprintf(c.out, "Signed in as %s (%s). Settings saved to %s.\n\nChecking the space…\n", acct.Handle, acct.DID, c.configPath)
+		fmt.Fprintf(c.out, "%s Settings saved to %s.\n\nChecking the spaces…\n", signedIn, c.configPath)
 	}
 	// Offer to pull a missing model, unless the output is for a program.
 	st := c.check(ctx, s, checkSpace, !c.json || *yes, *yes)
@@ -323,51 +344,46 @@ Ready. Try:
 
 For MCP clients:
   {"mcpServers": {"engram": {"command": "engram-mcp"}}}
-
-To use another space too: engram spaces add <space URI>
 `)
 		}
 	})
 	if !st.OK {
-		return reportedError{errors.New("set up, but not ready yet: see above")}
+		return reportedError{errors.New("signed in, but not ready yet: see above")}
 	}
 	return nil
 }
 
-func (c *cli) cmdLogin(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("login", flag.ContinueOnError)
-	password := fs.Bool("password", false, "sign in with the account's password instead of OAuth")
-	handle := fs.String("handle", "", "sign in as a different account")
-	if _, err := parse(fs, args); err != nil {
+// cmdLogout ends the sign-in: the account's server revokes an OAuth
+// session, and the settings forget the account (and any saved password).
+// Spaces and embedding settings stay.
+func (c *cli) cmdLogout(ctx context.Context, args []string) error {
+	if _, err := parse(flag.NewFlagSet("logout", flag.ContinueOnError), args); err != nil {
 		return err
 	}
 	s, err := c.fileSettings()
 	if err != nil {
 		return err
 	}
-	h := *handle
-	if h == "" {
-		h = s.Account.Handle
+	old := s.Account
+	if old.SignIn == "" {
+		c.print(map[string]any{"signedOut": false}, func(w io.Writer) { fmt.Fprintln(w, "Not signed in.") })
+		return nil
 	}
-	if h == "" {
-		return errors.New("no account set up yet: run `engram init`")
-	}
-	// Keep the way the account signed in last time unless told otherwise.
-	usePassword := *password || (s.Account.SignIn == agent.SignInPassword && !flagSet(fs, "password"))
-	acct, err := c.doSignIn(ctx, h, usePassword)
-	if err != nil {
-		return err
-	}
-	if _, err := c.saveAccount(ctx, s, acct); err != nil {
-		return err
-	}
-	c.print(map[string]any{"handle": acct.Handle, "did": acct.DID, "signIn": acct.SignIn, "expires": timeOrNil(acct.Expires())}, func(w io.Writer) {
-		fmt.Fprintf(w, "Signed in as %s (%s).", acct.Handle, acct.DID)
-		if exp := acct.Expires(); !exp.IsZero() {
-			fmt.Fprintf(w, " The sign-in lasts until %s.", exp.Local().Format("Jan 2 15:04"))
+	if old.SignIn == agent.SignInOAuth && c.revoke != nil {
+		if err := c.revoke(ctx, old); err != nil {
+			fmt.Fprintf(c.err, "(couldn't end the sign-in at the account's server: %v; forgetting it here anyway)\n", agent.Explain(err))
 		}
-		fmt.Fprintln(w)
+	}
+	s.Account = agent.Account{}
+	if err := s.Save(c.configPath); err != nil {
+		return err
+	}
+	c.print(map[string]any{"signedOut": true, "handle": old.Handle}, func(w io.Writer) {
+		fmt.Fprintf(w, "Signed out of %s. engram login signs in again.\n", old.Handle)
 	})
+	if c.getenv("ENGRAM_IDENTIFIER") != "" {
+		fmt.Fprintln(c.err, "(ENGRAM_IDENTIFIER and ENGRAM_PASSWORD are set, so commands still sign in with them.)")
+	}
 	return nil
 }
 

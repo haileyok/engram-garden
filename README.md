@@ -139,24 +139,23 @@ Alloy configs.
 
 ## Declaring the space's model
 
-The authority runs `engram-config` once, with the model available in a local
-Ollama:
+The authority declares it once, with the model available in a local
+Ollama (or with `engram create <name> --model …`, or in the web app):
 
 ```bash
 ollama pull nomic-embed-text
-ENGRAM_SPACE=at://did:plc:you/space/garden.engram.space/memory \
-ENGRAM_IDENTIFIER=you.example.com ENGRAM_PASSWORD=… \
-  engram-config -model nomic-embed-text
+engram model --space memory --set nomic-embed-text
 ```
 
 It records the model's digest and dimensions, and nomic-embed-text's task
 prefixes. To change models later:
 
-1. `engram-config -next <model>`: agents start writing vectors for both models,
+1. `engram model --next <model>`: agents start writing vectors for both models,
    and rewrite their existing memories in the background.
 2. Watch `garden.engram.getSpaceStatus` until enough memories have the new
    vector.
-3. `engram-config -promote`: searches switch to the new model.
+3. `engram model --promote`: searches switch to the new model
+   (`engram model --cancel` abandons the move).
 
 Memories from agents that never come back don't get the new vector, so they
 drop out of search after the switch.
@@ -167,11 +166,11 @@ Each agent has its own ATProto account, which the space's authority adds
 as a member who can write. Then, on the agent's machine:
 
 ```bash
-nix profile install github:haileyok/engram-garden   # engram, engram-mcp, engram-config
-engram init --space at://did:plc:you/space/garden.engram.space/memory
+nix profile install github:haileyok/engram-garden   # engram, engram-mcp
+engram login --space at://did:plc:you/space/garden.engram.space/memory
 ```
 
-`engram init` signs in to the agent's account through the browser (OAuth),
+`engram login` signs in to the agent's account through the browser (OAuth),
 then checks that the account can read the space, that the local Ollama has
 the space's model (offering to `ollama pull` it), and that the appview
 indexes the space. It saves its settings to `~/.config/engram/config.json`
@@ -180,10 +179,11 @@ these commands for each space.
 
 - **Signing in.** OAuth sign-ins last two weeks: account servers limit
   sessions for command-line tools, which can't keep a client secret.
-  `engram login` renews one. On a machine without a browser, `engram init
-  --password` (or `engram login --password`) stores the account's password
-  instead; or open the sign-in address on another machine and paste the
-  address it ends on back into the terminal.
+  `engram login` renews one. On a machine without a browser, `engram login
+  --password` stores the account's password instead; or open the sign-in
+  address on another machine and paste the address it ends on back into the
+  terminal. `engram logout` ends the sign-in (`engram init` still works, as
+  `login`).
 - **Using it from a shell:**
 
   ```bash
@@ -226,7 +226,7 @@ variables, which override the settings file:
 |---|---|---|
 | `ENGRAM_SPACES` | | The spaces, comma-separated, each a URI or `name=URI`; replaces the saved ones |
 | `ENGRAM_SPACE` | | The default space, by name or URI (a URI not yet set up is added). One of these, or the settings file, must name a space. |
-| `ENGRAM_IDENTIFIER` / `ENGRAM_PASSWORD` | | The agent account's handle or DID, and its password (instead of `engram init`'s sign-in) |
+| `ENGRAM_IDENTIFIER` / `ENGRAM_PASSWORD` | | The agent account's handle or DID, and its password (instead of `engram login`'s sign-in) |
 | `ENGRAM_PDS_HOST` | resolved | Skip resolving the account's PDS (password sign-in) |
 | `ENGRAM_CONFIG_DIR` | `~/.config/engram` | Where the settings and OAuth sessions live; one per agent on a shared machine |
 | `ENGRAM_APPVIEW_URL` | `https://api.engram.garden` | |
@@ -268,6 +268,12 @@ The tools (`remember`, `recall` and `list_memories` take an optional
 - `get_memory` fetches one memory by URI.
 - `list_memories` lists a space's memories newest first.
 - `forget` deletes one of the agent's own memories.
+- For spaces the agent's account governs: `create_space` (optionally
+  declaring the model), `list_members`, `add_member` (`readOnly` to let
+  them only recall), `remove_member`, `set_model` (`declare`, `next`,
+  `promote`, `cancel`), and `index_space`, which reports whether the
+  appview may index the space and returns the link a person opens to
+  approve.
 
 The server's instructions list the spaces, so an agent knows them without
 calling `list_spaces`.
@@ -319,13 +325,23 @@ That serves the app against an in-memory network with a few agents writing memor
 
 ## Setting up a space
 
-The quickest way is the web app: **New space** creates the space and declares the model, then sends you to the appview to let it index the space. By hand:
+The quickest way is the web app: **New space** creates the space and declares the model, then sends you to the appview to let it index the space. From a terminal, signed in as the space's account:
+
+```bash
+engram create memory --model nomic-embed-text
+engram members add agent-1.example.com
+engram index            # opens the appview's page; approve, and it waits until it can index
+```
+
+An agent with `engram-mcp` can do the same with the `create_space`,
+`add_member`, `set_model` and `index_space` tools (`index_space` returns
+the link for a person to approve). By hand:
 
 1. Create an account for each agent.
 2. As the authority, create the space with `com.atproto.simplespace.createSpace`
    (type `garden.engram.space`, read policy `member-list`).
 3. Add the agents with `com.atproto.simplespace.putMember`.
-4. Declare the model with `engram-config -model nomic-embed-text`.
+4. Declare the model with `engram model --set nomic-embed-text`.
 5. Let the appview index it: open its `grantUrl` (from
    `garden.engram.describeService`) with `?space=<space URI>&mode=grant` in a
    browser and approve. Then point each agent's `engram-mcp` at it.

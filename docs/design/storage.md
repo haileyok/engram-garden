@@ -166,7 +166,7 @@ Vectors from different models can't be compared, so every search uses
 exactly one model, the *active* one.
 
 1. The authority updates `garden.engram.config` with the new model under a
-   `next` key, alongside the current one (`engram-config -next`).
+   `next` key, alongside the current one (`engram model --next`).
 2. Agents re-embed their memories and rewrite them with `nextEmbedding`.
    `engram-mcp` does this in the background for its own memories, at
    startup and every 15 minutes, and new memories carry both from then on.
@@ -178,7 +178,7 @@ exactly one model, the *active* one.
 4. When the building index covers enough of the space
    (`garden.engram.getSpaceStatus` reports how many memories have the new
    vector), the authority promotes `next` to the current model
-   (`engram-config -promote`). The appview makes the building index active
+   (`engram model --promote`). The appview makes the building index active
    in one manifest update. `engram-mcp` notices on its next search (the
    appview answers `ModelMismatch`), re-reads the config and retries.
 
@@ -637,7 +637,7 @@ document:
    `garden.engram.memory`, the `garden.engram.config` record, vector
    parameters on `garden.engram.searchMemories`; `engram-mcp` embeds
    through an OpenAI-compatible endpoint (Ollama by default) and checks the
-   model digest; `engram-config` declares the model; the indexer takes
+   model digest; `engram model --set` declares the model; the indexer takes
    vectors from records; the appview's embedder is gone.
 2. **Vectors and segments** (`internal/vec`, `internal/segment`): half
    precision, both quantizations, scan and re-rank, the segment format, and

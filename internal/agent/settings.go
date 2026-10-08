@@ -30,7 +30,7 @@ const (
 // ends them two weeks after sign-in, however often they're used.
 const OAuthSessionLifetime = 14 * 24 * time.Hour
 
-// Settings configure an agent: the file `engram init` writes, with ENGRAM_*
+// Settings configure an agent: the file `engram login` and the space commands write, with ENGRAM_*
 // environment variables taking priority.
 type Settings struct {
 	// Spaces are the memory spaces the agent uses, each with a short name.
@@ -187,7 +187,7 @@ func (s Settings) Resolve(nameOrURI string) (SpaceEntry, error) {
 		if e, ok := s.Default(); ok {
 			return e, nil
 		}
-		return SpaceEntry{}, errors.New("no memory space set up: run `engram init`, or `engram use <space URI>`")
+		return SpaceEntry{}, errors.New("no memory space set up: add one with `engram spaces add <space URI>`, or make one with `engram create <name>`")
 	}
 	if i, ok := s.entry(nameOrURI); ok {
 		return s.Spaces[i], nil
@@ -360,7 +360,7 @@ func (s *Settings) defaults() {
 // Check reports what's missing before the agent can run.
 func (s Settings) Check() error {
 	if len(s.Spaces) == 0 {
-		return errors.New("no memory space set up: run `engram init`, or `engram use <space URI>`, or set ENGRAM_SPACE")
+		return errors.New("no memory space set up: add one with `engram spaces add <space URI>`, or make one with `engram create <name>` (or set ENGRAM_SPACE)")
 	}
 	for _, e := range s.Spaces {
 		if _, err := space.ParseRef(e.URI); err != nil {
@@ -386,7 +386,7 @@ func (s Settings) CheckAccount() error {
 			return errors.New("not signed in: run `engram login`")
 		}
 	default:
-		return errors.New("not signed in: run `engram init` (or set ENGRAM_IDENTIFIER and ENGRAM_PASSWORD)")
+		return errors.New("not signed in: run `engram login` (or set ENGRAM_IDENTIFIER and ENGRAM_PASSWORD)")
 	}
 	return nil
 }
