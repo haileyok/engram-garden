@@ -304,7 +304,7 @@ func TestNotificationsKeepTheIndexCurrent(t *testing.T) {
 
 	// Only the authority may notify, and only addressed to this service.
 	svc := f.srv.ServiceID()
-	body2 := map[string]string{"space": f.net.Space, "repo": f.alice.DID, "repoRev": "x", "hash": "x"}
+	body2 := map[string]any{"space": f.net.Space, "repo": f.alice.DID, "repoRev": "x", "hash": space.LexBytes{1}}
 	if s := f.net.Deliver(svc, "com.atproto.space.notifyWrite", body2, f.net.SignServiceAuth(f.mallory, svc, "com.atproto.space.notifyWrite")); s != 403 {
 		t.Fatalf("non-authority notification: %d", s)
 	}

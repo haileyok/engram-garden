@@ -222,12 +222,13 @@ func (ix *Indexer) noteSpaceRev(spaceURI, rev string) string {
 
 // Notification is a com.atproto.space.notifyWrite body.
 type Notification struct {
-	Space        string `json:"space"`
-	Repo         string `json:"repo"`
-	RepoRev      string `json:"repoRev"`
-	Hash         string `json:"hash"`
-	SpaceRev     string `json:"spaceRev,omitempty"`
-	PrevSpaceRev string `json:"prevSpaceRev,omitempty"`
+	Space   string `json:"space"`
+	Repo    string `json:"repo"`
+	RepoRev string `json:"repoRev"`
+	// Hash is the repo's set-hash digest, lexicon bytes ({"$bytes": …}).
+	Hash         space.LexBytes `json:"hash"`
+	SpaceRev     string         `json:"spaceRev,omitempty"`
+	PrevSpaceRev string         `json:"prevSpaceRev,omitempty"`
 }
 
 // HandleWrite syncs the repo a notification names. It reports whether the
