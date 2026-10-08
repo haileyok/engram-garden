@@ -251,6 +251,24 @@ func TestExpiredSignIn(t *testing.T) {
 	}
 }
 
+// TestSignInEndingSoon: a sign-in about to end is a warning; status still
+// succeeds.
+func TestSignInEndingSoon(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	a := w.agent(t)
+	a.mustRun("init", "--space", w.net.Space, "--handle", "alice.test")
+	s, _ := agent.LoadSettings(a.path, nil)
+	s.Account.SignedInAt = time.Now().Add(-13 * 24 * time.Hour)
+	if err := s.Save(a.path); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := a.run("status")
+	if code != 0 || !strings.Contains(out, "engram login") || !strings.Contains(out, "Everything works") {
+		t.Fatalf("status near the end of a sign-in: %d %s", code, out)
+	}
+}
+
 // TestEnvOverridesSettings: ENGRAM_* variables work without a settings file.
 func TestEnvOverridesSettings(t *testing.T) {
 	t.Parallel()

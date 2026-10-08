@@ -66,7 +66,9 @@ func TestGrantsMemories(t *testing.T) {
 	if !grantsMemories([]string{"atproto", "space:garden.engram.space?collection=garden.engram.memory&action=read&action=create&action=update&action=delete"}) {
 		t.Fatal("refused the memory grant")
 	}
-	if grantsMemories([]string{"atproto"}) || grantsMemories([]string{"space:other.space?collection=garden.engram.memory"}) {
+	if grantsMemories([]string{"atproto"}) || grantsMemories([]string{"space:other.space?collection=garden.engram.memory"}) ||
+		grantsMemories([]string{"space:garden.engram.space?collection=garden.engram.memoryfoo&action=read&action=create"}) ||
+		grantsMemories([]string{"space:garden.engram.space?collection=garden.engram.memory&action=read"}) {
 		t.Fatal("accepted a grant without memory spaces")
 	}
 }

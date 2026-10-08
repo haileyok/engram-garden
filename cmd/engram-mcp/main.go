@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -26,7 +27,24 @@ import (
 	"github.com/haileyok/engram-garden/internal/oauthfile"
 )
 
+const usage = `engram-mcp: Engram Garden memory tools (remember, recall, get_memory,
+list_memories, forget) for an MCP client, over stdio.
+
+Set it up once with the engram CLI (engram init --space <space URI>), then
+configure your MCP client to run it:
+
+  {"mcpServers": {"engram": {"command": "engram-mcp"}}}
+
+ENGRAM_* environment variables override the settings; see the README.
+`
+
 func main() {
+	for _, a := range os.Args[1:] {
+		if a == "-h" || a == "--help" || a == "help" || a == "--version" {
+			fmt.Print(usage)
+			return
+		}
+	}
 	// stdout carries the protocol; logs go to stderr.
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if err := run(log); err != nil {
@@ -47,7 +65,9 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	a, err := agent.Open(ctx, settings, agent.Options{Store: &oauthfile.FileStore{Dir: filepath.Join(dir, "oauth")}, Log: log})
+	store := &oauthfile.FileStore{Dir: filepath.Join(dir, "oauth")}
+	store.Sweep() // sign-ins nobody finished
+	a, err := agent.Open(ctx, settings, agent.Options{Store: store, LockDir: store.Dir, HTTP: &http.Client{Timeout: time.Minute}, Log: log})
 	if err != nil {
 		return fmt.Errorf("signing in: %w", err)
 	}

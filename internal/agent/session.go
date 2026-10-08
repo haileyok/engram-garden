@@ -3,6 +3,8 @@ package agent
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +20,7 @@ import (
 	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 
+	"github.com/haileyok/cocoon/oauth/scopes"
 	"github.com/haileyok/engram-garden/internal/embed"
 	"github.com/haileyok/engram-garden/internal/lex"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
@@ -35,8 +38,21 @@ type Options struct {
 	Dir identity.Directory
 	// Store keeps OAuth sessions and sign-ins in progress.
 	Store oauth.ClientAuthStore
-	HTTP  *http.Client
-	Log   *slog.Logger
+	// LockDir holds the locks that let several processes share an OAuth
+	// session. Empty means only this process uses it.
+	LockDir string
+	HTTP    *http.Client
+	Log     *slog.Logger
+}
+
+// hashName names a file after some strings, without revealing them.
+func hashName(parts ...string) string {
+	h := sha256.New()
+	for _, p := range parts {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (o Options) dir() identity.Directory {
@@ -81,11 +97,14 @@ func (s Settings) Session(ctx context.Context, o Options) (*atclient.APIClient, 
 		if err != nil {
 			return nil, fmt.Errorf("account DID %q: %w", a.DID, err)
 		}
-		sess, err := OAuthApp(a.Callback, o).ResumeSession(ctx, did, a.SessionID)
+		app := OAuthApp(a.Callback, o)
+		sess, err := app.ResumeSession(ctx, did, a.SessionID)
 		if err != nil {
 			return nil, Explain(fmt.Errorf("resuming the sign-in: %w", err))
 		}
-		return sess.APIClient(), nil
+		api := sess.APIClient()
+		api.Auth = &sharedSession{app: app, did: did, sessionID: a.SessionID, lock: lockPath(o.LockDir, did, a.SessionID)}
+		return api, nil
 	}
 	return nil, s.Check()
 }
@@ -199,12 +218,22 @@ func LoginOAuth(ctx context.Context, handle string, o Options, p Prompt) (Accoun
 	}, nil
 }
 
-// grantsMemories reports whether the granted scopes include memory spaces.
-// Servers rewrite scopes when they issue them, so look for the resource,
-// not the exact string asked for.
-func grantsMemories(scopes []string) bool {
-	for _, s := range scopes {
-		if strings.HasPrefix(s, "space:"+lex.SpaceType) && strings.Contains(s, lex.MemoryCollection) {
+// grantsMemories reports whether the granted scopes let the agent read
+// memory spaces and write its own memories. Servers rewrite scopes when they
+// issue them, so this reads what each scope means.
+func grantsMemories(granted []string) bool {
+	for _, g := range granted {
+		p := scopes.ParseSpacePermission(g)
+		if p == nil || (p.Type != lex.SpaceType && p.Type != "*") {
+			continue
+		}
+		want := scopes.SpaceMatch{Type: lex.SpaceType, Authority: p.Authority, Skey: p.Skey, Collection: lex.MemoryCollection}
+		ok := true
+		for _, action := range []string{"read", "create"} {
+			want.Action = action
+			ok = ok && p.Matches(want)
+		}
+		if ok {
 			return true
 		}
 	}

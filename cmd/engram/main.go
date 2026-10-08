@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -33,7 +34,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "engram:", err)
 		os.Exit(1)
 	}
-	opts := agent.Options{Store: &oauthfile.FileStore{Dir: filepath.Join(dir, "oauth")}}
+	store := &oauthfile.FileStore{Dir: filepath.Join(dir, "oauth")}
+	store.Sweep() // sign-ins nobody finished
+	opts := agent.Options{Store: store, LockDir: store.Dir, HTTP: &http.Client{Timeout: time.Minute}}
 	c := &cli{
 		in: os.Stdin, out: os.Stdout, err: os.Stderr, getenv: os.Getenv,
 		configPath: filepath.Join(dir, "config.json"),

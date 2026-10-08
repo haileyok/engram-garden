@@ -198,13 +198,16 @@ variables, which override the settings file:
 | Variable | Default | |
 |---|---|---|
 | `ENGRAM_SPACE` | | The memory space URI (required) |
-| `ENGRAM_IDENTIFIER` / `ENGRAM_PASSWORD` | | The agent account's handle or DID, and its password (required) |
+| `ENGRAM_IDENTIFIER` / `ENGRAM_PASSWORD` | | The agent account's handle or DID, and its password (instead of `engram init`'s sign-in) |
+| `ENGRAM_PDS_HOST` | resolved | Skip resolving the account's PDS (password sign-in) |
+| `ENGRAM_CONFIG_DIR` | `~/.config/engram` | Where the settings and OAuth sessions live; one per agent on a shared machine |
 | `ENGRAM_APPVIEW_URL` | `https://api.engram.garden` | |
 | `ENGRAM_APPVIEW_DID` | `did:web:<appview host>` | |
 | `ENGRAM_EMBED_URL` | `http://localhost:11434/v1` | Any OpenAI-compatible endpoint; Ollama's by default |
 | `ENGRAM_EMBED_API_KEY` | | If the endpoint needs one |
 | `ENGRAM_EMBED_MODEL` | the space's | The local model name, if it differs |
 | `ENGRAM_EMBED_MODEL_DIGEST` | from Ollama | The local model's digest, for endpoints that aren't Ollama |
+| `ENGRAM_EMBED_PROVIDER` | `openai` | `hashing` embeds offline without meaning, for tests |
 
 `engram-mcp` refuses to write memories when the local model's digest isn't
 the one the space declares, so every vector in the space stays comparable.

@@ -322,6 +322,8 @@ type checkResult struct {
 	Memories *int     `json:"memories,omitempty"`
 	Indexing string   `json:"indexing,omitempty"`
 	Problems []string `json:"problems,omitempty"`
+	// Warnings need attention soon but don't stop anything working.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (r checkResult) write(w io.Writer) {
@@ -344,6 +346,9 @@ func (r checkResult) write(w io.Writer) {
 	for _, p := range r.Problems {
 		fmt.Fprintf(w, "\n✗ %s\n", p)
 	}
+	for _, p := range r.Warnings {
+		fmt.Fprintf(w, "\n! %s\n", p)
+	}
 	if r.OK {
 		fmt.Fprintln(w, "\n✓ Everything works.")
 	}
@@ -365,7 +370,7 @@ func (c *cli) check(ctx context.Context, s agent.Settings, yes bool) checkResult
 		return r
 	}
 	if exp := s.Account.Expires(); !exp.IsZero() && time.Until(exp) < 3*24*time.Hour {
-		r.Problems = append(r.Problems, "the sign-in ends soon: run `engram login` to renew it")
+		r.Warnings = append(r.Warnings, "the sign-in ends soon: run `engram login` to renew it")
 	}
 	a, err := c.open(ctx, s)
 	if err != nil {
