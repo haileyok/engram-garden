@@ -62,7 +62,7 @@ function Json({ text }: { text: string }) {
 function WhyAtproto() {
   return (
     <section className="band" aria-labelledby="why">
-      <h2 id="why">Built on ATProto, on purpose</h2>
+      <h2 id="why">Why it's built on ATProto</h2>
       <ul className="why">
         <li>
           <p className="why-line">Your account is the database.</p>
@@ -72,15 +72,15 @@ function WhyAtproto() {
         </li>
         <li>
           <p className="why-line">One login on every machine.</p>
-          <p className="why-note">The same handle signs in the web app, the CLI and each of your agents.</p>
+          <p className="why-note">The same handle signs you into the web app, the CLI and each of your agents.</p>
         </li>
         <li>
           <p className="why-line">Anyone can run the index.</p>
-          <p className="why-note">The appview is just a server that reads your records and builds a search index. Run your own if you like.</p>
+          <p className="why-note">The appview is a server that reads your records and builds a search index over them. You can run one yourself.</p>
         </li>
         <li>
-          <p className="why-line">Everything is signed.</p>
-          <p className="why-note">Each change is checked against its author's signed commit before it's indexed.</p>
+          <p className="why-line">Every record is signed.</p>
+          <p className="why-note">Each change is checked against its author's signed commit before it enters the index.</p>
         </li>
       </ul>
     </section>
@@ -107,21 +107,21 @@ export function Landing() {
 
       <Section id="how" title="How it works">
         <p>
-          A memory space is a private ATProto space. Its owner chooses the member accounts, and each agent is one of
-          them.
+          A memory space is a private ATProto space. Its owner chooses the member accounts, and each agent works as one
+          of them.
         </p>
         <p>
-          When an agent saves a note, it turns the text into a vector with the embedding model the space declares. That
-          runs on the agent's own machine, through Ollama by default. The text and the vector are stored as a record in
-          the agent's account.
+          When an agent saves a note, it turns the text into a vector with the embedding model the space declares. The
+          embedding runs on the agent's own machine, through Ollama by default. The text and the vector go into a
+          record in the agent's account.
         </p>
         <p>
-          A search service called the appview indexes those records once the space's owner allows it. It checks each
-          change against the author's signed commit before it goes into the index.
+          A search service called the appview indexes those records once the space's owner grants it read-only access.
+          Nothing goes into the index until it has been checked against the author's signed commit.
         </p>
         <p>
-          To search, an agent turns its question into a vector the same way and asks the appview for the closest notes.
-          The appview only answers members of the space.
+          To search, an agent embeds its question the same way and asks the appview for the closest notes. The appview
+          only answers members of the space.
         </p>
       </Section>
 
@@ -149,7 +149,7 @@ export function Landing() {
         <TermFrame title="mcp.json" copy={setup.mcp}>
           <Json text={setup.mcp} />
         </TermFrame>
-        <p className="muted">Each space's page has a Connect an agent tab with these commands filled in for it.</p>
+        <p className="muted">Each space's page has a Connect an agent tab with these commands filled in for that space.</p>
       </Section>
 
       <Sprig />
@@ -170,10 +170,10 @@ export function Landing() {
 
       <Sprig />
 
-      <Section id="selfhost" title="Don't trust us? Run your own">
+      <Section id="selfhost" title="Run your own appview">
         <p>
-          The appview is a Go program in this repo. Give it a local directory and it runs without a database, forgetting
-          its grants whenever it restarts, which is fine for trying it out. For one that lasts, give it an
+          The appview is a Go program in this repo. Point it at a local directory and it runs without a database. It
+          forgets its grants whenever it restarts, which is fine for a trial. For something that lasts, give it an
           S3-compatible bucket and a Postgres.
         </p>
         <TermFrame title="your server" copy={START_APPVIEW.join("\n")}>
@@ -194,12 +194,12 @@ export function Landing() {
         <p>
           A space's owner lets your appview index it the same way they would ours, on their own account's sign-in page.
           Moving a space later doesn't move your notes, since they live in the members' accounts. The new appview
-          rebuilds the index from those, or you can export the old index and load it with{" "}
+          rebuilds the index from those records, or you can export the old index and load it with{" "}
           <code>engram-appview import</code>.
         </p>
         <p>
-          To run it for real, give it a public HTTPS address so account servers can tell it when a note is written. On
-          localhost it polls every five minutes instead. Every setting is in the{" "}
+          For a deployment other people will use, give it a public HTTPS address so account servers can tell it when a
+          note is written. On localhost it polls every five minutes instead. Every setting is in the{" "}
           <a href={`${REPO}#running-the-appview`}>README</a>.
         </p>
       </Section>

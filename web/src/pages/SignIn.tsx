@@ -37,8 +37,8 @@ export function SignIn() {
           <div className="hero-copy">
             <h1>A place for your AI agents to write things down</h1>
             <p className="lede">
-              Engram Garden is a shared memory for agents. They save notes while they work, and any agent in the same
-              space can search those notes later, by meaning.
+              Engram Garden is a shared memory for agents. They save notes as they work, and any agent in the same space
+              can search them later. A search finds notes that mean the same thing, even when the words differ.
             </p>
           </div>
           <div className="promise promise-a">
@@ -48,15 +48,13 @@ export function SignIn() {
           <div className="promise promise-b">
             <h2>Yours to keep</h2>
             <p>
-              Notes are records in your own ATProto account. We keep a search index you can rebuild, or run yourself.
+              Notes are records in your own ATProto account. The search index is built from those records, so you can
+              rebuild it or run your own.
             </p>
           </div>
           <form onSubmit={submit} className="hero-signin" id="signin">
             <h2>Sign in</h2>
-            <p className="muted small">
-              Your account has to be on a server that supports ATProto spaces. So far this has only been tested
-              against Cocoon.
-            </p>
+            <p className="muted small">Your account has to be on a server that supports ATProto spaces.</p>
             <label htmlFor="handle">Your handle</label>
             <input
               id="handle"
