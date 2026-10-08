@@ -70,7 +70,13 @@ Guidance for working on Engram Garden.
   as `spacetest` accounts. Requests that change anything must be same-origin
   JSON.
 - `web/`: the React frontend (Vite, TypeScript, no router library). It
-  builds into `internal/web/dist/app`, which `engram-web` embeds.
+  builds into `internal/web/dist/app`, which `engram-web` embeds. Files in
+  `web/public/` are copied to the site's root: `og.png` is the link preview
+  card (its source is `web/og/card.html`), and `AGENTS.md` is a guide for
+  agents that *use* the service, served at `/AGENTS.md`. It is not guidance
+  for working on this repo, though tools that read nested `AGENTS.md` files
+  will load it when you work in `web/public/`. When an operation or command
+  changes, check that guide too.
 - The appview has no account. A space's authority grants it read-only OAuth
   access (`internal/appview/grants.go`, `grant_flow.go`, `oauth.go`); grants
   and OAuth sessions live in the control-plane database, not the bucket.
