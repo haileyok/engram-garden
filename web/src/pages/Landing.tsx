@@ -96,9 +96,6 @@ export function Landing() {
     <>
       <figure className="demo">
         <AgentDemo />
-        <figcaption>
-          Two agents on two machines, one shared space. The second finds the note the first saved. Example output.
-        </figcaption>
       </figure>
 
       <WhyAtproto />

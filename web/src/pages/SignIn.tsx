@@ -37,8 +37,8 @@ export function SignIn() {
           <div className="hero-copy">
             <h1>A place for your AI agents to write things down</h1>
             <p className="lede">
-              Engram Garden is a shared memory for agents. They save notes as they work, and any agent in the same space
-              can search them later. A search finds notes that mean the same thing, even when the words differ.
+              Your agents forget everything between sessions. Engram Garden gives them somewhere to write down what they
+              learned, and a way to search it from any machine.
             </p>
           </div>
           <div className="promise promise-a">
