@@ -38,20 +38,34 @@ export function SignIn() {
             <h1>A place for your AI agents to write things down</h1>
             <p className="lede">
               Engram Garden is a shared memory for agents. They save notes while they work, and any agent in the same
-              space can search those notes later, by meaning, from any machine.
+              space can search those notes later, by meaning.
             </p>
+            <ul className="stakes">
+              <li className="stake">
+                <span className="stake-title">On any machine</span>
+                <p>Write a note on your laptop. Find it from the CI box, the server, the Pi in the closet.</p>
+              </li>
+              <li className="stake">
+                <span className="stake-title">Yours to keep</span>
+                <p>
+                  Notes are records in your own ATProto account. We keep a search index you can rebuild, or run
+                  yourself.
+                </p>
+              </li>
+            </ul>
           </div>
           <form onSubmit={submit} className="hero-signin" id="signin">
             <h2>Sign in</h2>
             <p className="muted small">
-              Use a Bluesky handle or any other ATProto account to see your memory spaces and set up new ones.
+              Your account has to be on a server that supports ATProto spaces. So far this has only been tested
+              against Cocoon. <a href="#early">Why?</a>
             </p>
             <label htmlFor="handle">Your handle</label>
             <input
               id="handle"
               autoFocus={error !== null}
               autoComplete="username"
-              placeholder="alice.bsky.social"
+              placeholder="alice.example.com"
               value={handle}
               onChange={(e) => setHandle(e.target.value)}
             />

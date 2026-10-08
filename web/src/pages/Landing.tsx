@@ -6,6 +6,19 @@ import { agentSetup } from "../lib/connect";
 
 const REPO = "https://github.com/haileyok/engram-garden";
 const EXAMPLE_SPACE = "at://did:plc:you/space/garden.engram.space/memory";
+const OWN_APPVIEW = "https://memory.example.com";
+
+// Starting an appview of your own, for the self-hosting section.
+const START_APPVIEW = [
+  "git clone https://github.com/haileyok/engram-garden && cd engram-garden",
+  "goat key generate -t P-256",
+  [
+    "ENGRAM_SERVICE_DID=did:web:memory.example.com \\",
+    `  ENGRAM_PUBLIC_URL=${OWN_APPVIEW} \\`,
+    "  ENGRAM_OAUTH_KEY=<the key from above> \\",
+    "  go run ./cmd/engram-appview",
+  ].join("\n"),
+];
 
 function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
@@ -44,16 +57,57 @@ function Json({ text }: { text: string }) {
   return <>{parts}</>;
 }
 
+// The loud part of the page: why this is built on ATProto. The statements are
+// big on purpose, and the small print under each says what's behind it.
+function WhyAtproto() {
+  return (
+    <section className="band" aria-labelledby="why">
+      <h2 id="why">Built on ATProto, on purpose</h2>
+      <ul className="why">
+        <li>
+          <p className="why-line">Your account is the database.</p>
+          <p className="why-note">
+            Every note is a <code>garden.engram.memory</code> record in your own repo.
+          </p>
+        </li>
+        <li>
+          <p className="why-line">One login on every machine.</p>
+          <p className="why-note">The same handle signs in the web app, the CLI and each of your agents.</p>
+        </li>
+        <li>
+          <p className="why-line">Anyone can run the index.</p>
+          <p className="why-note">The appview is just a server that reads your records and builds a search index. Run your own if you like.</p>
+        </li>
+        <li>
+          <p className="why-line">Everything is signed.</p>
+          <p className="why-note">Each change is checked against its author's signed commit before it's indexed.</p>
+        </li>
+      </ul>
+      <p className="why-warning" id="early">
+        Fair warning: private data on ATProto, which is what spaces are, is still{" "}
+        <a href="https://github.com/bluesky-social/atproto/pull/5187">a draft proposal</a>. This has only been tested
+        against <a href="https://github.com/haileyok/cocoon">Cocoon</a>, a server that implements it, so for now your
+        account has to be on one that supports spaces.
+      </p>
+    </section>
+  );
+}
+
 // Landing explains what Engram Garden is. It sits under the sign-in box on the
 // signed-out page.
 export function Landing() {
   const setup = agentSetup(EXAMPLE_SPACE);
+  const own = agentSetup(EXAMPLE_SPACE, OWN_APPVIEW);
   return (
     <>
       <figure className="demo">
         <AgentDemo />
-        <figcaption>Two agents on different machines. The second finds the note the first saved. Example output.</figcaption>
+        <figcaption>
+          Two agents on two machines, one shared space. The second finds the note the first saved. Example output.
+        </figcaption>
       </figure>
+
+      <WhyAtproto />
 
       <Sprig />
 
@@ -116,9 +170,43 @@ export function Landing() {
           you can withdraw it from the space's page. Don't store secrets in a memory space.
         </p>
         <p>
-          Everything it indexes is first checked against its author's signed commit, and only members can search. The
-          code is public, appview included, if you want to run your own: see{" "}
-          <a href={`${REPO}#running-the-appview`}>running the appview</a>.
+          Everything it indexes is first checked against its author's signed commit, and only members can search.
+        </p>
+      </Section>
+
+      <Sprig />
+
+      <Section id="selfhost" title="Don't trust us? Run your own">
+        <p>
+          The appview is a Go program in this repo. Give it a local directory and it runs without a database, forgetting
+          its grants whenever it restarts, which is fine for trying it out. For one that lasts, give it an
+          S3-compatible bucket and a Postgres.
+        </p>
+        <TermFrame title="your server" copy={START_APPVIEW.join("\n")}>
+          {START_APPVIEW.map((cmd) => (
+            <div className="t-line" key={cmd}>
+              <Prompt cwd="~" />
+              {cmd}
+            </div>
+          ))}
+        </TermFrame>
+        <p>Then point an agent at it:</p>
+        <TermFrame title="agent host" copy={own.init}>
+          <div className="t-line">
+            <Prompt cwd="~" />
+            {own.init}
+          </div>
+        </TermFrame>
+        <p>
+          A space's owner lets your appview index it the same way they would ours, on their own account's sign-in page.
+          Moving a space later doesn't move your notes, since they live in the members' accounts. The new appview
+          rebuilds the index from those, or you can export the old index and load it with{" "}
+          <code>engram-appview import</code>.
+        </p>
+        <p>
+          To run it for real, give it a public HTTPS address so account servers can tell it when a note is written. On
+          localhost it polls every five minutes instead. Every setting is in the{" "}
+          <a href={`${REPO}#running-the-appview`}>README</a>.
         </p>
       </Section>
 

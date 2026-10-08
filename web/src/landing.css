@@ -11,6 +11,7 @@
   --accent-ink: #fbf8ef;
   --accent-soft: #e3ead6;
   --bloom: #a94826;
+  --wood: #b8956a;
   --seed: rgb(47 107 69 / 0.16);
   --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Source Serif 4", Georgia, "DejaVu Serif", serif;
   --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
@@ -34,6 +35,7 @@
     --accent-ink: #0f1a13;
     --accent-soft: #223025;
     --bloom: #e29468;
+    --wood: #8c7049;
     --seed: rgb(143 203 155 / 0.12);
   }
 }
@@ -66,6 +68,21 @@
 }
 .hero-signin h2 { font: 600 1.35rem var(--serif); margin: 0; }
 .hero-signin p { margin: 0; }
+
+/* The two promises, as stakes in the ground, each a little crooked. */
+.stakes { list-style: none; margin: 2.4rem 0 0; padding: 0 0 2rem; display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; }
+.stake {
+  position: relative; margin: 0; padding: 0.9rem 1rem 1rem; transform: rotate(-1.2deg);
+  background: var(--card); border: 1px solid var(--line); border-radius: 3px;
+  box-shadow: 0 10px 22px -16px rgb(47 70 40 / 0.5);
+}
+.stake:nth-child(2) { transform: rotate(1deg); }
+.stake::after {
+  content: ""; position: absolute; top: 100%; left: 50%; width: 12px; height: 1.6rem; margin-left: -6px;
+  background: var(--wood); clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+.stake-title { display: block; margin-bottom: 0.35rem; font: 600 1.45rem / 1.15 var(--serif); letter-spacing: -0.01em; color: var(--accent); }
+.stake p { margin: 0; font-size: 0.98rem; line-height: 1.5; }
 
 /* The two terminal windows */
 .demo { margin: 0; }
@@ -119,6 +136,21 @@
   .term { border-color: rgb(255 255 255 / 0.1); box-shadow: 0 24px 48px -28px rgb(0 0 0 / 0.8); }
 }
 
+/* The loud section: why ATProto. A dark moss panel with big statements. */
+.band {
+  margin-top: 3rem; padding: 2.75rem 2.5rem 2.25rem; color: #f3efe2; background: #1f3d2b;
+  border-radius: 6px 36px 6px 36px; box-shadow: 0 24px 48px -30px rgb(20 40 25 / 0.6);
+}
+.band h2 { margin: 0; font: 600 clamp(1.8rem, 3.6vw, 2.5rem) / 1.12 var(--serif); letter-spacing: -0.02em; color: #fbf8ef; }
+.why { list-style: none; margin: 2rem 0 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 1.9rem 2.75rem; }
+.why-line { margin: 0; font: 600 clamp(1.3rem, 2.4vw, 1.65rem) / 1.2 var(--serif); letter-spacing: -0.01em; color: #fbf8ef; }
+.why-note { margin: 0.4rem 0 0; font-size: 0.9rem; line-height: 1.55; color: #b4cdb9; }
+.why-note code { color: #e6dcc0; word-break: normal; overflow-wrap: anywhere; }
+.why-warning { margin: 2.1rem 0 0; padding-top: 1.25rem; border-top: 1px solid rgb(255 255 255 / 0.16); font-size: 0.95rem; line-height: 1.6; color: #d8dfd0; }
+.band a { color: #f0cf9e; }
+.band a:hover { color: #ffffff; }
+.band + .sprig { margin-top: 3rem; }
+
 /* Sections: a narrow reading column with the heading in the margin */
 .sprig { display: flex; align-items: center; gap: 1rem; color: var(--accent); }
 .sprig::before, .sprig::after { content: ""; flex: 1; height: 1px; background: var(--line); }
@@ -144,4 +176,15 @@
   .hero { grid-template-columns: 1fr; gap: 2rem; padding: 2.25rem 0 2.5rem; }
   .hero-signin { max-width: 32rem; }
   .sec { grid-template-columns: minmax(0, 1fr); padding: 2.25rem 0; }
+  .why { grid-template-columns: 1fr; }
+  .band { padding: 1.75rem 1.4rem 1.5rem; }
+}
+@media (max-width: 560px) {
+  .stakes { gap: 0.8rem; margin-top: 1.5rem; padding-bottom: 1.9rem; }
+  .stake { padding: 0.7rem 0.75rem 0.8rem; }
+  .stake-title { font-size: 1.15rem; }
+  .stake p { font-size: 0.86rem; line-height: 1.45; }
+}
+@media (max-width: 340px) {
+  .stakes { grid-template-columns: 1fr; gap: 2.6rem; }
 }
