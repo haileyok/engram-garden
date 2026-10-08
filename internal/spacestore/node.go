@@ -19,6 +19,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/haileyok/engram-garden/internal/blob"
+	"github.com/haileyok/engram-garden/internal/metrics"
 )
 
 // Limits bound what one space may use.
@@ -61,6 +62,9 @@ type Options struct {
 	HardLimit        time.Duration
 	ClusterThreshold int
 	Limits           Limits
+	// PerSpaceMetrics adds gauges labeled with each loaded space's URI.
+	// Leave it off where spaces are many.
+	PerSpaceMetrics bool
 
 	Log *slog.Logger
 	// Now overrides the clock (tests).
@@ -132,6 +136,7 @@ func New(opt Options) (*Node, error) {
 	if opt.CacheDir != "" {
 		n.cache = newDiskCache(opt.CacheDir, opt.CacheBytes)
 	}
+	liveNodes.Store(n, struct{}{})
 	return n, nil
 }
 
@@ -168,7 +173,11 @@ func (n *Node) space(ctx context.Context, spaceURI string) (*Space, error) {
 	ch := n.loads.DoChan(spaceURI, func() (any, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		return n.load(ctx, spaceURI)
+		start := time.Now()
+		s, err := n.load(ctx, spaceURI)
+		loads.WithLabelValues(metrics.Result(err)).Inc()
+		loadDuration.Observe(time.Since(start).Seconds())
+		return s, err
 	})
 	select {
 	case r := <-ch:
@@ -359,6 +368,7 @@ func (n *Node) noteRAM() {
 			continue
 		}
 		delete(n.spaces, s.uri)
+		evictions.Inc()
 		total -= rb
 	}
 	n.mu.Unlock()
@@ -438,6 +448,7 @@ func (n *Node) Run(ctx context.Context, every time.Duration) {
 
 // Close flushes every dirty space and waits for background work.
 func (n *Node) Close(ctx context.Context) error {
+	defer liveNodes.Delete(n)
 	n.bg.Wait()
 	n.mu.Lock()
 	spaces := make([]*Space, 0, len(n.spaces))
@@ -557,9 +568,13 @@ func (n *Node) SpaceDeleted(ctx context.Context, spaceURI string) (bool, error) 
 }
 
 // Search finds the memories nearest a query vector.
-func (n *Node) Search(ctx context.Context, spaceURI string, q SearchQuery) (*SearchResult, error) {
+func (n *Node) Search(ctx context.Context, spaceURI string, q SearchQuery) (res *SearchResult, err error) {
 	// Deadlines run on the real clock, whatever Options.Now says.
 	start := time.Now()
+	defer func() {
+		searches.WithLabelValues(searchResult(err)).Inc()
+		searchDuration.Observe(time.Since(start).Seconds())
+	}()
 	loadCtx, cancel := context.WithDeadline(ctx, start.Add(n.opt.HardLimit))
 	defer cancel()
 	s, err := n.space(loadCtx, spaceURI)

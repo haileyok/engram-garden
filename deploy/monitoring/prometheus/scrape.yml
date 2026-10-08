@@ -1,0 +1,17 @@
+# Prometheus scrape jobs for Engram Garden. Add these under scrape_configs.
+# Set ENGRAM_METRICS_LISTEN on the appview and ENGRAM_WEB_METRICS_LISTEN on
+# the web app (for example :9464 and :9465), then point the targets at them.
+# Keep the job names: the dashboard and alert rules look for them.
+scrape_configs:
+  - job_name: engram-appview
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["127.0.0.1:9464"]
+
+  - job_name: engram-web
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["127.0.0.1:9465"]
+
+rule_files:
+  - engram-alerts.yml

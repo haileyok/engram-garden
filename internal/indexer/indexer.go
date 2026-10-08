@@ -23,6 +23,7 @@ import (
 	"github.com/ipfs/go-cid"
 
 	"github.com/haileyok/engram-garden/internal/lex"
+	"github.com/haileyok/engram-garden/internal/metrics"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
 	"github.com/haileyok/engram-garden/internal/spacestore"
 )
@@ -86,8 +87,12 @@ type listedRepo struct {
 // SyncSpace lists the space's writers at the authority and syncs every repo
 // whose latest write the index hasn't seen. The authority's repo goes
 // first, since its config record says which vectors to index.
-func (ix *Indexer) SyncSpace(ctx context.Context, spaceURI string) error {
-	var err error
+func (ix *Indexer) SyncSpace(ctx context.Context, spaceURI string) (err error) {
+	start := time.Now()
+	defer func() {
+		spaceSyncs.WithLabelValues(metrics.Result(err)).Inc()
+		spaceSyncDuration.Observe(time.Since(start).Seconds())
+	}()
 	// A config change met during the pass asks for a full pass; two passes
 	// cover it.
 	for range 2 {
@@ -256,18 +261,24 @@ func (ix *Indexer) HandleWrite(ctx context.Context, n Notification) (needSpaceSy
 // SyncRepo brings one member's repo up to date: incrementally from the
 // oplog when it has synced before, else (or if verification fails) with a
 // full verified export.
-func (ix *Indexer) SyncRepo(ctx context.Context, spaceURI, did, spaceRev string) error {
+func (ix *Indexer) SyncRepo(ctx context.Context, spaceURI, did, spaceRev string) (err error) {
 	if _, err := syntax.ParseDID(did); err != nil {
 		return fmt.Errorf("bad repo DID %q", did)
 	}
 	unlock := ix.lock(spaceURI, did)
 	defer unlock()
 
+	start, mode := time.Now(), "full"
+	defer func() {
+		repoSyncs.WithLabelValues(mode, metrics.Result(err)).Inc()
+		repoSyncDuration.WithLabelValues(mode).Observe(time.Since(start).Seconds())
+	}()
 	st, err := ix.Store.RepoState(ctx, spaceURI, did)
 	if err != nil {
 		return err
 	}
 	if st != nil && st.SetHash != nil {
+		mode = "incremental"
 		err := ix.syncIncremental(ctx, spaceURI, did, *st, spaceRev)
 		if err == nil {
 			return nil
@@ -276,6 +287,8 @@ func (ix *Indexer) SyncRepo(ctx context.Context, spaceURI, did, spaceRev string)
 			return err
 		}
 		ix.log().Info("incremental sync can't be applied, re-exporting repo", "space", spaceURI, "repo", did, "reason", err)
+		reexports.Inc()
+		mode = "full"
 	}
 	return ix.syncFull(ctx, spaceURI, did, spaceRev)
 }
@@ -408,6 +421,7 @@ func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st
 		return err
 	}
 	if len(upserts)+len(deletes) > 0 {
+		observeLag(commit.Rev, time.Now())
 		ix.log().Info("synced repo", "space", spaceURI, "repo", did, "upserts", len(upserts), "deletes", len(deletes), "rev", commit.Rev)
 	}
 	return nil
@@ -415,7 +429,12 @@ func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st
 
 func (ix *Indexer) apply(ctx context.Context, spaceURI, did string, pos spacestore.RepoPosition, upserts []spacestore.Memory, deletes []string, replace bool) error {
 	err := ix.Store.ApplyRepoChanges(ctx, spaceURI, did, pos, upserts, deletes, replace)
+	if err == nil || errors.Is(err, spacestore.ErrOverLimit) {
+		recordsIndexed.WithLabelValues("upsert").Add(float64(len(upserts)))
+		recordsIndexed.WithLabelValues("delete").Add(float64(len(deletes)))
+	}
 	if errors.Is(err, spacestore.ErrOverLimit) {
+		overLimit.Inc()
 		ix.log().Warn("space is over a limit; some memories were not indexed", "space", spaceURI, "repo", did)
 		return nil
 	}

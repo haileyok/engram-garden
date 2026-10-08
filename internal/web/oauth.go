@@ -171,16 +171,18 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Secure: strings.HasPrefix(s.Origin, "https://"), SameSite: http.SameSiteLaxMode})
 	if !s.startedHere(r) {
 		s.log().Info("refused a sign-in callback this browser didn't start")
+		signIns.WithLabelValues("refused").Inc()
 		http.Redirect(w, r, "/?signin_error="+url.QueryEscape("that sign-in wasn't started from this browser; try again"), http.StatusSeeOther)
 		return
 	}
 	sess, err := s.OAuth.App.ProcessCallback(r.Context(), r.URL.Query())
 	if err != nil {
-		msg := "signing in failed"
+		msg, result := "signing in failed", "failed"
 		var ce *oauth.AuthRequestCallbackError
 		if errors.As(err, &ce) && ce.ErrorCode == "access_denied" {
-			msg = "you declined to sign in"
+			msg, result = "you declined to sign in", "declined"
 		}
+		signIns.WithLabelValues(result).Inc()
 		s.log().Info("sign-in callback failed", "err", err)
 		http.Redirect(w, r, "/?signin_error="+url.QueryEscape(msg), http.StatusSeeOther)
 		return
@@ -188,6 +190,9 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if missing := missingScopes(sess.Scopes); len(missing) > 0 {
 		// The server granted less than asked: some features will fail.
 		s.log().Warn("sign-in granted fewer permissions than requested", "did", sess.AccountDID, "missing", missing)
+		signIns.WithLabelValues("partial").Inc()
+	} else {
+		signIns.WithLabelValues("ok").Inc()
 	}
 	http.SetCookie(w, s.sessionCookie(sess.AccountDID, sess.SessionID))
 	http.Redirect(w, r, "/", http.StatusSeeOther)

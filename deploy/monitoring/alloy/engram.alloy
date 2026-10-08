@@ -1,0 +1,104 @@
+// Grafana Alloy config for Engram Garden: scrapes both services' metrics and
+// ships their logs, for a host running Engram with Docker Compose (project
+// name engram-garden). It expects the metrics listeners published on host
+// loopback, as in a compose file with
+//
+//   appview: environment: ENGRAM_METRICS_LISTEN=":9464"   ports: ["127.0.0.1:9464:9464"]
+//   web:     environment: ENGRAM_WEB_METRICS_LISTEN=":9465" ports: ["127.0.0.1:9465:9465"]
+//
+// and Alloy in the host network. Set these environment variables for Alloy:
+//
+//   PROMETHEUS_URL   remote-write endpoint, e.g. http://prometheus:9090/api/v1/write
+//                    (Prometheus needs --web.enable-remote-write-receiver)
+//   LOKI_URL         push endpoint, e.g. http://loki:3100/loki/api/v1/push
+//   ENGRAM_HOST      a name for this machine, added to everything as host="…"
+//
+// Alloy needs the Docker socket mounted to read container logs. Merge this
+// into an existing config by dropping the components you already have.
+
+// ---- Metrics ----
+
+prometheus.scrape "engram" {
+  scrape_interval = "15s"
+  targets = [
+    // The metrics ports the compose example publishes on loopback.
+    { "__address__" = "127.0.0.1:9464", "job" = "engram-appview" },
+    { "__address__" = "127.0.0.1:9465", "job" = "engram-web" },
+  ]
+  // Use the host name as the instance rather than 127.0.0.1.
+  forward_to = [prometheus.relabel.engram.receiver]
+}
+
+prometheus.relabel "engram" {
+  rule {
+    source_labels = ["__address__"]
+    regex         = "[^:]+:(\\d+)"
+    target_label  = "instance"
+    replacement   = sys.env("ENGRAM_HOST") + ":$1"
+  }
+  forward_to = [prometheus.remote_write.default.receiver]
+}
+
+prometheus.remote_write "default" {
+  endpoint {
+    url = sys.env("PROMETHEUS_URL")
+  }
+  external_labels = { host = sys.env("ENGRAM_HOST") }
+}
+
+// ---- Logs ----
+// Engram logs one JSON object per line (time, level, msg, then fields such
+// as space and repo). The dashboard parses them with `| json`, so they're
+// shipped as they are, labeled by compose project and service.
+
+discovery.docker "engram" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "10s"
+  filter {
+    name   = "label"
+    values = ["com.docker.compose.project=engram-garden"]
+  }
+}
+
+discovery.relabel "engram" {
+  targets = discovery.docker.engram.targets
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "compose_project"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "compose_service"
+  }
+}
+
+loki.source.docker "engram" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.engram.output
+  labels     = { job = "docker" }
+  forward_to = [loki.process.engram.receiver]
+}
+
+// Promote the level to a label, so Grafana colors lines and alerts can
+// count errors cheaply. Other fields stay in the line.
+loki.process "engram" {
+  stage.json {
+    expressions = { level = "level" }
+  }
+  stage.labels {
+    values = { level = "" }
+  }
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = sys.env("LOKI_URL")
+  }
+  external_labels = { host = sys.env("ENGRAM_HOST") }
+}

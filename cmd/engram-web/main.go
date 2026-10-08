@@ -24,6 +24,7 @@ import (
 	"github.com/bluesky-social/indigo/util/ssrf"
 
 	"github.com/haileyok/engram-garden/internal/config"
+	"github.com/haileyok/engram-garden/internal/metrics"
 	"github.com/haileyok/engram-garden/internal/oauthfile"
 	"github.com/haileyok/engram-garden/internal/web"
 )
@@ -124,10 +125,14 @@ func run(log *slog.Logger) error {
 		}
 	}()
 
+	// Prometheus metrics on their own address, off unless set.
+	if err := metrics.Serve(ctx, config.Get("ENGRAM_WEB_METRICS_LISTEN", ""), log); err != nil {
+		return fmt.Errorf("ENGRAM_WEB_METRICS_LISTEN: %w", err)
+	}
 	addr := config.Get("ENGRAM_WEB_LISTEN", ":8090")
 	hs := &http.Server{
 		Addr:              addr,
-		Handler:           srv.Handler(),
+		Handler:           metrics.Instrument(srv.Handler()),
 		ReadHeaderTimeout: 10 * time.Second,
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}

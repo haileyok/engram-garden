@@ -204,10 +204,14 @@ func (s *source) ReadRange(ctx context.Context, off, n int64) ([]byte, error) {
 		b := make([]byte, n)
 		_, err := cf.f.ReadAt(b, off)
 		if err == nil || (errors.Is(err, io.EOF) && n == 0) {
+			segmentReads.WithLabelValues("disk_cache").Inc()
+			segmentReadBytes.WithLabelValues("disk_cache").Add(float64(n))
 			return b, nil
 		}
 		// Fall through to object storage on a local read error.
 	}
 	s.remote.add(n)
+	segmentReads.WithLabelValues("object_storage").Inc()
+	segmentReadBytes.WithLabelValues("object_storage").Add(float64(n))
 	return s.blob.GetRange(ctx, s.key, off, n)
 }

@@ -57,6 +57,11 @@ Guidance for working on Engram Garden.
 - Registered spaces: `internal/appview/registration.go`. The appview indexes
   `ENGRAM_SPACES` plus spaces whose authority granted access, recorded as
   write-once objects under `registered-spaces/`.
+- `internal/metrics`: the Prometheus registry, HTTP middleware and the
+  separate metrics listener. Packages declare metrics with
+  `metrics.Factory` in their own `metrics.go`. When you add or change a
+  metric, update `docs/monitoring.md` and, if it belongs on the dashboard,
+  `deploy/monitoring/grafana/generate.py` (then run it).
 - `internal/spacetest`: in-memory Spaces network for tests.
 - Spaces primitives (tokens, HTTP signatures, commits, CARs) come from
   `github.com/haileyok/cocoon/space`. Fix protocol bugs there, not here.

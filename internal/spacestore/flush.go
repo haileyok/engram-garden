@@ -15,6 +15,7 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 
 	"github.com/haileyok/engram-garden/internal/blob"
+	"github.com/haileyok/engram-garden/internal/metrics"
 	"github.com/haileyok/engram-garden/internal/segment"
 )
 
@@ -133,12 +134,17 @@ func (s *Space) Flush(ctx context.Context) error {
 	return s.maintainLocked(ctx)
 }
 
-func (s *Space) flushLocked(ctx context.Context) error {
+func (s *Space) flushLocked(ctx context.Context) (err error) {
 	s.mu.Lock()
 	if !s.dirty() || s.readOnly {
 		s.mu.Unlock()
 		return nil
 	}
+	start := time.Now()
+	defer func() {
+		flushes.WithLabelValues(metrics.Result(err)).Inc()
+		flushDuration.Observe(time.Since(start).Seconds())
+	}()
 	// Snapshot. Entries are immutable; a change during the flush replaces
 	// the map entry and stays buffered.
 	entries := make(map[string]*bufEntry, len(s.buf))
@@ -349,12 +355,18 @@ func (s *Space) maintainLocked(ctx context.Context) error {
 	gcDue := s.n.now().Sub(s.man.LastGCAt) >= opt.MergeInterval && !s.readOnly
 	s.mu.RUnlock()
 	if due {
-		if err := s.mergeLocked(ctx); err != nil {
+		start := time.Now()
+		err := s.mergeLocked(ctx)
+		observeMaintenance("merge", start, err)
+		if err != nil {
 			return fmt.Errorf("merging: %w", err)
 		}
 	}
 	if gcDue {
-		if err := s.gcLocked(ctx); err != nil {
+		start := time.Now()
+		err := s.gcLocked(ctx)
+		observeMaintenance("gc", start, err)
+		if err != nil {
 			return fmt.Errorf("collecting garbage: %w", err)
 		}
 	}

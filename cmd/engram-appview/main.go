@@ -28,6 +28,7 @@ import (
 	"github.com/haileyok/engram-garden/internal/blob"
 	"github.com/haileyok/engram-garden/internal/config"
 	"github.com/haileyok/engram-garden/internal/indexer"
+	"github.com/haileyok/engram-garden/internal/metrics"
 	"github.com/haileyok/engram-garden/internal/routing"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
 	"github.com/haileyok/engram-garden/internal/spacestore"
@@ -64,6 +65,7 @@ func main() {
 //	ENGRAM_RAM_BYTES       RAM budget for loaded spaces (default 8 GiB)
 //	ENGRAM_LIMIT_MEMORIES, ENGRAM_LIMIT_BYTES, ENGRAM_LIMIT_SEARCHES_PER_SECOND,
 //	ENGRAM_LIMIT_WRITES_PER_DAY   per-space limits (default unlimited)
+//	ENGRAM_METRICS_PER_SPACE  add gauges labeled by space URI (default false)
 func openStore(ctx context.Context, log *slog.Logger, ring *routing.Ring) (*spacestore.Node, blob.Store, error) {
 	bs, err := config.Blob()
 	if err != nil {
@@ -75,6 +77,15 @@ func openStore(ctx context.Context, log *slog.Logger, ring *routing.Ring) (*spac
 		return nil, nil, fmt.Errorf("probing storage: %w", err)
 	}
 	log.Info("storage probed", "conditional_writes", cond)
+	bs = blob.Instrumented(bs)
+	perSpace := false
+	switch v := config.Get("ENGRAM_METRICS_PER_SPACE", ""); v {
+	case "", "0", "false":
+	case "1", "true":
+		perSpace = true
+	default:
+		return nil, nil, fmt.Errorf("ENGRAM_METRICS_PER_SPACE must be true or false, not %q", v)
+	}
 	ints := map[string]int64{}
 	for _, k := range []string{"ENGRAM_CACHE_BYTES", "ENGRAM_RAM_BYTES", "ENGRAM_LIMIT_MEMORIES", "ENGRAM_LIMIT_BYTES", "ENGRAM_LIMIT_WRITES_PER_DAY"} {
 		if ints[k], err = config.Int(k, 0); err != nil {
@@ -96,7 +107,8 @@ func openStore(ctx context.Context, log *slog.Logger, ring *routing.Ring) (*spac
 			MaxMemories: int(ints["ENGRAM_LIMIT_MEMORIES"]), MaxBytes: ints["ENGRAM_LIMIT_BYTES"],
 			SearchesPerSecond: sps, WritesPerDay: int(ints["ENGRAM_LIMIT_WRITES_PER_DAY"]),
 		},
-		Log: log,
+		PerSpaceMetrics: perSpace,
+		Log:             log,
 	})
 	return n, bs, err
 }
@@ -245,8 +257,13 @@ func run(log *slog.Logger) error {
 		st.Run(ctx, time.Minute) // flush full or hour-old buffers
 	}()
 
+	// Prometheus metrics on their own address, off unless set: the public
+	// listener doesn't serve them.
+	if err := metrics.Serve(ctx, config.Get("ENGRAM_METRICS_LISTEN", ""), log); err != nil {
+		return fmt.Errorf("ENGRAM_METRICS_LISTEN: %w", err)
+	}
 	addr := config.Get("ENGRAM_LISTEN", ":8080")
-	hs := &http.Server{Addr: addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	hs := &http.Server{Addr: addr, Handler: metrics.Instrument(srv.Handler()), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
