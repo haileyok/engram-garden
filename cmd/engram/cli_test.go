@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -119,7 +120,7 @@ func (a *agentCLI) run(args ...string) (int, string, string) {
 			}
 			return &agent.Agent{Client: sc, Space: s.Space, AppviewURL: s.AppviewURL, AppviewDID: s.AppviewDID, Provider: p}, nil
 		},
-		signIn: func(_ context.Context, handle, password string) (agent.Account, error) {
+		signIn: func(_ context.Context, handle, password string, _ io.Reader) (agent.Account, error) {
 			did := "did:plc:" + strings.TrimSuffix(handle, ".test")
 			if password != "" {
 				return agent.Account{Handle: handle, DID: did, SignIn: agent.SignInPassword, Password: password}, nil

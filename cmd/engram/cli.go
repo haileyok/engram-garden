@@ -28,7 +28,7 @@ type cli struct {
 	// open signs in with settings.
 	open func(context.Context, agent.Settings) (*agent.Agent, error)
 	// signIn signs in to an account: OAuth, or password when password is set.
-	signIn func(ctx context.Context, handle, password string) (agent.Account, error)
+	signIn func(ctx context.Context, handle, password string, in io.Reader) (agent.Account, error)
 	// readSecret reads a password without echoing it, from a terminal; nil
 	// when stdin isn't one, so the password is read as a line.
 	readSecret func(prompt string) (string, error)
@@ -341,7 +341,7 @@ func flagSet(fs *flag.FlagSet, name string) bool {
 // taking ENGRAM_PASSWORD).
 func (c *cli) doSignIn(ctx context.Context, handle string, usePassword bool) (agent.Account, error) {
 	if !usePassword {
-		return c.signIn(ctx, handle, "")
+		return c.signIn(ctx, handle, "", c.reader())
 	}
 	pw := c.getenv("ENGRAM_PASSWORD")
 	if pw == "" {
@@ -360,7 +360,7 @@ func (c *cli) doSignIn(ctx context.Context, handle string, usePassword bool) (ag
 	if pw == "" {
 		return agent.Account{}, errors.New("no password given")
 	}
-	return c.signIn(ctx, handle, pw)
+	return c.signIn(ctx, handle, pw, c.reader())
 }
 
 func (c *cli) ask(prompt string) (string, error) {
