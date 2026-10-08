@@ -412,7 +412,7 @@ func TestNoDeclaredModel(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t, false)
 	alice := connect(t, w.tools(t, "did:plc:alice", embed.HashingProvider{}))
-	if msg := call(t, alice, "remember", map[string]any{"text": "anything"}, nil); !strings.Contains(msg, "engram-config") {
+	if msg := call(t, alice, "remember", map[string]any{"text": "anything"}, nil); !strings.Contains(msg, "engram model --set") {
 		t.Fatalf("remember without a config: %q", msg)
 	}
 }

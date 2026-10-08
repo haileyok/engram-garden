@@ -15,7 +15,7 @@ COPY . .
 COPY --from=web /src/internal/web/dist/app ./internal/web/dist/app
 RUN CGO_ENABLED=0 go build -o /out/engram-appview ./cmd/engram-appview && \
     CGO_ENABLED=0 go build -o /out/engram-mcp ./cmd/engram-mcp && \
-    CGO_ENABLED=0 go build -o /out/engram-config ./cmd/engram-config && \
+    CGO_ENABLED=0 go build -o /out/engram ./cmd/engram && \
     CGO_ENABLED=0 go build -o /out/engram-web ./cmd/engram-web
 
 FROM gcr.io/distroless/static-debian12

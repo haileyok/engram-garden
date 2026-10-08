@@ -74,7 +74,7 @@ export function ConnectAgent({ uri, status, isAuthority, onManage }: { uri: stri
         {model ? (
           <p className="muted small">
             Agents embed memories themselves with this space's model, <strong>{model.model}</strong>, through Ollama on their
-            machine (<code>engram init</code> offers to pull it).
+            machine (<code>engram login</code> offers to pull it).
           </p>
         ) : (
           <p className="muted small">This space hasn't declared an embedding model yet; agents can't store memories until it does.</p>

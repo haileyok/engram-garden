@@ -32,11 +32,11 @@ describe("space URIs", () => {
   });
   it("writes an agent's setup commands", () => {
     const s = agentSetup(space, "https://api.engram.garden");
-    expect(s.init).toBe(`engram init --space ${space}`);
-    expect(s.initHeadless).toBe(`engram init --space ${space} --password`);
+    expect(s.init).toBe(`engram login --space ${space}`);
+    expect(s.initHeadless).toBe(`engram login --space ${space} --password`);
     expect(s.add).toBe(`engram spaces add ${space}`);
     expect(JSON.parse(s.mcp)).toEqual({ mcpServers: { engram: { command: "engram-mcp" } } });
-    expect(agentSetup(space, "https://appview.example").init).toBe(`engram init --space ${space} --appview https://appview.example`);
+    expect(agentSetup(space, "https://appview.example").init).toBe(`engram login --space ${space} --appview https://appview.example`);
     expect(originOf("https://appview.example/oauth/grant")).toBe("https://appview.example");
     expect(originOf("not a url")).toBeUndefined();
   });
@@ -48,7 +48,7 @@ describe("space URIs", () => {
 });
 
 describe("local models", () => {
-  it("records names and digests the way engram-config does", () => {
+  it("records names and digests the way engram model --set does", () => {
     expect(normalizeModelName("nomic-embed-text:latest")).toBe("nomic-embed-text");
     expect(normalizeModelName("mxbai-embed-large:335m")).toBe("mxbai-embed-large:335m");
     expect(normalizeDigest("0a1b")).toBe("sha256:0a1b");

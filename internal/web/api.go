@@ -435,7 +435,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request, u *user
 }
 
 // handlePutConfig declares or changes the space's model, the same changes
-// engram-config makes.
+// engram model makes.
 func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request, u *user) {
 	var in struct {
 		Space          string        `json:"space"`

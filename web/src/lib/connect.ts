@@ -15,7 +15,7 @@ export type AgentSetup = {
 // appviewOrigin is the appview's origin (from its grant URL), when known.
 export function agentSetup(space: string, appviewOrigin?: string): AgentSetup {
   const appview = appviewOrigin && appviewOrigin !== DEFAULT_APPVIEW ? ` --appview ${appviewOrigin}` : "";
-  const init = `engram init --space ${space}${appview}`;
+  const init = `engram login --space ${space}${appview}`;
   return {
     install: "nix profile install github:haileyok/engram-garden",
     init,

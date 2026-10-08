@@ -1,5 +1,5 @@
 // Reads a model's exact identity from the Ollama on this computer, the way
-// engram-config does, so the space records what agents will check against.
+// engram model --set does, so the space records what agents will check against.
 // Ollama only answers pages from other origins when OLLAMA_ORIGINS allows
 // them.
 

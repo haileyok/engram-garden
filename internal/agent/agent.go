@@ -93,7 +93,7 @@ func (t *Agent) Config(ctx context.Context, refresh bool) (*lex.Config, error) {
 	params := url.Values{"space": {t.Space}, "repo": {auth}, "collection": {lex.ConfigCollection}, "rkey": {lex.ConfigRkey}}
 	if err := t.Client.Query(ctx, host, t.Space, auth, "com.atproto.space.getRecord", params, &out); err != nil {
 		if spaceclient.IsError(err, "RecordNotFound") || spaceclient.IsError(err, "RepoNotFound") {
-			return nil, errors.New("the space hasn't declared an embedding model yet: its authority needs to run engram-config")
+			return nil, errors.New("the space hasn't declared an embedding model yet: its authority needs to declare one (engram model --set <model>)")
 		}
 		return nil, fmt.Errorf("reading the space's config: %w", err)
 	}
