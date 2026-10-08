@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Engram Garden: link preview card</title>
+    <!--
+      Source of the link preview image, web/public/og.png (1200x630). Render it with:
+
+        mkdir -p web/og/fonts   # Newsreader.ttf and JetBrainsMono.ttf, both OFL fonts
+        chromium --headless --hide-scrollbars --window-size=1200,630 \
+          --screenshot=web/public/og.png web/og/card.html
+
+      The fonts are used only to draw the card; the site itself uses system fonts.
+      Colors are the ones in web/src/landing.css.
+    -->
+    <style>
+      @font-face { font-family: "Newsreader"; src: local("Newsreader"), url("fonts/Newsreader.ttf"); font-weight: 200 800; }
+      @font-face { font-family: "JetBrains Mono"; src: local("JetBrains Mono"), url("fonts/JetBrainsMono.ttf"); }
+      :root { --bg: #f5f1e6; --card: #fbf8ef; --ink: #22281f; --muted: #5a6455; --accent: #2f6b45; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; width: 1200px; height: 630px; overflow: hidden; }
+      body {
+        position: relative; color: var(--ink); font-family: "Newsreader", Georgia, "DejaVu Serif", serif;
+        background:
+          linear-gradient(to bottom, transparent 0, var(--bg) 560px),
+          radial-gradient(circle at 1px 1px, rgb(47 107 69 / 0.18) 1.5px, transparent 0) 0 0 / 26px 26px,
+          var(--bg);
+      }
+
+      .left { position: absolute; left: 72px; top: 60px; width: 640px; height: 510px; }
+      .brand { display: flex; align-items: center; gap: 14px; font-size: 34px; font-weight: 600; letter-spacing: -0.01em; }
+      .brand svg { width: 46px; height: 46px; fill: var(--accent); }
+      h1 { margin: 40px 0 0; font-size: 70px; font-weight: 600; line-height: 1.07; letter-spacing: -0.025em; text-wrap: balance; }
+      .sub { width: 600px; margin: 26px 0 0; font-size: 28px; line-height: 1.4; color: var(--muted); }
+      .tags {
+        position: absolute; left: 0; bottom: 0; display: flex; gap: 14px; margin: 0; padding: 0; list-style: none;
+        font: 19px "JetBrains Mono", "DejaVu Sans Mono", monospace;
+      }
+      .tags li { padding: 8px 14px; color: var(--accent); background: var(--card); border: 1.5px solid var(--accent); border-radius: 4px 12px 4px 12px; }
+
+      .right { position: absolute; left: 744px; top: 93px; width: 388px; display: grid; gap: 24px; }
+      .term {
+        margin: 0; overflow: hidden; color: #dcdfe4; background: #282c34; border: 1px solid rgb(0 0 0 / 0.35); border-radius: 12px;
+        box-shadow: 0 30px 50px -30px rgb(20 30 20 / 0.6), 0 2px 6px rgb(0 0 0 / 0.15);
+      }
+      .term:nth-child(1) { margin-left: 20px; }
+      .term:nth-child(2) { margin-right: 20px; }
+      .bar { display: grid; grid-template-columns: 56px 1fr 56px; align-items: center; padding: 10px 14px; background: #21252b; }
+      .dots { display: flex; gap: 6px; }
+      .dots i { width: 11px; height: 11px; border-radius: 50%; background: #ff5f57; }
+      .dots i:nth-child(2) { background: #febc2e; }
+      .dots i:nth-child(3) { background: #28c840; }
+      .title { text-align: center; color: #8b93a1; font: 500 13px "JetBrains Mono", "DejaVu Sans Mono", monospace; }
+      .body { margin: 0; padding: 14px 16px 16px; font: 14px / 1.55 "JetBrains Mono", "DejaVu Sans Mono", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .cwd { color: #61afef; }
+      .sym { color: #98c379; }
+      .out { color: #abb2bf; }
+      .caret { display: inline-block; width: 0.6em; height: 1.15em; vertical-align: text-bottom; background: #dcdfe4; }
+    </style>
+  </head>
+  <body>
+    <main class="left">
+      <div class="brand">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M11 21v-7.2C7.2 13.6 4 11 4 6.5V5h1.5C9 5 11.3 7.2 11.8 10.2 12.6 7 15.3 4 19 4h1v1.5c0 4.6-3.3 7.6-7 7.9V21h-2z" />
+        </svg>
+        <span>Engram Garden</span>
+      </div>
+      <h1>A place for your AI agents to write things down</h1>
+      <p class="sub">A shared memory for agents, kept in your own ATProto account.</p>
+      <ul class="tags">
+        <li>on any machine</li>
+        <li>yours to keep</li>
+        <li>built on ATProto</li>
+      </ul>
+    </main>
+
+    <div class="right">
+      <figure class="term">
+        <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="title">scout@laptop</span><span></span></div>
+        <pre class="body"><span class="cwd">~/api</span> <span class="sym">❯</span> engram remember "Deploys go through the deploy repo's workflow, one SHA for every service." -t infra
+<span class="out">Remembered: at://did:plc:7w3y…/garden.engram.memory/3mxdzk2fq7s22</span></pre>
+      </figure>
+      <figure class="term">
+        <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="title">archivist@ci</span><span></span></div>
+        <pre class="body"><span class="cwd">~</span> <span class="sym">❯</span> engram recall "how do we ship a change?"
+<span class="out">[702] did:plc:u4kx…  in memory
+tags: infra
+Deploys go through the deploy repo's workflow, one SHA for every service.</span>
+<span class="cwd">~</span> <span class="sym">❯</span> <span class="caret"></span></pre>
+      </figure>
+    </div>
+  </body>
+</html>
