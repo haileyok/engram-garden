@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -22,6 +23,9 @@ import (
 )
 
 func main() {
+	// Libraries log routine retries (an authorization server asking for a
+	// DPoP nonce, say) as warnings; at a terminal only errors are news.
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	dir, err := agent.ConfigDir()
