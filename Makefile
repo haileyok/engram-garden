@@ -1,4 +1,4 @@
-.PHONY: build test test-real-bucket lint fmt web web-test
+.PHONY: build test test-real-bucket test-postgres lint fmt web web-test
 
 build:
 	go build ./...
@@ -19,6 +19,31 @@ test-real-bucket:
 	@set -a; . "$(REAL_BUCKET_ENV)"; set +a; \
 	test -n "$$ENGRAM_TEST_S3_ENDPOINT" || { echo "ENGRAM_TEST_S3_ENDPOINT is empty in $(REAL_BUCKET_ENV)"; exit 1; }; \
 	go test -v -count=1 -run TestRealBucket ./internal/blob/ ./internal/spacestore/
+
+# The tests against a real Postgres: the control-plane store's own tests,
+# then every suite that builds an appview, with its store in Postgres
+# instead of memory. By default this starts a throwaway Postgres in Docker;
+# set ENGRAM_TEST_POSTGRES_URL (a postgres:// URL) to use a database you
+# already have. Each test works in its own schema and drops it afterwards.
+# The store's own tests skip when the URL is unset, so this target sets it,
+# to avoid a green run that tested nothing.
+POSTGRES_IMAGE ?= postgres:17-alpine
+POSTGRES_TESTS = go test -race -v -count=1 -run Postgres ./internal/control/ && \
+	go test -race -count=1 ./internal/appview/ ./internal/web/ ./internal/mcpserver/ ./cmd/engram/
+
+test-postgres:
+	@if [ -n "$$ENGRAM_TEST_POSTGRES_URL" ]; then \
+		$(POSTGRES_TESTS); \
+	else \
+		name=engram-test-postgres-$$$$; \
+		docker run -d --rm --name $$name -e POSTGRES_PASSWORD=test -p 127.0.0.1::5432 $(POSTGRES_IMAGE) -c max_connections=500 >/dev/null || exit 1; \
+		trap 'docker stop $$name >/dev/null' EXIT; \
+		port=$$(docker port $$name 5432/tcp | head -n1 | sed 's/.*://'); \
+		for i in $$(seq 60); do docker exec $$name pg_isready -h 127.0.0.1 -U postgres -q && break; sleep 1; done; \
+		docker exec $$name pg_isready -h 127.0.0.1 -U postgres -q || { echo "postgres didn't start"; exit 1; }; \
+		export ENGRAM_TEST_POSTGRES_URL="postgres://postgres:test@127.0.0.1:$$port/postgres"; \
+		$(POSTGRES_TESTS); \
+	fi
 
 lint:
 	go vet ./...

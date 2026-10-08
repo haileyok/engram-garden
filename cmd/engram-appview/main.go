@@ -3,6 +3,9 @@
 //
 //	engram-appview                 run the service
 //	engram-appview import <file>   load a space export (from garden.engram.exportSpace)
+//	engram-appview migrate-control copy grants, OAuth sessions and registered spaces
+//	                               from the bucket into the database (once, when moving
+//	                               from an appview that kept them in the bucket)
 package main
 
 import (
@@ -27,6 +30,7 @@ import (
 	"github.com/haileyok/engram-garden/internal/appview"
 	"github.com/haileyok/engram-garden/internal/blob"
 	"github.com/haileyok/engram-garden/internal/config"
+	"github.com/haileyok/engram-garden/internal/control"
 	"github.com/haileyok/engram-garden/internal/indexer"
 	"github.com/haileyok/engram-garden/internal/metrics"
 	"github.com/haileyok/engram-garden/internal/routing"
@@ -46,6 +50,12 @@ func main() {
 				break
 			}
 			err = runImport(log, os.Args[2])
+		case "migrate-control":
+			if len(os.Args) != 2 {
+				err = errors.New("usage: engram-appview migrate-control")
+				break
+			}
+			err = runMigrateControl(log)
 		default:
 			err = fmt.Errorf("unknown command %q", os.Args[1])
 		}
@@ -66,15 +76,15 @@ func main() {
 //	ENGRAM_LIMIT_MEMORIES, ENGRAM_LIMIT_BYTES, ENGRAM_LIMIT_SEARCHES_PER_SECOND,
 //	ENGRAM_LIMIT_WRITES_PER_DAY   per-space limits (default unlimited)
 //	ENGRAM_METRICS_PER_SPACE  add gauges labeled by space URI (default false)
-func openStore(ctx context.Context, log *slog.Logger, ring *routing.Ring) (*spacestore.Node, blob.Store, error) {
+func openStore(ctx context.Context, log *slog.Logger, ring *routing.Ring) (*spacestore.Node, error) {
 	bs, err := config.Blob()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// Trust conditional writes only when the bucket proves it honors them.
 	cond, err := blob.Probe(ctx, bs)
 	if err != nil {
-		return nil, nil, fmt.Errorf("probing storage: %w", err)
+		return nil, fmt.Errorf("probing storage: %w", err)
 	}
 	log.Info("storage probed", "conditional_writes", cond)
 	bs = blob.Instrumented(bs)
@@ -84,17 +94,17 @@ func openStore(ctx context.Context, log *slog.Logger, ring *routing.Ring) (*spac
 	case "1", "true":
 		perSpace = true
 	default:
-		return nil, nil, fmt.Errorf("ENGRAM_METRICS_PER_SPACE must be true or false, not %q", v)
+		return nil, fmt.Errorf("ENGRAM_METRICS_PER_SPACE must be true or false, not %q", v)
 	}
 	ints := map[string]int64{}
 	for _, k := range []string{"ENGRAM_CACHE_BYTES", "ENGRAM_RAM_BYTES", "ENGRAM_LIMIT_MEMORIES", "ENGRAM_LIMIT_BYTES", "ENGRAM_LIMIT_WRITES_PER_DAY"} {
 		if ints[k], err = config.Int(k, 0); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	sps, err := strconv.ParseFloat(config.Get("ENGRAM_LIMIT_SEARCHES_PER_SECOND", "0"), 64)
 	if err != nil {
-		return nil, nil, errors.New("ENGRAM_LIMIT_SEARCHES_PER_SECOND must be a number")
+		return nil, errors.New("ENGRAM_LIMIT_SEARCHES_PER_SECOND must be a number")
 	}
 	n, err := spacestore.New(spacestore.Options{
 		Blob:              bs,
@@ -110,7 +120,60 @@ func openStore(ctx context.Context, log *slog.Logger, ring *routing.Ring) (*spac
 		PerSpaceMetrics: perSpace,
 		Log:             log,
 	})
-	return n, bs, err
+	return n, err
+}
+
+// openControlFromEnv opens the control-plane store from ENGRAM_* settings.
+//
+//	ENGRAM_DATABASE_URL  postgres:// URL of the database. It holds a
+//	                     password, so keep it with the other secrets. Required
+//	                     with ENGRAM_STORAGE=s3. With directory storage, when
+//	                     unset, these are kept in memory and lost on restart
+//	                     (fine for development).
+func openControlFromEnv(ctx context.Context, log *slog.Logger) (control.Store, func(), error) {
+	return openControl(ctx, log, config.Get("ENGRAM_STORAGE", "dir"), config.Get("ENGRAM_DATABASE_URL", ""))
+}
+
+// openControl opens the control-plane store: the grants, OAuth sessions and
+// registered spaces. It returns what to call to close it. With no database
+// URL it uses memory, but only next to directory storage, which is for
+// development: with a bucket, several nodes (or a restart) must see the same
+// grants.
+func openControl(ctx context.Context, log *slog.Logger, storage, url string) (control.Store, func(), error) {
+	if url != "" {
+		db, err := control.OpenPostgres(ctx, url)
+		if err != nil {
+			return nil, nil, fmt.Errorf("ENGRAM_DATABASE_URL: %w", err)
+		}
+		return db, db.Close, nil
+	}
+	if storage != "dir" {
+		return nil, nil, fmt.Errorf("ENGRAM_DATABASE_URL is required with ENGRAM_STORAGE=%s: grants and sign-ins have to be shared by every node, and survive restarts", storage)
+	}
+	log.Warn("ENGRAM_DATABASE_URL isn't set: grants, OAuth sessions and registered spaces are kept in memory and will be lost on restart")
+	return control.NewMemory(), func() {}, nil
+}
+
+func runMigrateControl(log *slog.Logger) error {
+	ctx := context.Background()
+	if config.Get("ENGRAM_DATABASE_URL", "") == "" {
+		return errors.New("ENGRAM_DATABASE_URL is required: it's where the grants, sessions and registered spaces are going")
+	}
+	bs, err := config.Blob()
+	if err != nil {
+		return err
+	}
+	db, closeDB, err := openControlFromEnv(ctx, log)
+	if err != nil {
+		return err
+	}
+	defer closeDB()
+	res, err := appview.MigrateControl(ctx, bs, db)
+	log.Info("copied the control-plane state from the bucket to the database",
+		"grants_copied", res.Grants.Copied, "grants_present", res.Grants.Present,
+		"sessions_copied", res.Sessions.Copied, "sessions_present", res.Sessions.Present,
+		"registrations_copied", res.Registrations.Copied, "registrations_present", res.Registrations.Present)
+	return err
 }
 
 func runImport(log *slog.Logger, path string) error {
@@ -119,7 +182,7 @@ func runImport(log *slog.Logger, path string) error {
 	if err != nil {
 		return err
 	}
-	st, _, err := openStore(ctx, log, ring)
+	st, err := openStore(ctx, log, ring)
 	if err != nil {
 		return err
 	}
@@ -193,10 +256,16 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	st, bs, err := openStore(ctx, log, ring)
+	st, err := openStore(ctx, log, ring)
 	if err != nil {
 		return err
 	}
+	db, closeDB, err := openControlFromEnv(ctx, log)
+	if err != nil {
+		return err
+	}
+	// Closed last, after the server has stopped and the index is flushed.
+	defer closeDB()
 
 	dir := config.Directory()
 	var key atcrypto.PrivateKey
@@ -206,7 +275,7 @@ func run(log *slog.Logger) error {
 		}
 	}
 	oauthClient, err := appview.NewOAuthClient(appview.OAuthConfig{
-		PublicURL: publicURL, Key: key, Store: appview.BlobAuthStore{Blob: bs}, Dir: dir,
+		PublicURL: publicURL, Key: key, Store: appview.AuthStore{DB: db}, Dir: dir,
 	})
 	if err != nil {
 		return fmt.Errorf("ENGRAM_PUBLIC_URL / ENGRAM_OAUTH_KEY: %w", err)
@@ -215,7 +284,7 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	grants := &appview.Grants{Blob: bs, Auth: oauthClient}
+	grants := &appview.Grants{DB: db, Auth: oauthClient}
 	client, err := spaceclient.NewDelegated(grants, dir, nil)
 	if err != nil {
 		return err
@@ -229,7 +298,7 @@ func run(log *slog.Logger) error {
 		PublicURL:  publicURL,
 		Spaces:     spaces,
 		Ring:       ring,
-		Blob:       bs,
+		DB:         db,
 
 		OpenRegistration: openRegistration,
 		Grants:           grants,

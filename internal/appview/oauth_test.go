@@ -3,8 +3,10 @@ package appview
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +15,8 @@ import (
 	"github.com/bluesky-social/indigo/atproto/auth/oauth"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 
-	"github.com/haileyok/engram-garden/internal/blob"
+	"github.com/haileyok/engram-garden/internal/control"
+	"github.com/haileyok/engram-garden/internal/control/controltest"
 )
 
 func TestOAuthClientMetadata(t *testing.T) {
@@ -22,14 +25,14 @@ func TestOAuthClientMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewOAuthClient(OAuthConfig{PublicURL: "https://api.engram.test", Store: BlobAuthStore{blob.Dir{Root: t.TempDir()}}}); err == nil {
+	if _, err := NewOAuthClient(OAuthConfig{PublicURL: "https://api.engram.test", Store: AuthStore{control.NewMemory()}}); err == nil {
 		t.Fatal("an https client without a key")
 	}
-	c, err := NewOAuthClient(OAuthConfig{PublicURL: "https://api.engram.test", Key: key, Store: BlobAuthStore{blob.Dir{Root: t.TempDir()}}})
+	c, err := NewOAuthClient(OAuthConfig{PublicURL: "https://api.engram.test", Key: key, Store: AuthStore{control.NewMemory()}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{ServiceDID: serviceDID, PublicURL: "https://api.engram.test", Grants: &Grants{Blob: blob.Dir{Root: t.TempDir()}, Auth: c}}
+	s := &Server{ServiceDID: serviceDID, PublicURL: "https://api.engram.test", Grants: &Grants{DB: control.NewMemory(), Auth: c}}
 	hs := httptest.NewServer(s.Handler())
 	t.Cleanup(hs.Close)
 
@@ -66,16 +69,25 @@ func TestOAuthClientMetadata(t *testing.T) {
 	}
 }
 
-func TestBlobAuthStore(t *testing.T) {
+func TestAuthStore(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	bs := blob.Dir{Root: t.TempDir()}
-	st := BlobAuthStore{bs}
+	db := controltest.New(t)
+	st := AuthStore{db}
 	did := syntax.DID("did:plc:authority")
 
-	sess := oauth.ClientSessionData{AccountDID: did, SessionID: "s1", RefreshToken: "r1"}
+	// Every field survives the database, whatever it does to the JSON.
+	sess := oauth.ClientSessionData{
+		AccountDID: did, SessionID: "s1", HostURL: "https://pds.test", AuthServerURL: "https://auth.test",
+		AuthServerTokenEndpoint: "https://auth.test/token", AuthServerRevocationEndpoint: "https://auth.test/revoke",
+		Scopes: []string{"atproto", "space:garden.engram.space?action=read"}, AccessToken: "a1", RefreshToken: "r1",
+		DPoPAuthServerNonce: "n1", DPoPHostNonce: "n2", DPoPPrivateKeyMultibase: "z42tqExampleKeyMaterial",
+	}
 	if err := st.SaveSession(ctx, sess); err != nil {
 		t.Fatal(err)
+	}
+	if got, err := st.GetSession(ctx, did, "s1"); err != nil || !reflect.DeepEqual(*got, sess) {
+		t.Fatalf("session changed in storage:\n got %+v\nwant %+v\n%v", got, sess, err)
 	}
 	sess.RefreshToken = "r2" // a refresh overwrites it
 	if err := st.SaveSession(ctx, sess); err != nil {
@@ -95,18 +107,32 @@ func TestBlobAuthStore(t *testing.T) {
 		t.Fatal("deleted session still there")
 	}
 
-	if err := st.SaveAuthRequestInfo(ctx, oauth.AuthRequestData{State: "st"}); err != nil {
+	authority := did
+	req := oauth.AuthRequestData{
+		State: "st", AuthServerURL: "https://auth.test", AccountDID: &authority, Scopes: []string{"atproto"},
+		RequestURI: "urn:ietf:params:oauth:request_uri:abc", AuthServerTokenEndpoint: "https://auth.test/token",
+		AuthServerRevocationEndpoint: "https://auth.test/revoke", PKCEVerifier: "v", DPoPAuthServerNonce: "n",
+		DPoPPrivateKeyMultibase: "z42tqExampleKeyMaterial",
+	}
+	if err := st.SaveAuthRequestInfo(ctx, req); err != nil {
 		t.Fatal(err)
 	}
-	if info, err := st.GetAuthRequestInfo(ctx, "st"); err != nil || info.State != "st" {
-		t.Fatalf("sign-in: %+v %v", info, err)
+	if info, err := st.GetAuthRequestInfo(ctx, "st"); err != nil || !reflect.DeepEqual(*info, req) {
+		t.Fatalf("sign-in changed in storage:\n got %+v\nwant %+v\n%v", info, req, err)
 	}
 	// An old sign-in has expired.
-	raw, _ := json.Marshal(storedRequest{Info: oauth.AuthRequestData{State: "old"}, Created: time.Now().Add(-pendingTTL - time.Minute)})
-	if err := blob.PutBytes(ctx, bs, requestKey("old"), raw, false); err != nil {
+	raw, _ := json.Marshal(oauth.AuthRequestData{State: "old"})
+	if err := db.PutRequest(ctx, control.Request{State: "old", Data: raw, Created: time.Now().Add(-pendingTTL - time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.GetAuthRequestInfo(ctx, "old"); err == nil {
 		t.Fatal("an expired sign-in was accepted")
+	}
+	if _, err := db.GetRequest(ctx, "old"); !errors.Is(err, control.ErrNotFound) {
+		t.Fatalf("an expired sign-in is still stored: %v", err)
+	}
+	// A session that's gone says so in a way callers can recognize.
+	if _, err := st.GetSession(ctx, did, "missing"); !errors.Is(err, control.ErrNotFound) {
+		t.Fatalf("a missing session: %v", err)
 	}
 }

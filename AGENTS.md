@@ -4,7 +4,8 @@ Guidance for working on Engram Garden.
 
 ## Layout
 
-- `cmd/engram-appview`: the indexer and search service, plus `import`.
+- `cmd/engram-appview`: the indexer and search service, plus `import` and
+  `migrate-control`.
 - `cmd/engram`: the agent CLI (`login`, `logout`, `spaces`, `use`,
   `remember`, `recall`, `list`, `get`, `forget`, `status`; and for a space's
   authority `create`, `members`, `model`, `index`; `init` is `login`). `cmd/engram-mcp`: per-agent
@@ -42,8 +43,13 @@ Guidance for working on Engram Garden.
   `GOEXPERIMENT=simd` version).
 - `internal/blob`: object storage (local directory, S3) and the
   conditional-write probe.
-- `internal/routing`: rendezvous hashing of spaces over nodes, and the
-  registry of indexed spaces.
+- `internal/routing`: rendezvous hashing of spaces over nodes, and which
+  node is the coordinator.
+- `internal/control`: the appview's control-plane state (grants, OAuth
+  sessions, sign-ins in progress, registered spaces) behind `control.Store`.
+  `Postgres` is for deployments, `Memory` for tests and local development.
+  Tables come from the numbered files in `migrations/`, applied at startup
+  under an advisory lock. `controltest.New(t)` gives a test a store.
 - `internal/appview`: XRPC handlers, forwarding to a space's owner,
   notification receivers, `did:web` document, background sync and
   registration loop.
@@ -57,12 +63,16 @@ Guidance for working on Engram Garden.
   builds into `internal/web/dist/app`, which `engram-web` embeds.
 - The appview has no account. A space's authority grants it read-only OAuth
   access (`internal/appview/grants.go`, `grant_flow.go`, `oauth.go`); grants
-  and OAuth sessions live in the bucket. Read
-  `docs/design/indexing-access.md` before changing it. Tests sign in through
-  a fake `Authorizer`.
+  and OAuth sessions live in the control-plane database, not the bucket.
+  Read `docs/design/indexing-access.md` before changing it. Tests sign in
+  through a fake `Authorizer`.
 - Registered spaces: `internal/appview/registration.go`. The appview indexes
-  `ENGRAM_SPACES` plus spaces whose authority granted access, recorded as
-  write-once objects under `registered-spaces/`.
+  `ENGRAM_SPACES` plus spaces whose authority granted access, recorded in
+  the control-plane database (`Register` keeps the first time).
+- `internal/appview/migrate.go` copies what older appviews kept in the bucket
+  into the database (`engram-appview migrate-control`). It never replaces a
+  record the database has, because OAuth refresh tokens are single-use. It
+  can go once every deployment has migrated.
 - `internal/metrics`: the Prometheus registry, HTTP middleware and the
   separate metrics listener. Packages declare metrics with
   `metrics.Factory` in their own `metrics.go`. When you add or change a
@@ -85,7 +95,14 @@ make web web-test   # frontend build, typecheck and tests
   `make web && ENGRAM_WEB_DEMO=1 go test -run TestDemo -timeout 0 ./internal/web/`.
 
 - No external services are needed. Storage tests use `blob.Dir` in
-  `t.TempDir()` and an in-process S3 (gofakes3).
+  `t.TempDir()` and an in-process S3 (gofakes3). The control-plane store is
+  `control.Memory`, from `controltest.New(t)`.
+- `make test-postgres` (needs Docker) runs the control-plane store's
+  contract and every suite that builds an appview against a real Postgres:
+  `controltest.New` returns a Postgres schema of its own when
+  `ENGRAM_TEST_POSTGRES_URL` is set. Run it when you touch `internal/control`
+  or how the appview uses it. When you add a `control.Store` method, add it
+  to `Memory`, `Postgres` and the contract in `contract_test.go`.
 - Use `spacetest.New` for anything that talks to a PDS or a space authority,
   instead of mocking HTTP by hand. It has knobs for corrupt commits and
   missing values. Declare the space's model by putting a config record in
@@ -107,3 +124,6 @@ make web web-test   # frontend build, typecheck and tests
   matching changes. Don't write a position anywhere else.
 - Segment and manifest objects are immutable: write new ones, never
   overwrite.
+- Database migrations are append-only: once a numbered file in
+  `internal/control/migrations/` has been released, add a new one instead of
+  editing it.

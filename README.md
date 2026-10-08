@@ -52,6 +52,10 @@ and `recall` tools.
   such as Wasabi). One appview node owns each space and keeps its hot parts
   in RAM and on local disk. Idle spaces cost only their storage. See
   [`docs/design/storage.md`](docs/design/storage.md).
+- **Control-plane state.** What can't be rebuilt from the members' PDSes
+  (which authorities granted the appview access, their OAuth sessions, the
+  spaces registered) lives in a small Postgres database, shared by every
+  node. The bucket holds only the index.
 
 ## Lexicons
 
@@ -87,6 +91,7 @@ They live in [`lexicons/`](lexicons/garden/engram).
 | `ENGRAM_S3_ENDPOINT` | | e.g. `https://s3.us-east-1.wasabisys.com` |
 | `ENGRAM_S3_REGION` / `ENGRAM_S3_BUCKET` / `ENGRAM_S3_PREFIX` | `us-east-1` / / | |
 | `ENGRAM_S3_ACCESS_KEY` / `ENGRAM_S3_SECRET_KEY` | | |
+| `ENGRAM_DATABASE_URL` | | `postgres://user:password@host/dbname` for the grants, OAuth sessions and registered spaces. Required with `ENGRAM_STORAGE=s3`. With `dir` and no URL they're kept in memory and lost on restart, which is fine for development. It holds a password, so keep it with the other secrets. |
 | `ENGRAM_CACHE_DIR` | `engram-cache` | Local disk cache of segment files |
 | `ENGRAM_CACHE_BYTES` | 100 GiB | Disk cache budget |
 | `ENGRAM_RAM_BYTES` | 8 GiB | RAM budget for loaded spaces |
@@ -102,7 +107,14 @@ go run ./cmd/engram-appview
 ```
 
 At startup the appview checks whether the bucket honors conditional writes,
-and uses them only if it does.
+and uses them only if it does. It also connects to the database and creates
+or updates its tables, so give it a user that may do that. Several nodes
+starting at once is fine.
+
+The database holds what can't be rebuilt: a grant lost is a grant its
+authority has to make again. Back it up (for example `pg_dump` on a
+schedule), and treat its credentials like the bucket's: it holds the OAuth
+sessions that let the appview read every space it indexes.
 
 Space hosts deliver notifications only to public HTTPS endpoints. Cocoon,
 for example, refuses private and loopback addresses. A local appview at
@@ -112,8 +124,8 @@ for example, refuses private and loopback addresses. A local appview at
 permission: the authority opens the appview's grant page (the web app's
 **Let the appview index this space** button) and approves read-only access
 to the memory spaces they govern on their own account's sign-in page. The
-appview keeps that OAuth session in the bucket and uses it to get delegation
-tokens. Stopping works the same way. See
+appview keeps that OAuth session in its database and uses it to get
+delegation tokens. Stopping works the same way. See
 [`docs/design/indexing-access.md`](docs/design/indexing-access.md).
 
 **Several nodes.** Give every node the same `ENGRAM_NODES` and
@@ -130,6 +142,22 @@ engram-appview import space.tar
 
 An appview without an export builds the index from the members' PDSes
 instead, since the vectors are in the records.
+
+**Moving from an appview that kept grants in the bucket.** Earlier versions
+stored grants, OAuth sessions and registered spaces as objects in the
+bucket. To move to the database, stop the old appview, set
+`ENGRAM_DATABASE_URL` (and the same storage settings), and run once:
+
+```bash
+engram-appview migrate-control
+```
+
+then start the new appview. It copies what the bucket has and leaves what
+the database already has alone, so running it again is safe. Stop the old
+appview first: an OAuth refresh token works once, so a session refreshed
+after it was copied would be out of date in the database. The old objects
+(`grants/`, `oauth/`, `registered-spaces/`, `registry-*`) stay in the bucket
+until you delete them.
 
 **Monitoring.** Set `ENGRAM_METRICS_LISTEN` (and `ENGRAM_WEB_METRICS_LISTEN`
 on the web app) for Prometheus metrics. Logs are JSON lines on stderr.
@@ -366,7 +394,19 @@ Tests run against an in-memory Spaces network (`internal/spacetest`). It
 builds real tokens, credentials, signed commits and repo CARs with Cocoon's
 `space` package, so the appview's verification runs end to end without
 any external services. Storage tests use a local directory and an
-in-process S3.
+in-process S3, and the control-plane store is in memory.
+
+To run those against a real Postgres, with Docker running:
+
+```bash
+make test-postgres
+```
+
+It starts a throwaway Postgres, runs the control-plane store's own tests,
+then every suite that builds an appview with its store in Postgres, and
+removes the container. To use a database you already have, set
+`ENGRAM_TEST_POSTGRES_URL=postgres://…` (the target then doesn't start one).
+Each test works in its own schema and drops it afterwards.
 
 To check a real bucket such as Wasabi, put `ENGRAM_TEST_S3_ENDPOINT` (with
 `_REGION`, `_BUCKET`, `_ACCESS_KEY`, `_SECRET_KEY`) in

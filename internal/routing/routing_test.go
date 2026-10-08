@@ -1,11 +1,8 @@
 package routing
 
 import (
-	"context"
 	"fmt"
 	"testing"
-
-	"github.com/haileyok/engram-garden/internal/blob"
 )
 
 func TestRendezvous(t *testing.T) {
@@ -50,36 +47,21 @@ func TestRendezvous(t *testing.T) {
 	}
 }
 
-func TestRegistry(t *testing.T) {
+// TestCoordinator: of all the nodes, exactly one is the coordinator, they
+// all agree which, and a single node is its own.
+func TestCoordinator(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	bs := blob.Dir{Root: t.TempDir()}
-	nodes, _ := ParseNodes("a=http://a,b=http://b")
-	var coord *Ring
-	for _, id := range []string{"a", "b"} {
-		if r := (&Ring{Self: id, Nodes: nodes, Epoch: 1}); r.IsCoordinator() {
-			coord = r
-		} else if reg, err := r.WriteRegistry(ctx, bs, []string{"x"}); reg != nil || err != nil {
-			t.Fatal("non-coordinator wrote the registry")
+	nodes, _ := ParseNodes("a=http://a,b=http://b,c=http://c")
+	var coordinators []string
+	for _, n := range nodes {
+		if (&Ring{Self: n.ID, Nodes: nodes, Epoch: 1}).IsCoordinator() {
+			coordinators = append(coordinators, n.ID)
 		}
 	}
-	reg, err := coord.WriteRegistry(ctx, bs, []string{"at://s1", "at://s2"})
-	if err != nil || reg.Generation != 1 || len(reg.Spaces) != 2 {
-		t.Fatalf("%+v %v", reg, err)
+	if len(coordinators) != 1 {
+		t.Fatalf("coordinators: %v", coordinators)
 	}
-	// Unchanged: no new generation.
-	if reg, _ = coord.WriteRegistry(ctx, bs, []string{"at://s2", "at://s1"}); reg.Generation != 1 {
-		t.Fatalf("rewrote an unchanged registry: %d", reg.Generation)
-	}
-	if reg, _ = coord.WriteRegistry(ctx, bs, []string{"at://s1"}); reg.Generation != 2 {
-		t.Fatal("change not written")
-	}
-	got, err := LoadRegistry(ctx, bs)
-	if err != nil || got.Generation != 2 || len(got.Spaces) != 1 || got.Spaces[0].Owner == "" {
-		t.Fatalf("%+v %v", got, err)
-	}
-	// A coordinator with an older epoch refuses.
-	if _, err := (&Ring{Self: coord.Self, Nodes: nodes, Epoch: 0}).WriteRegistry(ctx, bs, nil); err == nil {
-		t.Fatal("stale epoch wrote the registry")
+	if !Single().IsCoordinator() {
+		t.Fatal("a single node isn't its own coordinator")
 	}
 }

@@ -17,7 +17,7 @@
           pname = "engram";
           inherit version;
           src = self;
-          vendorHash = "sha256-gZgpYzqJ6o9nkH86f8FoveJIAkQJqZ1p4985q9l60rQ=";
+          vendorHash = "sha256-NTMz4olzOB9vQGJPim4iCYgkI1KyYPBfr0ETkXcvqf8=";
           subPackages = [ "cmd/engram" "cmd/engram-mcp" ];
           env.CGO_ENABLED = 0;
           ldflags = [ "-s" "-w" ];

@@ -7,6 +7,7 @@ require (
 	github.com/bluesky-social/indigo v0.0.0-20260308004230-c55a189a51a9
 	github.com/haileyok/cocoon v0.11.5-0.20261006204923-8816a7d96bc1
 	github.com/ipfs/go-cid v0.6.1
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/johannesboyne/gofakes3 v1.2.0
 	github.com/klauspost/compress v1.20.1
 	github.com/minio/minio-go/v7 v7.3.0
@@ -48,6 +49,9 @@ require (
 	github.com/ipld/go-car v0.6.3 // indirect
 	github.com/ipld/go-codec-dagpb v1.7.0 // indirect
 	github.com/ipld/go-ipld-prime v0.23.0 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/klauspost/crc32 v1.3.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect

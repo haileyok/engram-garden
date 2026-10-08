@@ -22,6 +22,7 @@ import (
 
 	"github.com/haileyok/engram-garden/internal/appview"
 	"github.com/haileyok/engram-garden/internal/blob"
+	"github.com/haileyok/engram-garden/internal/control/controltest"
 	"github.com/haileyok/engram-garden/internal/embed"
 	"github.com/haileyok/engram-garden/internal/indexer"
 	"github.com/haileyok/engram-garden/internal/lex"
@@ -118,8 +119,8 @@ func setup(t *testing.T, spaces ...string) *fixture {
 	n.Put(n.Authority, lex.ConfigCollection, lex.ConfigRkey, lex.Config{ModelInfo: model}.Record(time.Now()))
 
 	auth := &autoGrant{net: n, pending: map[string][2]string{}}
-	bs := blob.Dir{Root: t.TempDir()}
-	grants := &appview.Grants{Blob: bs, Auth: auth}
+	db := controltest.New(t)
+	grants := &appview.Grants{DB: db, Auth: auth}
 	if spaces == nil {
 		spaces = []string{n.Space}
 		if err := grants.Put(context.Background(), appview.Grant{Space: n.Space, DID: n.Authority.DID, SessionID: "seed", GrantedAt: time.Now()}); err != nil {
@@ -141,7 +142,7 @@ func setup(t *testing.T, spaces ...string) *fixture {
 		Dir:              n.Dir,
 		ServiceDID:       appviewDID,
 		Spaces:           spaces,
-		Blob:             bs,
+		DB:               db,
 		OpenRegistration: true,
 		Grants:           grants,
 		ReturnOrigins:    []string{origin},

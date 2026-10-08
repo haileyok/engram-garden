@@ -16,6 +16,7 @@ import (
 	"github.com/haileyok/engram-garden/internal/agent"
 	"github.com/haileyok/engram-garden/internal/appview"
 	"github.com/haileyok/engram-garden/internal/blob"
+	"github.com/haileyok/engram-garden/internal/control/controltest"
 	"github.com/haileyok/engram-garden/internal/embed"
 	"github.com/haileyok/engram-garden/internal/indexer"
 	"github.com/haileyok/engram-garden/internal/lex"
@@ -90,7 +91,7 @@ func buildWorld(t *testing.T, authority, skey string, withGrants bool) *world {
 		Indexer: &indexer.Indexer{Store: st, Client: ic, Dir: n.Dir}}
 	var grants *appview.Grants
 	if withGrants {
-		grants = &appview.Grants{Blob: blob.Dir{Root: t.TempDir()}}
+		grants = &appview.Grants{DB: controltest.New(t)}
 		av.Grants = grants
 	}
 	hs := httptest.NewServer(av.Handler())

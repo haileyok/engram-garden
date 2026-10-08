@@ -63,8 +63,11 @@ both its searches and its sync.
             Wasabi: spaces/<space key>/{manifest, segments}
 ```
 
-There's no database. The few pieces of global state (which spaces are
-indexed, node membership) are small and covered under
+The index needs no database. What can't be rebuilt from the members' PDSes
+(which authorities granted the appview access, their OAuth sessions, which
+spaces are registered) is a small Postgres database, described in
+[indexing-access.md](indexing-access.md#where-grants-are-kept). Which node
+owns a space isn't stored at all; see
 [Routing](#routing-and-ownership).
 
 ## Embeddings
@@ -551,18 +554,17 @@ benchmark machine.
   forwards the request to the owner over internal HTTP. Write notifications
   are forwarded the same way, so sync and search for a space always run on
   the same node.
-- **Global state:** the list of indexed spaces and their owners is small,
-  and also rebuildable. Indexed spaces come from configuration plus the
-  spaces whose authorities granted the appview access (see
-  [indexing-access.md](indexing-access.md)), which are recorded as
-  write-once objects under `registered-spaces/` that every node rereads on
-  each tick and when asked about a space it doesn't know. Each
-  owner renews its spaces' notification registrations every 12 hours or so
-  regardless. The list lives in a single object
-  (`registry-<epoch>-<generation>.json` at the bucket root, ordered like
-  manifests) written by one coordinator node, the rendezvous owner of the
-  key `registry`, whenever its contents change. If it's lost, it's
-  rewritten on the next tick.
+- **Global state:** indexed spaces come from configuration plus the spaces
+  whose authorities granted the appview access (see
+  [indexing-access.md](indexing-access.md)), which are registered in the
+  control-plane database. Every node rereads the registrations on each tick
+  and when asked about a space it doesn't know. Who owns each space isn't
+  stored anywhere: every node computes it from the node list. Each owner
+  renews its spaces' notification registrations every 12 hours or so
+  regardless. One node, the rendezvous owner of the key `coordinator`, does
+  the jobs that one node should do for all, such as clearing abandoned
+  sign-ins. (An earlier version also kept a registry of spaces and owners
+  as objects in the bucket. Nothing read it, so it's gone.)
 - Each node only syncs, registers for and flushes the spaces it owns. A
   forwarded request that arrives at a node that doesn't own the space (the
   nodes disagree, mid-change) gets a retryable `NotOwner` error rather than
@@ -576,8 +578,9 @@ uploading, so the design makes its uploads irrelevant instead:
 
 - **Fencing tokens.** Taking ownership of a space requires a lease from a
   small coordination store, which hands out a strictly increasing token per
-  space. Before the coordination store exists, the token is the node list's
-  configuration epoch, which increases on every membership change.
+  space. The control-plane database could be that store, but nothing uses
+  it for this yet: until then the token is the node list's configuration
+  epoch, which increases on every membership change.
 - **Readers ignore stale owners.** Manifest keys start with the token, and
   the current manifest is the one with the highest token. Whatever a stale
   owner uploads carries a lower token, so it's never chosen. Its orphaned
@@ -654,10 +657,11 @@ document:
 4. **Per-space store** (`internal/spacestore`): write buffer, flush,
    deletions, merging, garbage collection, manifests, cache tiers, shared
    cold loads, warming, deadlines, limits and fencing.
-5. **Indexer and appview** on the per-space store. Postgres is removed. No
-   data migration is needed: the index rebuilds from the PDSes.
-6. **Routing** (`internal/routing`): rendezvous hashing, forwarding and the
-   registry.
+5. **Indexer and appview** on the per-space store. Postgres is removed as
+   the index. No data migration is needed: the index rebuilds from the
+   PDSes. (Grants and sessions, which can't be rebuilt, later got a small
+   database of their own: [indexing-access.md](indexing-access.md).)
+6. **Routing** (`internal/routing`): rendezvous hashing and forwarding.
 7. **Export and import.**
 8. **Cluster index for very large spaces.**
 
