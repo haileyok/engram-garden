@@ -265,13 +265,18 @@ func (n *Net) Registrations() []string {
 	return out
 }
 
+// testHash stands in for a repo's set-hash digest, which the indexer doesn't
+// read.
+var testHash = space.LexBytes(make([]byte, 32))
+
 // DeliverWrite sends a notifyWrite for an account's latest write to every
 // registered service, as the authority forwards notifications, and returns
 // the response statuses.
 func (n *Net) DeliverWrite(a *Account, prevSpaceRev string) []int {
 	n.T.Helper()
 	n.mu.Lock()
-	body := map[string]string{"space": n.Space, "repo": a.DID, "repoRev": a.rev, "hash": "x", "spaceRev": a.spaceRev}
+	// The hash is bytes, encoded as {"$bytes": …} like any lexicon bytes.
+	body := map[string]any{"space": n.Space, "repo": a.DID, "repoRev": a.rev, "hash": testHash, "spaceRev": a.spaceRev}
 	n.mu.Unlock()
 	if prevSpaceRev != "" {
 		body["prevSpaceRev"] = prevSpaceRev
@@ -422,12 +427,12 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		}
 		n.mu.Lock()
 		defer n.mu.Unlock()
-		repos := []map[string]string{}
+		repos := []map[string]any{}
 		for _, a := range n.sortedAccounts() {
 			if a.rev == "" || !a.listed {
 				continue
 			}
-			repos = append(repos, map[string]string{"did": a.DID, "repoRev": a.rev, "hash": "x", "spaceRev": a.spaceRev})
+			repos = append(repos, map[string]any{"did": a.DID, "repoRev": a.rev, "hash": testHash, "spaceRev": a.spaceRev})
 		}
 		return map[string]any{"repos": repos}, nil
 

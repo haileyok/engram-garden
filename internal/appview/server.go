@@ -688,10 +688,14 @@ func (s *Server) authorizeAuthority(r *http.Request, spaceURI, lxm string) error
 func (s *Server) handleNotifyWrite(w http.ResponseWriter, r *http.Request) {
 	var n indexer.Notification
 	if err := json.NewDecoder(r.Body).Decode(&n); err != nil || n.Space == "" || n.Repo == "" {
+		// Authorities don't retry a rejected notification, so the write
+		// waits for the periodic sync: worth a line in the log.
+		s.log().Warn("rejected a write notification", "reason", "bad body", "err", err)
 		s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "bad notification body"))
 		return
 	}
 	if err := s.authorizeAuthority(r, n.Space, "com.atproto.space.notifyWrite"); err != nil {
+		s.log().Warn("rejected a write notification", "space", n.Space, "repo", n.Repo, "err", err)
 		s.writeErr(w, err)
 		return
 	}
