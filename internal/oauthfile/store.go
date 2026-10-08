@@ -1,4 +1,6 @@
-package web
+// Package oauthfile keeps OAuth sessions and sign-ins in progress as files,
+// for the web app and the engram CLI.
+package oauthfile
 
 import (
 	"context"
@@ -16,8 +18,8 @@ import (
 )
 
 const (
-	// authRequestTTL is how long a sign-in may take.
-	authRequestTTL = 30 * time.Minute
+	// AuthRequestTTL is how long a sign-in may take.
+	AuthRequestTTL = 30 * time.Minute
 	// sessionTTL drops sessions unused this long. Refreshing tokens saves
 	// the session, so active sessions stay.
 	sessionTTL = 180 * 24 * time.Hour
@@ -137,7 +139,7 @@ func (s *FileStore) DeleteSession(_ context.Context, did syntax.DID, sessionID s
 }
 
 func (s *FileStore) GetAuthRequestInfo(_ context.Context, state string) (*oauth.AuthRequestData, error) {
-	info, err := read[oauth.AuthRequestData](s.requestPath(state), authRequestTTL, s.now())
+	info, err := read[oauth.AuthRequestData](s.requestPath(state), AuthRequestTTL, s.now())
 	if err != nil {
 		return nil, fmt.Errorf("sign-in request: %w", err)
 	}
@@ -160,7 +162,7 @@ func (s *FileStore) DeleteAuthRequestInfo(_ context.Context, state string) error
 // Sweep removes expired sign-ins and sessions.
 func (s *FileStore) Sweep() {
 	now := s.now()
-	for sub, ttl := range map[string]time.Duration{"requests": authRequestTTL, "sessions": sessionTTL} {
+	for sub, ttl := range map[string]time.Duration{"requests": AuthRequestTTL, "sessions": sessionTTL} {
 		entries, _ := os.ReadDir(filepath.Join(s.Dir, sub))
 		for _, e := range entries {
 			p := filepath.Join(s.Dir, sub, e.Name())

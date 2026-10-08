@@ -10,6 +10,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/haileyok/engram-garden/internal/agent"
 	"github.com/haileyok/engram-garden/internal/appview"
 	"github.com/haileyok/engram-garden/internal/blob"
 	"github.com/haileyok/engram-garden/internal/embed"
@@ -75,20 +76,20 @@ func (w *world) declare(t *testing.T, c lex.Config) {
 	w.deliver(t, w.net.Authority.DID)
 }
 
-func (w *world) tools(t *testing.T, did string, p embed.Provider) *Tools {
+func (w *world) tools(t *testing.T, did string, p embed.Provider) *agent.Agent {
 	t.Helper()
 	c, err := spaceclient.New(w.net.Session(w.net.AccountByDID(did)), w.net.Dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Tools{Client: c, Space: w.net.Space, AppviewURL: w.url, AppviewDID: serviceDID, Provider: p, ConfigTTL: time.Millisecond}
+	return &agent.Agent{Client: c, Space: w.net.Space, AppviewURL: w.url, AppviewDID: serviceDID, Provider: p, ConfigTTL: time.Millisecond}
 }
 
-func connect(t *testing.T, tools *Tools) *mcp.ClientSession {
+func connect(t *testing.T, a *agent.Agent) *mcp.ClientSession {
 	t.Helper()
 	ct, st := mcp.NewInMemoryTransports()
 	ctx := context.Background()
-	if _, err := tools.NewServer().Connect(ctx, st, nil); err != nil {
+	if _, err := NewServer(a).Connect(ctx, st, nil); err != nil {
 		t.Fatal(err)
 	}
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(ctx, ct, nil)
