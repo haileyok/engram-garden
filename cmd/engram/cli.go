@@ -28,7 +28,9 @@ type cli struct {
 	// open signs in with settings.
 	open func(context.Context, agent.Settings) (*agent.Agent, error)
 	// signIn signs in to an account: OAuth, or password when password is set.
-	signIn func(ctx context.Context, handle, password string, in io.Reader) (agent.Account, error)
+	// lines is input, which an OAuth sign-in watches for an address pasted
+	// from the browser.
+	signIn func(ctx context.Context, handle, password string, lines <-chan string) (agent.Account, error)
 	// readSecret reads a password without echoing it, from a terminal; nil
 	// when stdin isn't one, so the password is read as a line.
 	readSecret func(prompt string) (string, error)
@@ -37,20 +39,55 @@ type cli struct {
 	// pull fetches an embedding model (`ollama pull`); nil when unavailable.
 	pull func(ctx context.Context, model string) error
 
-	json  bool
-	lines *bufio.Reader
+	json bool
+	buf  *bufio.Reader
+	// lines, once an OAuth sign-in starts, is the only reader of buf: a
+	// goroutine hands over each line as it's wanted. The sign-in can then
+	// wait for a pasted address and the browser at once, and a line it
+	// doesn't take is left for the next prompt.
+	lines chan string
 }
 
-// reader is stdin, buffered once so prompts and stdin text share it.
+// reader is stdin, buffered once so prompts and stdin text share it. Don't
+// use it after lineInput.
 func (c *cli) reader() *bufio.Reader {
+	if c.buf == nil {
+		c.buf = bufio.NewReader(c.in)
+	}
+	return c.buf
+}
+
+// lineInput hands over input line by line, from then on.
+func (c *cli) lineInput() <-chan string {
 	if c.lines == nil {
-		c.lines = bufio.NewReader(c.in)
+		c.lines = make(chan string)
+		go func() {
+			defer close(c.lines)
+			for {
+				line, err := c.readBuffered()
+				if err != nil {
+					return
+				}
+				c.lines <- line
+			}
+		}()
 	}
 	return c.lines
 }
 
 // readLine reads one line of input, whole.
 func (c *cli) readLine() (string, error) {
+	if c.lines != nil {
+		line, ok := <-c.lines
+		if !ok {
+			return "", io.EOF
+		}
+		return line, nil
+	}
+	return c.readBuffered()
+}
+
+func (c *cli) readBuffered() (string, error) {
 	line, err := c.reader().ReadString('\n')
 	line = strings.TrimRight(line, "\r\n")
 	if err != nil && (line == "" || !errors.Is(err, io.EOF)) {
@@ -341,7 +378,7 @@ func flagSet(fs *flag.FlagSet, name string) bool {
 // taking ENGRAM_PASSWORD).
 func (c *cli) doSignIn(ctx context.Context, handle string, usePassword bool) (agent.Account, error) {
 	if !usePassword {
-		return c.signIn(ctx, handle, "", c.reader())
+		return c.signIn(ctx, handle, "", c.lineInput())
 	}
 	pw := c.getenv("ENGRAM_PASSWORD")
 	if pw == "" {
@@ -360,7 +397,7 @@ func (c *cli) doSignIn(ctx context.Context, handle string, usePassword bool) (ag
 	if pw == "" {
 		return agent.Account{}, errors.New("no password given")
 	}
-	return c.signIn(ctx, handle, pw, c.reader())
+	return c.signIn(ctx, handle, pw, nil)
 }
 
 func (c *cli) ask(prompt string) (string, error) {
