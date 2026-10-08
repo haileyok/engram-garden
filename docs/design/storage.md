@@ -447,21 +447,27 @@ Wasabi's pay-as-you-go terms shape the design:
 | **1 TB minimum monthly charge** ($7.99 at the time of writing). | Negligible. |
 | No per-request fees. | Many small range reads are fine. |
 
-**Conditional writes are unconfirmed on Wasabi.** Wasabi's object-operations
+**Conditional writes work on Wasabi, as tested.** Wasabi's object-operations
 documentation doesn't mention `If-None-Match` or `If-Match` on PutObject, and
-doesn't list conditional writes among its unsupported operations. An
-independent survey of S3-compatible providers' conditional writes
+an independent survey of S3-compatible providers' conditional writes
 ([zeropg storage backends notes](https://github.com/reisepass/zeropg/blob/main/docs/STORAGE-BACKENDS.md))
-lists Wasabi as unconfirmed. It also warns that some providers silently
-ignore the header, returning 200 and overwriting. Oracle's S3 layer is
-documented to do this.
+lists Wasabi as unconfirmed. The conformance test below, run on 2026-10-08
+against `s3.us-west-2.wasabisys.com`, found that a PutObject with
+`If-None-Match: *` on an existing key is rejected with HTTP 412
+`PreconditionFailed` and leaves the object unchanged. The startup probe
+therefore turns conditional writes on there. That was one region and
+single-part writes (manifests are small), and Wasabi doesn't document the
+behavior, so the probe stays. Re-run the test if Wasabi changes.
 
+The survey also warns that some providers silently ignore the header,
+returning 200 and overwriting. Oracle's S3 layer is documented to do this.
 So the design doesn't depend on conditional writes (see
 [Fencing](#fencing)), and doesn't trust them without proof. At startup, the
 store probes the bucket: it writes a probe key, writes it again with
 `If-None-Match: *`, and uses conditional writes only if the second write is
-rejected with 412 or 409. A CI conformance test runs the same probe against
-each supported backend.
+rejected with 412 or 409. A conformance test runs the same probe, plus the
+store contract and a multipart upload, against each supported backend; see
+the README's Development section for running it on a real bucket.
 
 Storage cost at scale: a billion memories at ~2.5 KB each is ~2.5 TB, about
 $20/month.
@@ -660,8 +666,6 @@ appview while someone is watching a space.
 
 ## Open questions
 
-- Does Wasabi honor `If-None-Match` on PutObject? Its documentation doesn't
-  say, so this is answered by the startup probe against a real bucket.
 - Benchmark-machine numbers: re-rank throughput with `simd/archsimd`, and
   cold-load latency from Wasabi.
 - Embedding latency on typical agent hardware (laptop CPU through Ollama)
