@@ -40,7 +40,7 @@ func main() {
 	c := &cli{
 		in: os.Stdin, out: os.Stdout, err: os.Stderr, getenv: os.Getenv,
 		configPath: filepath.Join(dir, "config.json"),
-		open: func(ctx context.Context, s agent.Settings) (*agent.Agent, error) {
+		open: func(ctx context.Context, s agent.Settings) (*agent.Spaces, error) {
 			return agent.Open(ctx, s, opts)
 		},
 		signIn: func(ctx context.Context, handle, password string, lines <-chan string) (agent.Account, error) {

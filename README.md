@@ -196,6 +196,25 @@ these commands for each space.
   ```
 
   Add `--json` to any command for machine-readable output.
+- **Several spaces.** An agent can use any spaces its account belongs to,
+  each with a short name (by default the last part of its URI):
+
+  ```bash
+  engram spaces add at://did:plc:team/space/garden.engram.space/runbooks
+  engram spaces                  # the spaces, the default (*), and each one's embedding model
+  engram use runbooks            # make it the default
+  engram remember "…" --space notes
+  engram recall "how do we deploy"            # searches every space
+  engram recall "how do we deploy" --space runbooks
+  engram spaces remove runbooks
+  ```
+
+  `remember` and `list` use the default space unless given `--space`;
+  `recall` searches every space unless given one; `get` and `forget` take
+  the space from the memory's URI. Each space declares its own embedding
+  model, and `engram spaces` shows which (name, digest, dimensions, prefixes)
+  and whether this machine can embed with it. `engram spaces` also lists
+  other spaces the account belongs to that aren't set up yet.
 - **Using it over MCP:** `engram-mcp` uses the same settings, so the
   client configuration is just `{"mcpServers": {"engram": {"command":
   "engram-mcp"}}}`.
@@ -205,7 +224,8 @@ variables, which override the settings file:
 
 | Variable | Default | |
 |---|---|---|
-| `ENGRAM_SPACE` | | The memory space URI (required) |
+| `ENGRAM_SPACES` | | The spaces, comma-separated, each a URI or `name=URI`; replaces the saved ones |
+| `ENGRAM_SPACE` | | The default space, by name or URI (a URI not yet set up is added). One of these, or the settings file, must name a space. |
 | `ENGRAM_IDENTIFIER` / `ENGRAM_PASSWORD` | | The agent account's handle or DID, and its password (instead of `engram init`'s sign-in) |
 | `ENGRAM_PDS_HOST` | resolved | Skip resolving the account's PDS (password sign-in) |
 | `ENGRAM_CONFIG_DIR` | `~/.config/engram` | Where the settings and OAuth sessions live; one per agent on a shared machine |
@@ -228,7 +248,8 @@ Example MCP client configuration with environment variables:
     "engram": {
       "command": "engram-mcp",
       "env": {
-        "ENGRAM_SPACE": "at://did:plc:you/space/garden.engram.space/memory",
+        "ENGRAM_SPACES": "team=at://did:plc:you/space/garden.engram.space/memory,at://did:plc:you/space/garden.engram.space/notes",
+        "ENGRAM_SPACE": "team",
         "ENGRAM_IDENTIFIER": "agent-1.example.com",
         "ENGRAM_PASSWORD": "…"
       }
@@ -237,13 +258,19 @@ Example MCP client configuration with environment variables:
 }
 ```
 
-The tools:
+The tools (`remember`, `recall` and `list_memories` take an optional
+`space`, by name or URI):
 
-- `remember` embeds and stores a memory (`text`, optional `tags` and `source`).
-- `recall` embeds the query and searches every agent's memories.
+- `list_spaces` lists the agent's spaces, the default, and the embedding
+  model each requires; and other spaces the account belongs to.
+- `remember` embeds and stores a memory (`text`, optional `tags` and `source`) in the default space or `space`.
+- `recall` embeds the query with each space's model and searches every space (or `space`); each result names its space.
 - `get_memory` fetches one memory by URI.
-- `list_memories` lists memories newest first.
+- `list_memories` lists a space's memories newest first.
 - `forget` deletes one of the agent's own memories.
+
+The server's instructions list the spaces, so an agent knows them without
+calling `list_spaces`.
 
 ## The web app
 

@@ -58,11 +58,16 @@ export function ConnectAgent({ uri, status, isAuthority, onManage }: { uri: stri
               with the account's password instead:
             </p>
             <Snippet text={setup.initHeadless} />
+            <p className="muted small">
+              Agent already set up with another space? Add this one; it recalls from all of them, and <code>engram spaces</code>{" "}
+              lists them:
+            </p>
+            <Snippet text={setup.add} />
           </li>
           <li>
             <strong>Use it</strong> from a shell (add <code>--json</code> for machine-readable output):
             <Snippet text={setup.use} />
-            or from an MCP client, which gets <code>remember</code> and <code>recall</code> tools:
+            or from an MCP client, which gets <code>remember</code>, <code>recall</code> and <code>list_spaces</code> tools:
             <Snippet text={setup.mcp} />
           </li>
         </ol>

@@ -154,6 +154,8 @@ func (t *Agent) addEmbeddings(ctx context.Context, cfg *lex.Config, rec map[stri
 
 // Memory is a memory as tools return it.
 type Memory struct {
+	// Space names the memory space the memory is in.
+	Space      string   `json:"space,omitempty"`
 	URI        string   `json:"uri"`
 	Author     string   `json:"author"`
 	Text       string   `json:"text"`
@@ -169,6 +171,7 @@ type RememberIn struct {
 	Text   string   `json:"text" jsonschema:"the memory, written to make sense on its own when recalled later without this conversation"`
 	Tags   []string `json:"tags,omitempty" jsonschema:"short labels for filtering, such as a project, topic or kind (decision, preference, gotcha)"`
 	Source string   `json:"source,omitempty" jsonschema:"where this came from: a URL, file path, PR or task"`
+	Space  string   `json:"space,omitempty" jsonschema:"the space to store it in, by name or URI (default: the default space; see list_spaces)"`
 }
 
 type RememberOut struct {
@@ -231,6 +234,7 @@ type RecallIn struct {
 	Author string   `json:"author,omitempty" jsonschema:"only memories by this agent DID"`
 	Tags   []string `json:"tags,omitempty" jsonschema:"only memories carrying all of these tags"`
 	Since  string   `json:"since,omitempty" jsonschema:"only memories created at or after this RFC 3339 time"`
+	Space  string   `json:"space,omitempty" jsonschema:"search only this space, by name or URI (default: every space you use; see list_spaces)"`
 }
 
 type MemoriesOut struct {
@@ -323,6 +327,7 @@ type ListIn struct {
 	Cursor string   `json:"cursor,omitempty" jsonschema:"cursor from a previous call, for the next page"`
 	Author string   `json:"author,omitempty" jsonschema:"only memories by this agent DID"`
 	Tags   []string `json:"tags,omitempty" jsonschema:"only memories carrying all of these tags"`
+	Space  string   `json:"space,omitempty" jsonschema:"the space to list, by name or URI (default: the default space; see list_spaces)"`
 }
 
 // List lists memories newest first.

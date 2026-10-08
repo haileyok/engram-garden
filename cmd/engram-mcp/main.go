@@ -5,7 +5,7 @@
 //
 // It reads the settings `engram init` writes (~/.config/engram/config.json,
 // or $ENGRAM_CONFIG_DIR), and ENGRAM_* environment variables override them:
-// ENGRAM_SPACE, ENGRAM_IDENTIFIER / ENGRAM_PASSWORD, ENGRAM_APPVIEW_URL,
+// ENGRAM_SPACES, ENGRAM_SPACE, ENGRAM_IDENTIFIER / ENGRAM_PASSWORD, ENGRAM_APPVIEW_URL,
 // ENGRAM_APPVIEW_DID, ENGRAM_PDS_HOST and ENGRAM_EMBED_*.
 package main
 
@@ -27,11 +27,11 @@ import (
 	"github.com/haileyok/engram-garden/internal/oauthfile"
 )
 
-const usage = `engram-mcp: Engram Garden memory tools (remember, recall, get_memory,
-list_memories, forget) for an MCP client, over stdio.
+const usage = `engram-mcp: Engram Garden memory tools (list_spaces, remember, recall,
+get_memory, list_memories, forget) for an MCP client, over stdio.
 
-Set it up once with the engram CLI (engram init --space <space URI>), then
-configure your MCP client to run it:
+Set it up once with the engram CLI (engram init --space <space URI>; add more
+spaces with engram use <space URI>), then configure your MCP client to run it:
 
   {"mcpServers": {"engram": {"command": "engram-mcp"}}}
 
@@ -74,14 +74,23 @@ func run(log *slog.Logger) error {
 	if exp := settings.Account.Expires(); !exp.IsZero() && time.Until(exp) < 3*24*time.Hour {
 		log.Warn("the agent's sign-in ends soon; run `engram login` to renew it", "ends", exp.Format(time.RFC3339))
 	}
-	if cfg, err := a.Config(ctx, true); err != nil {
-		log.Warn("can't read the space's model yet", "err", agent.Explain(err))
-	} else if _, err := a.Provider.For(ctx, cfg.ModelInfo); err != nil {
-		log.Warn("the local embedding model doesn't match the space's; remember and recall will fail until it does", "err", err)
+	names := make([]string, 0, len(settings.Spaces))
+	for _, e := range settings.Spaces {
+		names = append(names, e.Name)
+		sp, _, err := a.Agent(e.URI)
+		if err != nil {
+			continue
+		}
+		if cfg, err := sp.Config(ctx, true); err != nil {
+			log.Warn("can't read the space's model yet", "space", e.Name, "err", agent.Explain(err))
+		} else if _, err := a.Provider.For(ctx, cfg.ModelInfo); err != nil {
+			log.Warn("the local embedding model doesn't match the space's; remember and recall there will fail until it does", "space", e.Name, "err", err)
+		}
 	}
-	// Warm the space and keep this agent's memories embedded with the
+	// Warm the spaces and keep this agent's memories embedded with each
 	// space's model(s), including during a model change.
 	go a.Run(ctx, 15*time.Minute)
-	log.Info("engram-mcp ready", "account", a.Client.DID(), "space", settings.Space, "appview", settings.AppviewURL)
+	def, _ := settings.Default()
+	log.Info("engram-mcp ready", "account", a.Client.DID(), "spaces", names, "default", def.Name, "appview", settings.AppviewURL)
 	return mcpserver.NewServer(a).Run(ctx, &mcp.StdioTransport{})
 }
