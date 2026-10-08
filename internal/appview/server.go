@@ -26,6 +26,7 @@ import (
 	"github.com/haileyok/engram-garden/internal/blob"
 	"github.com/haileyok/engram-garden/internal/indexer"
 	"github.com/haileyok/engram-garden/internal/lex"
+	"github.com/haileyok/engram-garden/internal/metrics"
 	"github.com/haileyok/engram-garden/internal/routing"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
 	"github.com/haileyok/engram-garden/internal/spacestore"
@@ -691,11 +692,13 @@ func (s *Server) handleNotifyWrite(w http.ResponseWriter, r *http.Request) {
 		// Authorities don't retry a rejected notification, so the write
 		// waits for the periodic sync: worth a line in the log.
 		s.log().Warn("rejected a write notification", "reason", "bad body", "err", err)
+		notifications.WithLabelValues("write", "bad_body").Inc()
 		s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "bad notification body"))
 		return
 	}
 	if err := s.authorizeAuthority(r, n.Space, "com.atproto.space.notifyWrite"); err != nil {
 		s.log().Warn("rejected a write notification", "space", n.Space, "repo", n.Repo, "err", err)
+		notifications.WithLabelValues("write", rejection(err)).Inc()
 		s.writeErr(w, err)
 		return
 	}
@@ -707,9 +710,11 @@ func (s *Server) handleNotifyWrite(w http.ResponseWriter, r *http.Request) {
 	releaseSpace, ok := s.trySpaceSlot(n.Space)
 	if !ok {
 		s.followUp.Store(n.Space, true)
+		notifications.WithLabelValues("write", "deferred").Inc()
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	notifications.WithLabelValues("write", "accepted").Inc()
 	s.Jobs.Add(1)
 	go func() {
 		defer s.Jobs.Done()
@@ -718,11 +723,13 @@ func (s *Server) handleNotifyWrite(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		releaseNode, err := s.acquireNodeSlot(ctx)
 		if err != nil {
+			notifiedSyncs.WithLabelValues("no_slot").Inc()
 			s.log().Warn("notified sync never got a slot; the periodic sync will catch up", "space", n.Space)
 			return
 		}
 		defer releaseNode()
 		needSync, err := s.Indexer.HandleWrite(ctx, n)
+		notifiedSyncs.WithLabelValues(metrics.Result(err)).Inc()
 		if err != nil {
 			s.log().Warn("notified sync failed", "space", n.Space, "repo", n.Repo, "err", err)
 		}
@@ -767,17 +774,22 @@ func (s *Server) handleNotifySpaceDeleted(w http.ResponseWriter, r *http.Request
 		Space string `json:"space"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Space == "" {
+		notifications.WithLabelValues("space_deleted", "bad_body").Inc()
 		s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "bad body"))
 		return
 	}
 	if err := s.authorizeAuthority(r, body.Space, "com.atproto.space.notifySpaceDeleted"); err != nil {
+		s.log().Warn("rejected a space deletion notification", "space", body.Space, "err", err)
+		notifications.WithLabelValues("space_deleted", rejection(err)).Inc()
 		s.writeErr(w, err)
 		return
 	}
 	if err := s.Store.MarkSpaceDeleted(r.Context(), body.Space); err != nil {
+		notifications.WithLabelValues("space_deleted", "error").Inc()
 		s.writeErr(w, err)
 		return
 	}
+	notifications.WithLabelValues("space_deleted", "accepted").Inc()
 	s.log().Info("space deleted", "space", body.Space)
 	w.WriteHeader(http.StatusOK)
 }
@@ -824,12 +836,17 @@ func (s *Server) Run(ctx context.Context, poll time.Duration, register bool) {
 				s.log().Warn("clearing abandoned sign-ins failed", "err", err)
 			}
 		}
+		spacesIndexed.Set(float64(len(spaces)))
+		owned := 0
+		defer func() { spacesOwned.Set(float64(owned)) }()
 		for _, sp := range spaces {
 			if !s.ring().Owns(sp) || !s.granted(ctx, sp) {
 				continue
 			}
+			owned++
 			if register && time.Now().After(renewAt[sp]) {
 				exp, err := s.Indexer.Register(ctx, sp, s.ServiceID())
+				notifyRegistrations.WithLabelValues(metrics.Result(err)).Inc()
 				if err != nil {
 					s.log().Warn("registering for notifications failed", "space", sp, "err", err)
 					renewAt[sp] = time.Now().Add(5 * time.Minute)

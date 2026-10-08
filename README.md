@@ -94,6 +94,8 @@ They live in [`lexicons/`](lexicons/garden/engram).
 | `ENGRAM_NODES` | single node | `id=url,id=url`: every appview node and its internal URL |
 | `ENGRAM_NODE_ID` | | This node's id in `ENGRAM_NODES` |
 | `ENGRAM_NODES_EPOCH` | | A number that increases whenever `ENGRAM_NODES` changes |
+| `ENGRAM_METRICS_LISTEN` | off | Address for Prometheus metrics at `/metrics`, e.g. `:9464`. A separate listener; keep it off the public internet. See [Monitoring](docs/monitoring.md). |
+| `ENGRAM_METRICS_PER_SPACE` | `false` | Also report gauges labeled with each loaded space's URI. Leave off where spaces are many. |
 
 ```bash
 go run ./cmd/engram-appview
@@ -128,6 +130,12 @@ engram-appview import space.tar
 
 An appview without an export builds the index from the members' PDSes
 instead, since the vectors are in the records.
+
+**Monitoring.** Set `ENGRAM_METRICS_LISTEN` (and `ENGRAM_WEB_METRICS_LISTEN`
+on the web app) for Prometheus metrics. Logs are JSON lines on stderr.
+[`docs/monitoring.md`](docs/monitoring.md) lists the metrics, and
+`deploy/monitoring/` has a Grafana dashboard, alert rules, and Prometheus and
+Alloy configs.
 
 ## Declaring the space's model
 
@@ -261,6 +269,7 @@ The server keeps OAuth tokens; the browser holds only a signed session cookie. A
 | `ENGRAM_WEB_PUBLIC_URL` | | Where the web app is served, e.g. `https://engram.garden` (required). `http://127.0.0.1:<port>` runs a development client that needs no key. |
 | `ENGRAM_WEB_CLIENT_KEY` | | The OAuth client's P-256 private key, multibase (`goat key generate -t P-256`). Required for https. |
 | `ENGRAM_WEB_LISTEN` | `:8090` | |
+| `ENGRAM_WEB_METRICS_LISTEN` | off | Address for Prometheus metrics at `/metrics`, e.g. `:9465`. See [Monitoring](docs/monitoring.md). |
 | `ENGRAM_WEB_DATA` | `engram-web-data` | Sessions and pending sign-ins, one file each. Keep it private. |
 | `ENGRAM_WEB_COOKIE_KEY` | generated in the data directory | Hex, at least 32 bytes. Signs session cookies. |
 | `ENGRAM_APPVIEW_URL` / `ENGRAM_APPVIEW_DID` | `https://api.engram.garden` / `did:web:<appview host>` | |

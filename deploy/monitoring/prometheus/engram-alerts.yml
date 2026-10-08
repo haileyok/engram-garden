@@ -1,0 +1,77 @@
+# Alerting rules for Engram Garden. Load with rule_files in prometheus.yml
+# (or import into Grafana alerting / Mimir). They assume the appview's job is
+# named engram-appview and the web app's engram-web; change the job matchers
+# if yours differ. Thresholds are starting points.
+groups:
+  - name: engram
+    rules:
+      - alert: EngramDown
+        expr: up{job=~"engram-appview|engram-web"} == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }} on {{ $labels.instance }} is down"
+          description: Prometheus can't scrape its metrics listener (ENGRAM_METRICS_LISTEN / ENGRAM_WEB_METRICS_LISTEN).
+
+      - alert: EngramNotificationsRejected
+        expr: sum by (job, instance, result) (increase(engram_notifications_total{result!~"accepted|deferred"}[15m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "The appview is refusing authorities' notifications ({{ $labels.result }})"
+          description: >-
+            Authorities don't retry a refused notification, so new memories wait for the
+            next poll (ENGRAM_POLL_INTERVAL). The appview's log has a "rejected a write
+            notification" line with the reason.
+
+      - alert: EngramIndexLagHigh
+        expr: histogram_quantile(0.95, sum by (job, instance, le) (rate(engram_index_lag_seconds_bucket[30m]))) > 120
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: New memories take {{ $value | humanizeDuration }} (p95) to become searchable
+          description: Usually write notifications aren't arriving, so only the periodic poll indexes them.
+
+      - alert: EngramSyncErrors
+        expr: sum by (job, instance) (rate(engram_repo_syncs_total{result="error"}[15m])) / sum by (job, instance) (rate(engram_repo_syncs_total[15m])) > 0.2
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of repo syncs are failing"
+          description: Look for "repo sync failed" and "notified sync failed" in the appview's log.
+
+      - alert: EngramObjectStorageErrors
+        expr: sum by (job, instance) (rate(engram_blob_requests_total{result="error"}[10m])) > 0
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: Object storage calls are failing
+          description: Flushes and space loads need object storage; the index can't publish new segments.
+
+      - alert: EngramFlushFailing
+        expr: sum by (job, instance) (increase(engram_flushes_total{result="error"}[30m])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: Write buffers aren't being flushed
+          description: Indexed changes stay only in memory until a flush succeeds. See "flush failed" in the log.
+
+      - alert: EngramServerErrors
+        expr: sum by (job, instance) (rate(engram_http_requests_total{code=~"5.."}[10m])) / sum by (job, instance) (rate(engram_http_requests_total[10m])) > 0.05
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of {{ $labels.job }}'s responses are 5xx"
+
+      - alert: EngramSearchSlow
+        expr: histogram_quantile(0.95, sum by (job, instance, le) (rate(engram_search_duration_seconds_bucket[10m]))) > 2
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: Searches take {{ $value | humanizeDuration }} (p95)
+
+      - alert: EngramRAMBudgetFull
+        expr: sum by (job, instance) (engram_index_ram_bytes) / sum by (job, instance) (engram_index_ram_budget_bytes) > 0.95
+        for: 30m
+        labels: { severity: info }
+        annotations:
+          summary: Loaded spaces use {{ $value | humanizePercentage }} of ENGRAM_RAM_BYTES
+          description: Spaces are being evicted and reloaded; raise ENGRAM_RAM_BYTES if searches slow down.
