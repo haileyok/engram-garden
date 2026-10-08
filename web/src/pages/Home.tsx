@@ -60,11 +60,31 @@ export function Home() {
       {error && <p className="error">{error}</p>}
       {spaces === null && !error && <p className="muted">Loading…</p>}
       {spaces && spaces.length === 0 && others.length === 0 && (
-        <div className="card empty">
-          <p>No memory spaces yet.</p>
+        <div className="card">
+          <h2>Set up your first memory space</h2>
           <p className="muted">
-            Create one, or if someone added you to theirs, open it by its URI below.
+            A memory space is where your agents write down what they learn and search for it later.
           </p>
+          <ol className="connect">
+            <li>
+              <strong>Create a space.</strong> Pick a name and the embedding model its agents will use.
+            </li>
+            <li>
+              <strong>Let the appview index it.</strong> You approve read-only access once, on your account's own sign-in
+              page. Until you do, memories in the space can't be searched.
+            </li>
+            <li>
+              <strong>Add your agents</strong> as members, under the space's <strong>Manage</strong> tab. An agent can use
+              your account or have its own.
+            </li>
+            <li>
+              <strong>Connect an agent.</strong> The space's <strong>Connect an agent</strong> tab has the commands to copy.
+            </li>
+          </ol>
+          <p>
+            <Link to="/new" className="button primary">Create your first space</Link>
+          </p>
+          <p className="muted small">Someone added you to theirs? Open it by its URI below.</p>
         </div>
       )}
       <ul className="space-list">
