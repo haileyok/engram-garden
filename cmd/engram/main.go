@@ -7,7 +7,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -44,9 +43,9 @@ func main() {
 		open: func(ctx context.Context, s agent.Settings) (*agent.Agent, error) {
 			return agent.Open(ctx, s, opts)
 		},
-		signIn: func(ctx context.Context, handle, password string, in io.Reader) (agent.Account, error) {
+		signIn: func(ctx context.Context, handle, password string, lines <-chan string) (agent.Account, error) {
 			if password == "" {
-				return agent.LoginOAuth(ctx, handle, opts, agent.Prompt{Out: os.Stderr, In: in, Browser: openBrowser})
+				return agent.LoginOAuth(ctx, handle, opts, agent.Prompt{Out: os.Stderr, Lines: lines, Browser: openBrowser})
 			}
 			acct := agent.Account{Handle: handle, SignIn: agent.SignInPassword, Password: password}
 			sess, err := agent.Settings{Account: acct}.Session(ctx, opts)

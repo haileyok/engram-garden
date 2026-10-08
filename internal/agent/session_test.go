@@ -3,11 +3,11 @@ package agent
 import (
 	"context"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCallbackFromBrowser(t *testing.T) {
@@ -16,16 +16,23 @@ func TestCallbackFromBrowser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pr, _ := io.Pipe() // nothing pasted
+	lines := make(chan string) // nothing pasted yet
 	go func() {
 		resp, err := http.Get("http://" + ln.Addr().String() + "/callback?state=s1&iss=https://pds.test&code=c")
 		if err == nil {
 			resp.Body.Close()
 		}
 	}()
-	q, err := waitForCallback(context.Background(), ln, pr)
+	q, err := waitForCallback(context.Background(), ln, lines)
 	if err != nil || q.Get("state") != "s1" || q.Get("code") != "c" {
 		t.Fatalf("callback: %v %v", q, err)
+	}
+	// What's typed next is the next prompt's answer: nothing is left
+	// reading it.
+	select {
+	case lines <- "y":
+		t.Fatal("still reading input after the sign-in finished")
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
@@ -37,10 +44,38 @@ func TestCallbackPasted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	in := strings.NewReader("not a url\nhttp://127.0.0.1:1234/callback?state=s2&iss=https%3A%2F%2Fpds.test&code=c2\n")
-	q, err := waitForCallback(context.Background(), ln, in)
+	lines := make(chan string, 3)
+	lines <- "not a url"
+	lines <- "http://127.0.0.1:1234/callback?state=s2&iss=https%3A%2F%2Fpds.test&code=c2"
+	lines <- "the next prompt's answer"
+	q, err := waitForCallback(context.Background(), ln, lines)
 	if err != nil || q.Get("state") != "s2" || q.Get("iss") != "https://pds.test" {
 		t.Fatalf("pasted: %v %v", q, err)
+	}
+	if next := <-lines; next != "the next prompt's answer" {
+		t.Fatalf("the sign-in read past its line: next is %q", next)
+	}
+}
+
+// TestCallbackInputEnds: input running out leaves the browser to finish.
+func TestCallbackInputEnds(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := make(chan string)
+	close(lines)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		resp, err := http.Get("http://" + ln.Addr().String() + "/callback?state=s3&iss=https://pds.test&code=c")
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	q, err := waitForCallback(context.Background(), ln, lines)
+	if err != nil || q.Get("state") != "s3" {
+		t.Fatalf("callback: %v %v", q, err)
 	}
 }
 

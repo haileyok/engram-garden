@@ -26,7 +26,9 @@ const (
 )
 
 // FileStore keeps OAuth sessions and pending sign-ins as files in a
-// directory, one per session. It's for a single web app process.
+// directory, one per session. It doesn't coordinate processes: the web app
+// is one process, and the agent tools lock a session around each use of it
+// (internal/agent).
 type FileStore struct {
 	Dir string
 	Now func() time.Time

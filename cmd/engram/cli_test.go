@@ -90,6 +90,10 @@ type agentCLI struct {
 	// revoked are the OAuth sessions ended after signing in again.
 	revoked []string
 	n       int
+	// pastes makes OAuth sign-ins take a pasted address from input, as
+	// when the browser is on another machine; pasted records them.
+	pastes bool
+	pasted []string
 }
 
 func (w *world) agent(t *testing.T) *agentCLI {
@@ -120,10 +124,17 @@ func (a *agentCLI) run(args ...string) (int, string, string) {
 			}
 			return &agent.Agent{Client: sc, Space: s.Space, AppviewURL: s.AppviewURL, AppviewDID: s.AppviewDID, Provider: p}, nil
 		},
-		signIn: func(_ context.Context, handle, password string, _ io.Reader) (agent.Account, error) {
+		signIn: func(_ context.Context, handle, password string, lines <-chan string) (agent.Account, error) {
 			did := "did:plc:" + strings.TrimSuffix(handle, ".test")
 			if password != "" {
 				return agent.Account{Handle: handle, DID: did, SignIn: agent.SignInPassword, Password: password}, nil
+			}
+			if a.pastes {
+				line, ok := <-lines
+				if !ok {
+					return agent.Account{}, errors.New("nothing pasted")
+				}
+				a.pasted = append(a.pasted, line)
 			}
 			a.n++
 			return agent.Account{Handle: handle, DID: did, SignIn: agent.SignInOAuth, SessionID: fmt.Sprintf("s%d", a.n), Callback: "http://127.0.0.1:1/callback", SignedInAt: time.Now()}, nil
@@ -223,6 +234,40 @@ func TestInitSavesSettings(t *testing.T) {
 	a.mustRun("login", "--password")
 	if s, _ := agent.LoadSettings(a.path, nil); s.Account.SignIn != agent.SignInPassword || s.Account.Password != "typed-password" {
 		t.Fatalf("password login: %+v", s.Account)
+	}
+}
+
+// TestInitPastedAddress: with every answer piped in, the address pasted
+// from the browser reaches the sign-in after the prompts take theirs.
+func TestInitPastedAddress(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	a := w.agent(t)
+	a.pastes = true
+	const pasted = "http://127.0.0.1:1234/callback?state=s&code=c"
+	a.stdin = w.net.Space + "\nalice.test\n" + pasted + "\n"
+	a.mustRun("init")
+	if len(a.pasted) != 1 || a.pasted[0] != pasted {
+		t.Fatalf("pasted: %q", a.pasted)
+	}
+}
+
+// TestLinesAfterSignIn: once the sign-in reads input line by line, prompts
+// read the lines it left, in order, and nothing is lost.
+func TestLinesAfterSignIn(t *testing.T) {
+	t.Parallel()
+	c := &cli{in: strings.NewReader("first\nsecond\nthird")}
+	if l, err := c.readLine(); l != "first" || err != nil {
+		t.Fatalf("before: %q %v", l, err)
+	}
+	if l := <-c.lineInput(); l != "second" {
+		t.Fatalf("sign-in: %q", l)
+	}
+	if l, err := c.readLine(); l != "third" || err != nil {
+		t.Fatalf("after: %q %v", l, err)
+	}
+	if _, err := c.readLine(); !errors.Is(err, io.EOF) {
+		t.Fatalf("end: %v", err)
 	}
 }
 

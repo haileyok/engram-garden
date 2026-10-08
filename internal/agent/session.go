@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -81,14 +80,31 @@ func (s Settings) Session(ctx context.Context, o Options) (*atclient.APIClient, 
 	a := s.Account
 	switch a.SignIn {
 	case SignInPassword:
+		// indigo signs in with http.DefaultClient, which never times out:
+		// bound signing in by the client's timeout, then use the client.
+		if o.HTTP != nil && o.HTTP.Timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, o.HTTP.Timeout)
+			defer cancel()
+		}
+		var api *atclient.APIClient
+		var err error
 		if a.PDSHost != "" {
-			return atclient.LoginWithPasswordHost(ctx, a.PDSHost, a.Handle, a.Password, "", nil)
+			api, err = atclient.LoginWithPasswordHost(ctx, a.PDSHost, a.Handle, a.Password, "", nil)
+		} else {
+			id, perr := syntax.ParseAtIdentifier(a.Handle)
+			if perr != nil {
+				return nil, fmt.Errorf("handle %q: %w", a.Handle, perr)
+			}
+			api, err = atclient.LoginWithPassword(ctx, o.dir(), id, a.Password, "", nil)
 		}
-		id, err := syntax.ParseAtIdentifier(a.Handle)
 		if err != nil {
-			return nil, fmt.Errorf("handle %q: %w", a.Handle, err)
+			return nil, err
 		}
-		return atclient.LoginWithPassword(ctx, o.dir(), id, a.Password, "", nil)
+		if o.HTTP != nil {
+			api.Client = o.HTTP
+		}
+		return api, nil
 	case SignInOAuth:
 		if o.Store == nil {
 			return nil, errors.New("no OAuth session store")
@@ -110,7 +126,9 @@ func (s Settings) Session(ctx context.Context, o Options) (*atclient.APIClient, 
 }
 
 // Revoke ends an OAuth sign-in: the server revokes its tokens, and the
-// session is forgotten.
+// session is forgotten. It waits for requests other processes are making
+// with the session, which could otherwise save refreshed tokens after it's
+// deleted.
 func Revoke(ctx context.Context, a Account, o Options) error {
 	if a.SignIn != SignInOAuth || a.SessionID == "" {
 		return nil
@@ -118,6 +136,13 @@ func Revoke(ctx context.Context, a Account, o Options) error {
 	did, err := syntax.ParseDID(a.DID)
 	if err != nil {
 		return err
+	}
+	if path := lockPath(o.LockDir, did, a.SessionID); path != "" {
+		unlock, err := lockFile(path)
+		if err != nil {
+			return err
+		}
+		defer unlock()
 	}
 	return OAuthApp(a.Callback, o).Logout(ctx, did, a.SessionID)
 }
@@ -183,9 +208,11 @@ func Explain(err error) error {
 // Prompt is how signing in talks to the person at the terminal.
 type Prompt struct {
 	Out io.Writer
-	// In receives a pasted address, for machines whose browser can't reach
-	// this one's loopback address.
-	In io.Reader
+	// Lines are lines of input, which may be an address pasted from the
+	// browser, for machines whose browser can't reach this one's loopback
+	// address. A line is only taken while waiting for the sign-in, so input
+	// after it is left for whoever reads next. Nil means no input.
+	Lines <-chan string
 	// Browser opens a URL; nil, or a failure, prints it instead.
 	Browser func(string) error
 }
@@ -209,7 +236,7 @@ func LoginOAuth(ctx context.Context, handle string, o Options, p Prompt) (Accoun
 		fmt.Fprintln(p.Out, "Open that address in a browser.")
 	}
 	fmt.Fprintln(p.Out, "If the browser is on another machine, it ends on a page that won't load; paste that page's address here.")
-	q, err := waitForCallback(ctx, ln, p.In)
+	q, err := waitForCallback(ctx, ln, p.Lines)
 	if err != nil {
 		return Account{}, err
 	}
@@ -254,8 +281,8 @@ func grantsMemories(granted []string) bool {
 }
 
 // waitForCallback returns the callback's query: from the browser reaching
-// ln, or from an address pasted on in.
-func waitForCallback(ctx context.Context, ln net.Listener, in io.Reader) (url.Values, error) {
+// ln, or from an address pasted as one of lines.
+func waitForCallback(ctx context.Context, ln net.Listener, lines <-chan string) (url.Values, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	got := make(chan url.Values, 2)
@@ -273,26 +300,20 @@ func waitForCallback(ctx context.Context, ln net.Listener, in io.Reader) (url.Va
 	})}
 	go func() { _ = srv.Serve(ln) }()
 	defer srv.Close()
-	if in != nil {
-		go func() {
-			sc := bufio.NewScanner(in)
-			for sc.Scan() {
-				u, err := url.Parse(strings.TrimSpace(sc.Text()))
-				if err != nil || u.Query().Get("state") == "" {
-					continue
-				}
-				select {
-				case got <- u.Query():
-				default:
-				}
-				return
+	for {
+		select {
+		case q := <-got:
+			return q, nil
+		case line, ok := <-lines:
+			if !ok {
+				lines = nil // input ended; the browser can still finish
+				continue
 			}
-		}()
-	}
-	select {
-	case q := <-got:
-		return q, nil
-	case <-ctx.Done():
-		return nil, errors.New("gave up waiting for the sign-in to finish")
+			if u, err := url.Parse(strings.TrimSpace(line)); err == nil && u.Query().Get("state") != "" {
+				return u.Query(), nil
+			}
+		case <-ctx.Done():
+			return nil, errors.New("gave up waiting for the sign-in to finish")
+		}
 	}
 }
