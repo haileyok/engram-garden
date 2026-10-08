@@ -54,13 +54,36 @@ func IsError(err error, names ...string) bool {
 	return false
 }
 
-// Client acts as one account in the spaces it can read.
+// Delegator mints delegation tokens: proof, from a user's PDS, that this
+// client acts for that user in a space.
+type Delegator interface {
+	DelegationToken(ctx context.Context, spaceURI string) (string, error)
+}
+
+// SessionDelegator asks the session's own PDS for delegation tokens.
+type SessionDelegator struct{ Session *atclient.APIClient }
+
+// DelegationToken implements Delegator.
+func (d SessionDelegator) DelegationToken(ctx context.Context, spaceURI string) (string, error) {
+	var tok struct {
+		Token string `json:"token"`
+	}
+	if err := d.Session.Get(ctx, "com.atproto.space.getDelegationToken", map[string]any{"space": spaceURI}, &tok); err != nil {
+		return "", fmt.Errorf("getDelegationToken: %w", err)
+	}
+	return tok.Token, nil
+}
+
+// Client reads spaces for a user, and writes as one account when it has a
+// session.
 type Client struct {
-	// Session is authenticated to the account's own PDS. Delegation tokens
-	// and the account's own space writes go through it.
+	// Session is authenticated to the account's own PDS. The account's own
+	// space writes go through it. Nil for a client that only reads.
 	Session *atclient.APIClient
-	Dir     identity.Directory
-	HTTP    *http.Client
+	// Delegator mints the delegation tokens exchanged for credentials.
+	Delegator Delegator
+	Dir       identity.Directory
+	HTTP      *http.Client
 
 	key *atcrypto.PrivateKeyP256
 
@@ -76,6 +99,17 @@ type credential struct {
 // New returns a client for an authenticated session. Each client binds its
 // credentials to its own fresh P-256 key.
 func New(session *atclient.APIClient, dir identity.Directory, hc *http.Client) (*Client, error) {
+	c, err := NewDelegated(SessionDelegator{session}, dir, hc)
+	if err != nil {
+		return nil, err
+	}
+	c.Session = session
+	return c, nil
+}
+
+// NewDelegated returns a client that only reads, with delegation tokens
+// from d.
+func NewDelegated(d Delegator, dir identity.Directory, hc *http.Client) (*Client, error) {
 	key, err := atcrypto.GeneratePrivateKeyP256()
 	if err != nil {
 		return nil, err
@@ -83,12 +117,12 @@ func New(session *atclient.APIClient, dir identity.Directory, hc *http.Client) (
 	if hc == nil {
 		hc = &http.Client{Timeout: 60 * time.Second}
 	}
-	return &Client{Session: session, Dir: dir, HTTP: hc, key: key, creds: map[string]credential{}}, nil
+	return &Client{Delegator: d, Dir: dir, HTTP: hc, key: key, creds: map[string]credential{}}, nil
 }
 
-// DID is the account's DID.
+// DID is the account's DID, or empty for a client without a session.
 func (c *Client) DID() syntax.DID {
-	if c.Session.AccountDID == nil {
+	if c.Session == nil || c.Session.AccountDID == nil {
 		return ""
 	}
 	return *c.Session.AccountDID
@@ -154,11 +188,9 @@ func (c *Client) refreshCredential(ctx context.Context, spaceURI string) (string
 	if err != nil {
 		return "", err
 	}
-	var tok struct {
-		Token string `json:"token"`
-	}
-	if err := c.Session.Get(ctx, "com.atproto.space.getDelegationToken", map[string]any{"space": spaceURI}, &tok); err != nil {
-		return "", fmt.Errorf("getDelegationToken: %w", err)
+	token, err := c.Delegator.DelegationToken(ctx, spaceURI)
+	if err != nil {
+		return "", err
 	}
 	host, err := c.SpaceHost(ctx, ref.Authority)
 	if err != nil {
@@ -166,7 +198,7 @@ func (c *Client) refreshCredential(ctx context.Context, spaceURI string) (string
 	}
 	// The exchange signs only the authorization; the signature's key becomes
 	// the credential's bound key.
-	headers, err := space.CreateSpaceSigHeaders(c.key, "Bearer "+tok.Token, "")
+	headers, err := space.CreateSpaceSigHeaders(c.key, "Bearer "+token, "")
 	if err != nil {
 		return "", err
 	}

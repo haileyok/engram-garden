@@ -6,11 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,31 +50,83 @@ func (a netAuth) Resume(_ context.Context, did syntax.DID, sessionID string) (*a
 
 func (a netAuth) Logout(context.Context, syntax.DID, string) error { return nil }
 
+// autoGrant stands in for OAuth at the appview: every sign-in is approved
+// at once, as the account it was started for, and goes straight back to
+// the appview's callback.
+type autoGrant struct {
+	net      *spacetest.Net
+	callback string // the appview's callback URL, once it's serving
+
+	mu      sync.Mutex
+	n       int
+	pending map[string][2]string // state -> DID, mode
+}
+
+func (a *autoGrant) Start(_ context.Context, did syntax.DID, mode string) (string, string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.n++
+	state := fmt.Sprintf("st%d", a.n)
+	a.pending[state] = [2]string{did.String(), mode}
+	return a.callback + "?" + url.Values{"state": {state}, "iss": {"https://pds.test"}, "code": {"c"}}.Encode(), state, nil
+}
+
+func (a *autoGrant) Finish(_ context.Context, _ string, q url.Values) (*appview.AuthResult, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	p, ok := a.pending[q.Get("state")]
+	if !ok {
+		return nil, errors.New("unknown state")
+	}
+	delete(a.pending, q.Get("state"))
+	scopes := appview.GrantScopes
+	if p[1] == "stop" {
+		scopes = appview.StopScopes
+	}
+	return &appview.AuthResult{DID: syntax.DID(p[0]), SessionID: "grant-" + q.Get("state"), Scopes: scopes}, nil
+}
+
+func (a *autoGrant) Resume(_ context.Context, did syntax.DID, _ string) (*atclient.APIClient, error) {
+	return a.net.Session(a.net.AccountByDID(did.String())), nil
+}
+
+func (a *autoGrant) Revoke(context.Context, string, syntax.DID, string) error { return nil }
+
 type fixture struct {
 	net     *spacetest.Net
 	av      *appview.Server
 	web     *Server
 	url     string
-	appview *spacetest.Account
 	alice   *spacetest.Account
 	bob     *spacetest.Account
 	mallory *spacetest.Account
 }
 
+// setup runs the web app against an appview. By default the appview
+// indexes the space with its authority's grant; with spaces given, it
+// indexes those, and nothing is granted yet.
 func setup(t *testing.T, spaces ...string) *fixture {
 	t.Helper()
 	n := spacetest.New(t)
 	f := &fixture{net: n}
-	f.appview = n.NewAccount("did:plc:appview")
 	f.alice = n.NewAccount("did:plc:alice")
 	f.bob = n.NewAccount("did:plc:bob")
 	f.mallory = n.NewAccount("did:plc:mallory")
-	for _, a := range []*spacetest.Account{n.Authority, f.appview, f.alice, f.bob} {
+	for _, a := range []*spacetest.Account{f.alice, f.bob} {
 		n.AddMember(a.DID)
 	}
 	n.Put(n.Authority, lex.ConfigCollection, lex.ConfigRkey, lex.Config{ModelInfo: model}.Record(time.Now()))
 
-	client, err := spaceclient.New(n.Session(f.appview), n.Dir, nil)
+	auth := &autoGrant{net: n, pending: map[string][2]string{}}
+	bs := blob.Dir{Root: t.TempDir()}
+	grants := &appview.Grants{Blob: bs, Auth: auth}
+	if spaces == nil {
+		spaces = []string{n.Space}
+		if err := grants.Put(context.Background(), appview.Grant{Space: n.Space, DID: n.Authority.DID, SessionID: "seed", GrantedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client, err := spaceclient.NewDelegated(grants, n.Dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,20 +135,22 @@ func setup(t *testing.T, spaces ...string) *fixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close(context.Background()) })
-	if spaces == nil {
-		spaces = []string{n.Space}
-	}
 	f.av = &appview.Server{
 		Store:            st,
 		Indexer:          &indexer.Indexer{Store: st, Client: client, Dir: n.Dir},
 		Dir:              n.Dir,
 		ServiceDID:       appviewDID,
 		Spaces:           spaces,
-		Blob:             blob.Dir{Root: t.TempDir()},
+		Blob:             bs,
 		OpenRegistration: true,
+		Grants:           grants,
+		ReturnOrigins:    []string{origin},
+		CookieKey:        []byte("fedcba9876543210fedcba9876543210"),
 	}
 	avs := httptest.NewServer(f.av.Handler())
 	t.Cleanup(avs.Close)
+	f.av.PublicURL = avs.URL
+	auth.callback = avs.URL + "/oauth/callback"
 
 	f.web = &Server{
 		Auth:       netAuth{n},
@@ -375,23 +432,41 @@ func TestConfigChanges(t *testing.T) {
 	}
 }
 
-func TestRegisterThroughWeb(t *testing.T) {
+// TestGrantThroughWeb follows what the frontend does: it reads the
+// appview's grant page from /api/service and sends the browser there,
+// which comes back to the web app.
+func TestGrantThroughWeb(t *testing.T) {
 	t.Parallel()
 	f := setup(t, []string{}...)
-	f.av.Spaces = nil
 	status, body := f.call(t, "GET", "/api/status"+q("space", f.net.Space), f.net.Authority, nil)
 	if status != 400 || body["error"] != "UnknownSpace" {
 		t.Fatalf("before: %d %v", status, body)
 	}
 	status, body = f.call(t, "GET", "/api/service", f.net.Authority, nil)
-	if status != 200 || body["account"] != f.appview.DID || body["registration"] != "open" {
+	grantURL, _ := body["grantUrl"].(string)
+	if status != 200 || grantURL != f.av.PublicURL+"/oauth/grant" || body["registration"] != "open" || body["account"] != nil {
 		t.Fatalf("service: %d %v", status, body)
 	}
-	if status, body := f.call(t, "POST", "/api/register", f.net.Authority, map[string]any{"space": f.net.Space}); status != 200 {
-		t.Fatalf("register: %d %v", status, body)
+
+	jar, _ := cookiejar.New(nil)
+	b := &http.Client{Jar: jar, CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+		if strings.HasPrefix(req.URL.String(), origin) {
+			return http.ErrUseLastResponse // back at the web app
+		}
+		return nil
+	}}
+	back := origin + "/space/x"
+	resp, err := b.Get(grantURL + "?" + url.Values{"space": {f.net.Space}, "mode": {"grant"}, "return": {back}}.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if loc := resp.Header.Get("Location"); resp.StatusCode != http.StatusSeeOther || loc != back+"?indexing=granted" {
+		t.Fatalf("came back with %d %q", resp.StatusCode, loc)
 	}
 	f.av.Jobs.Wait()
-	if status, body := f.call(t, "GET", "/api/status"+q("space", f.net.Space), f.net.Authority, nil); status != 200 {
+	status, body = f.call(t, "GET", "/api/status"+q("space", f.net.Space), f.net.Authority, nil)
+	if access, _ := body["access"].(map[string]any); status != 200 || access["state"] != "granted" {
 		t.Fatalf("after: %d %v", status, body)
 	}
 }

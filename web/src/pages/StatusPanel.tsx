@@ -20,6 +20,20 @@ export function StatusPanel({ status }: { status: SpaceStatus }) {
           <dd>{status.memories.toLocaleString()}</dd>
           <dt>Model</dt>
           <dd>{declared ? <Model m={declared} /> : <span className="muted">none declared yet; nothing is indexed until the authority declares one</span>}</dd>
+          {status.access && (
+            <>
+              <dt>Kept current</dt>
+              <dd>
+                {status.access.state === "granted" ? (
+                  <>yes, with <Handle did={status.access.grantedBy ?? ""} />'s permission</>
+                ) : status.access.state === "lapsed" ? (
+                  <span className="error">no: the authority's permission stopped working</span>
+                ) : (
+                  <span className="muted">no: the authority hasn't let the appview read the space</span>
+                )}
+              </dd>
+            </>
+          )}
           {status.building && (
             <>
               <dt>Moving to</dt>

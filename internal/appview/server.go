@@ -48,10 +48,18 @@ type Server struct {
 	ServiceDID string
 	// PublicURL is where this service is reachable, for its did:web document.
 	PublicURL string
-	// Spaces are the spaces the operator configured. Members can register
-	// more with garden.engram.registerSpace when OpenRegistration is set.
+	// Spaces are the spaces the operator configured. When OpenRegistration
+	// is set, a space's authority can have more indexed by granting access.
 	Spaces           []string
 	OpenRegistration bool
+	// Grants hold the authorities' grants that let the appview read their
+	// spaces, and run the sign-ins that make them.
+	Grants *Grants
+	// ReturnOrigins are where a grant may send the browser back to.
+	ReturnOrigins []string
+	// CookieKey ties grant sign-ins to the browser that started them. It
+	// must be the same on every node.
+	CookieKey []byte
 	// Ring decides which node owns each space. Nil means a single node.
 	Ring *routing.Ring
 	// Blob, when set, holds the registry of indexed spaces.
@@ -150,8 +158,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /xrpc/garden.engram.getSpaceStatus", s.owned(q, s.handleStatus))
 	mux.HandleFunc("GET /xrpc/garden.engram.exportSpace", s.owned(q, s.handleExport))
 	mux.HandleFunc("POST /xrpc/garden.engram.warmSpace", s.ownedBody(s.handleWarm))
-	mux.HandleFunc("POST /xrpc/garden.engram.registerSpace", s.ownedBody(s.handleRegister))
 	mux.HandleFunc("GET /xrpc/garden.engram.describeService", s.handleDescribe)
+	mux.HandleFunc("GET /oauth/grant", s.handleGrant)
+	mux.HandleFunc("GET /oauth/callback", s.handleCallback)
+	if docs, ok := s.oauthDocs(); ok {
+		mux.HandleFunc("GET /oauth/client-metadata.json", docs.ServeMetadata)
+		mux.HandleFunc("GET /oauth/jwks.json", docs.ServeJWKS)
+	}
 	mux.HandleFunc("POST /xrpc/com.atproto.space.notifyWrite", s.ownedBody(s.handleNotifyWrite))
 	mux.HandleFunc("POST /xrpc/com.atproto.space.notifySpaceDeleted", s.ownedBody(s.handleNotifySpaceDeleted))
 	mux.HandleFunc("GET /.well-known/did.json", s.handleDIDDoc)
@@ -173,16 +186,8 @@ func (s *Server) owned(spaceOf func(*http.Request) string, h http.HandlerFunc) h
 			return
 		}
 		if !s.knows(r.Context(), sp) {
-			// Unknown spaces are reported by the handler, except
-			// registrations, which go to the node that will own the space.
-			if r.URL.Path != "/xrpc/garden.engram.registerSpace" {
-				h(w, r)
-				return
-			}
-			if _, err := space.ParseRef(sp); err != nil {
-				h(w, r)
-				return
-			}
+			h(w, r) // the handler reports the unknown space
+			return
 		}
 		owner := s.ring().Owner(sp)
 		if owner.ID == s.ring().Self {
@@ -587,6 +592,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		out["building"] = st.Building
 		out["buildingMemories"] = st.BuildingMemories
 	}
+	if s.Grants != nil {
+		access, err := s.Grants.Access(r.Context(), spaceURI)
+		if err != nil {
+			s.writeErr(w, err)
+			return
+		}
+		out["access"] = access
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -720,6 +733,20 @@ func (s *Server) handleNotifyWrite(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// granted reports whether the appview may read the space: its authority
+// has granted access (or, without Grants, always).
+func (s *Server) granted(ctx context.Context, spaceURI string) bool {
+	if s.Grants == nil {
+		return true
+	}
+	g, err := s.Grants.Get(ctx, spaceURI)
+	if err != nil {
+		s.log().Warn("reading a grant failed", "space", spaceURI, "err", err)
+		return false
+	}
+	return g != nil
+}
+
 // syncSpaceOnce runs a space sync unless one is already running.
 func (s *Server) syncSpaceOnce(ctx context.Context, spaceURI string) {
 	if _, running := s.syncing.LoadOrStore(spaceURI, struct{}{}); running {
@@ -787,8 +814,14 @@ func (s *Server) Run(ctx context.Context, poll time.Duration, register bool) {
 				s.log().Warn("writing the registry failed", "err", err)
 			}
 		}
+		// One node clears abandoned sign-ins: the registry's coordinator.
+		if s.Grants != nil && s.ring().IsCoordinator() {
+			if err := s.Grants.Sweep(ctx, time.Now()); err != nil {
+				s.log().Warn("clearing abandoned sign-ins failed", "err", err)
+			}
+		}
 		for _, sp := range spaces {
-			if !s.ring().Owns(sp) {
+			if !s.ring().Owns(sp) || !s.granted(ctx, sp) {
 				continue
 			}
 			if register && time.Now().After(renewAt[sp]) {

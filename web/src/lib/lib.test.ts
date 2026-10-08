@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { memoryAuthor, parseSpaceUri, spacePath, validSpaceName } from "./uri";
+import { grantLink, memoryAuthor, parseSpaceUri, spacePath, validSpaceName } from "./uri";
 import { knownPrefixes, listLocalModels, normalizeDigest, normalizeModelName } from "./ollama";
 
 const space = "at://did:plc:abc123/space/garden.engram.space/team";
@@ -21,6 +21,13 @@ describe("space URIs", () => {
   it("finds a memory's author", () => {
     expect(memoryAuthor(space, `${space}/did:plc:alice/garden.engram.memory/3k`)).toBe("did:plc:alice");
     expect(memoryAuthor(space, "at://did:plc:other/space/x/y/did:plc:a/c/r")).toBeNull();
+  });
+  it("links to the appview's grant page", () => {
+    const u = new URL(grantLink("https://api.engram.test/oauth/grant", space, "stop", "https://engram.test/space/x?tab=manage"));
+    expect(u.origin + u.pathname).toBe("https://api.engram.test/oauth/grant");
+    expect(u.searchParams.get("space")).toBe(space);
+    expect(u.searchParams.get("mode")).toBe("stop");
+    expect(u.searchParams.get("return")).toBe("https://engram.test/space/x?tab=manage");
   });
   it("checks space names", () => {
     expect(validSpaceName("team-memory")).toBe(true);

@@ -27,6 +27,15 @@ export type SpaceStatus = {
   memories: number;
   buildingMemories?: number;
   skipped: { author: string; count: number }[];
+  // Whether the appview may read the space to keep its index current.
+  access?: Access;
+};
+
+export type Access = {
+  state: "granted" | "missing" | "lapsed";
+  grantedBy?: string;
+  grantedAt?: string;
+  error?: string;
 };
 
 export type SpaceSummary = {
@@ -40,7 +49,7 @@ export type Member = { did: string; read: boolean; write: boolean };
 
 export type Session = { did: string; handle?: string; appviewDid: string };
 
-export type Service = { did: string; account?: string; registration: "open" | "closed" };
+export type Service = { did: string; grantUrl?: string; registration: "open" | "closed" };
 
 export type ConfigAction = "declare" | "next" | "promote" | "cancel";
 
@@ -101,7 +110,6 @@ export const api = {
 
   spaces: () => call<{ spaces: SpaceSummary[] }>("GET", "/api/spaces"),
   status: (space: string) => call<SpaceStatus>("GET", "/api/status" + qs({ space })),
-  register: (space: string) => call<{ space: string }>("POST", "/api/register", { space }),
   memories: (space: string, f: MemoryFilters, cursor?: string, limit = 25) =>
     call<{ memories: Memory[]; cursor?: string }>(
       "GET",

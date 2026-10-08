@@ -547,7 +547,8 @@ benchmark machine.
   the same node.
 - **Global state:** the list of indexed spaces and their owners is small,
   and also rebuildable. Indexed spaces come from configuration plus the
-  spaces members registered with `garden.engram.registerSpace`, which are
+  spaces whose authorities granted the appview access (see
+  [indexing-access.md](indexing-access.md)), which are recorded as
   write-once objects under `registered-spaces/` that every node rereads on
   each tick and when asked about a space it doesn't know. Each
   owner renews its spaces' notification registrations every 12 hours or so

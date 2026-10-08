@@ -38,7 +38,7 @@ func TestDemo(t *testing.T) {
 	for _, h := range []struct {
 		a      *spacetest.Account
 		handle string
-	}{{n.Authority, "hailey.test"}, {f.alice, "scout.agents.test"}, {f.bob, "archivist.agents.test"}, {f.appview, "appview.engram.test"}} {
+	}{{n.Authority, "hailey.test"}, {f.alice, "scout.agents.test"}, {f.bob, "archivist.agents.test"}} {
 		ident, _ := n.Dir.LookupDID(context.Background(), syntax.DID(h.a.DID))
 		n.Dir.Insert(identity.Identity{DID: ident.DID, Handle: syntax.Handle(h.handle), Keys: ident.Keys, Services: ident.Services})
 	}
@@ -51,7 +51,7 @@ func TestDemo(t *testing.T) {
 		{f.bob, "Hailey prefers short answers that lead with the recommendation.", []string{"prefs"}},
 		{f.alice, "The appview's notification receiver only accepts service auth from the space authority.", []string{"engram", "auth"}},
 		{f.bob, "Wasabi bills a 90-day minimum per object, so merges leave old segments for garbage collection.", []string{"storage"}},
-		{n.Authority, "Remember to rotate the appview's account password before launch.", []string{"todo"}},
+		{n.Authority, "Remember to set ENGRAM_RETURN_ORIGINS before launch.", []string{"todo"}},
 	}
 	for i, m := range seed {
 		n.Put(m.a, lex.MemoryCollection, "seed"+strconv.Itoa(i), memory(m.text, m.tags...))
@@ -64,6 +64,8 @@ func TestDemo(t *testing.T) {
 	}
 	demo := &Server{Auth: f.web.Auth, Dir: n.Dir, AppviewURL: f.web.AppviewURL, AppviewDID: appviewDID,
 		Origin: "http://" + ln.Addr().String(), CookieKey: f.web.CookieKey, Static: static, LiveEvery: 2 * time.Second}
+	// Granting and stopping in the demo come back here.
+	f.av.ReturnOrigins = append(f.av.ReturnOrigins, demo.Origin)
 	mux := http.NewServeMux()
 	mux.Handle("/", demo.Handler())
 	// Sign in by visiting /demo-signin?as=authority|alice|bob|mallory.

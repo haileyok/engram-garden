@@ -161,24 +161,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, u *user) {
 	s.relay(w, err, out)
 }
 
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request, u *user) {
-	var in struct {
-		Space string `json:"space"`
-	}
-	if e := decode(r, &in); e != nil {
-		writeErr(w, e)
-		return
-	}
-	ref, e := memorySpace(in.Space)
-	if e != nil {
-		writeErr(w, e)
-		return
-	}
-	var out json.RawMessage
-	err := s.appview(r.Context(), u, ref, http.MethodPost, "garden.engram.registerSpace", nil, map[string]string{"space": ref.String()}, &out)
-	s.relay(w, err, out)
-}
-
 func (s *Server) handleMemories(w http.ResponseWriter, r *http.Request, u *user) {
 	q := r.URL.Query()
 	ref, e := memorySpace(q.Get("space"))
