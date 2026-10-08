@@ -381,8 +381,9 @@ type IndexIn struct {
 
 type IndexOut struct {
 	Space string `json:"space"`
-	// State is the appview's access to the space: granted, none, revoked,
-	// or empty when it can't say.
+	// State is the appview's access to the space: granted, missing (never
+	// approved), lapsed (approved, and no longer working), or empty when it
+	// can't say.
 	State string `json:"state"`
 	// Link is the appview's page where the authority approves (or stops)
 	// indexing, signed in as the authority in a browser.
@@ -390,24 +391,14 @@ type IndexOut struct {
 	Note string `json:"note,omitempty"`
 }
 
-// IndexState reports whether the appview may read the space.
+// IndexState reports whether the appview may read the space: granted,
+// missing or lapsed, or empty when it doesn't say.
 func (s *Spaces) IndexState(ctx context.Context, nameOrURI string) (string, error) {
 	a, _, err := s.Agent(nameOrURI)
 	if err != nil {
 		return "", err
 	}
-	var st struct {
-		Access *struct {
-			State string `json:"state"`
-		} `json:"access"`
-	}
-	if err := a.query(ctx, "garden.engram.getSpaceStatus", url.Values{"space": {a.Space}}, &st); err != nil {
-		return "", unwrap(err)
-	}
-	if st.Access == nil {
-		return "", nil
-	}
-	return st.Access.State, nil
+	return a.Indexing(ctx, true)
 }
 
 // IndexSpace returns the appview's page for letting it index the space (or

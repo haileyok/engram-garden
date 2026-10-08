@@ -32,6 +32,8 @@ type world struct {
 	net *spacetest.Net
 	av  *appview.Server
 	url string
+	// grants is the appview's grants, when it keeps them.
+	grants *appview.Grants
 }
 
 func newWorld(t *testing.T, declare bool) *world {
@@ -42,6 +44,28 @@ func newWorld(t *testing.T, declare bool) *world {
 // newSpaceWorld is newWorld for a space with the given authority and key,
 // each world its own network and appview.
 func newSpaceWorld(t *testing.T, declare bool, authority, skey string) *world {
+	t.Helper()
+	return buildWorld(t, declare, authority, skey, false)
+}
+
+// newGrantedWorld is a world whose appview keeps grants, with the space's
+// authority having granted access. Tests take the grant away with
+// w.grants.Delete and give it back with w.grant.
+func newGrantedWorld(t *testing.T) *world {
+	t.Helper()
+	return buildWorld(t, true, "authority", "memory", true)
+}
+
+// grant records the authority's grant to the appview.
+func (w *world) grant(t *testing.T) {
+	t.Helper()
+	g := appview.Grant{Space: w.net.Space, DID: w.net.Authority.DID, SessionID: "session", GrantedAt: time.Now()}
+	if err := w.grants.Put(context.Background(), g); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func buildWorld(t *testing.T, declare bool, authority, skey string, withGrants bool) *world {
 	t.Helper()
 	n := spacetest.NewSpace(t, authority, skey)
 	avAcct := n.NewAccount("did:plc:appview")
@@ -63,13 +87,21 @@ func newSpaceWorld(t *testing.T, declare bool, authority, skey string) *world {
 		Store: st, Dir: n.Dir, ServiceDID: serviceDID, Spaces: []string{n.Space},
 		Indexer: &indexer.Indexer{Store: st, Client: avClient, Dir: n.Dir},
 	}
+	var grants *appview.Grants
+	if withGrants {
+		grants = &appview.Grants{Blob: blob.Dir{Root: t.TempDir()}}
+		av.Grants = grants
+	}
 	hs := httptest.NewServer(av.Handler())
 	t.Cleanup(hs.Close)
 	n.RegisterService(serviceDID, appview.SyncerFragment, hs.URL)
 	if _, err := av.Indexer.Register(context.Background(), n.Space, av.ServiceID()); err != nil {
 		t.Fatal(err)
 	}
-	w := &world{net: n, av: av, url: hs.URL}
+	w := &world{net: n, av: av, url: hs.URL, grants: grants}
+	if withGrants {
+		w.grant(t)
+	}
 	if declare {
 		w.declare(t, lex.Config{ModelInfo: model, DocumentPrefix: "search_document: ", QueryPrefix: "search_query: "})
 	}
@@ -455,5 +487,74 @@ func TestModelChangeReembeds(t *testing.T) {
 	}
 	if len(got.Memories) != 1 || !strings.Contains(got.Memories[0].Text, "kettle") {
 		t.Fatalf("recall after promotion: %+v", got)
+	}
+}
+
+// TestSpaceTheAppviewCantRead: when the space's authority hasn't let the
+// appview read it, memories are stored but never searchable. Agents are told
+// where they'd otherwise see only a success and empty searches: when they
+// remember, recall and list the spaces. Once the authority approves, the
+// warnings stop and what was stored turns up.
+func TestSpaceTheAppviewCantRead(t *testing.T) {
+	t.Parallel()
+	w := newGrantedWorld(t)
+	alice := connect(t, w.tools(t, "did:plc:alice", embed.HashingProvider{}))
+
+	var spaces ListSpacesOut
+	if msg := call(t, alice, "list_spaces", nil, &spaces); msg != "" {
+		t.Fatal(msg)
+	}
+	if len(spaces.Spaces) != 1 || spaces.Spaces[0].Indexing != "granted" || spaces.Spaces[0].Warning != "" {
+		t.Fatalf("list_spaces with a grant: %+v", spaces)
+	}
+	var stored RememberOut
+	if msg := call(t, alice, "remember", map[string]any{"text": "the deploy key rotates every friday"}, &stored); msg != "" || stored.Note != "" {
+		t.Fatalf("remember with a grant: %q %+v", msg, stored)
+	}
+	w.deliver(t, "did:plc:alice")
+
+	// The authority takes the grant away.
+	if err := w.grants.Delete(context.Background(), w.net.Space); err != nil {
+		t.Fatal(err)
+	}
+	spaces = ListSpacesOut{}
+	if msg := call(t, alice, "list_spaces", nil, &spaces); msg != "" {
+		t.Fatal(msg)
+	}
+	if got := spaces.Spaces[0]; got.Indexing != "missing" || !strings.Contains(got.Warning, "can't read") {
+		t.Fatalf("list_spaces without a grant: %+v", got)
+	}
+	stored = RememberOut{}
+	if msg := call(t, alice, "remember", map[string]any{"text": "staging deploy needs a vpn"}, &stored); msg != "" {
+		t.Fatal(msg)
+	}
+	for _, want := range []string{"Stored", "can't read", w.net.Authority.DID, "index"} {
+		if !strings.Contains(stored.Note, want) {
+			t.Errorf("remember's note lacks %q: %q", want, stored.Note)
+		}
+	}
+	w.deliver(t, "did:plc:alice")
+
+	// A search that finds nothing says why it may be.
+	var found MemoriesOut
+	if msg := call(t, alice, "recall", map[string]any{"query": "vpn", "tags": []string{"nothing-has-this-tag"}}, &found); msg != "" {
+		t.Fatal(msg)
+	}
+	if len(found.Memories) != 0 || !strings.Contains(found.Note, "can't read") {
+		t.Fatalf("recall without a grant: %+v", found)
+	}
+
+	w.grant(t)
+	stored = RememberOut{}
+	if msg := call(t, alice, "remember", map[string]any{"text": "prod deploy needs a vpn and a ticket"}, &stored); msg != "" || stored.Note != "" {
+		t.Fatalf("remember after the grant: %q %+v", msg, stored)
+	}
+	w.deliver(t, "did:plc:alice")
+	found = MemoriesOut{}
+	if msg := call(t, alice, "recall", map[string]any{"query": "deploy"}, &found); msg != "" {
+		t.Fatal(msg)
+	}
+	if len(found.Memories) != 3 || found.Note != "" {
+		t.Fatalf("recall after the grant: %+v", found)
 	}
 }

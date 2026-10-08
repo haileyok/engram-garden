@@ -79,6 +79,12 @@ func writeSpaces(w io.Writer, out agent.ListSpacesOut) {
 				fmt.Fprintf(w, "    this machine: can't embed with it: %s\n", sp.LocalModel)
 			}
 		}
+		switch {
+		case sp.Warning != "":
+			fmt.Fprintf(w, "    ✗ indexing: %s\n", sp.Warning)
+		case sp.Indexing == "granted":
+			fmt.Fprintln(w, "    indexing: the appview can read it")
+		}
 		if sp.Error != "" {
 			fmt.Fprintf(w, "    ✗ %s\n", sp.Error)
 		}

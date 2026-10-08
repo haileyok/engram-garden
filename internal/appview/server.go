@@ -82,6 +82,8 @@ type Server struct {
 	nodeSem  chan struct{}
 	spaceSem sync.Map // space -> chan struct{}
 	followUp sync.Map // space -> true: notifications arrived while at the cap
+	// ungrantedLogged is when each space's missing grant was last logged.
+	ungrantedLogged sync.Map // space -> time.Time
 
 	regMu       sync.RWMutex
 	registered  map[string]bool // spaces registered with registerSpace
@@ -702,6 +704,14 @@ func (s *Server) handleNotifyWrite(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, err)
 		return
 	}
+	if !s.granted(r.Context(), n.Space) {
+		// Nothing can be read until the authority approves, however often
+		// this is retried. Say so, since the write will never be searchable.
+		notifications.WithLabelValues("write", "not_granted").Inc()
+		s.logUngranted(n.Space, n.Repo)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	// A write is a sign the space is in use: start loading it now.
 	s.Store.Warm(n.Space)
 	// Sync in the background; the periodic space sync catches anything
@@ -756,6 +766,22 @@ func (s *Server) granted(ctx context.Context, spaceURI string) bool {
 		return false
 	}
 	return g != nil
+}
+
+// ungrantedLogEvery is how often a space's missing grant is logged, however
+// many writes arrive.
+const ungrantedLogEvery = 10 * time.Minute
+
+// logUngranted warns that a space is being written to without the appview
+// being allowed to read it, at most once in a while per space.
+func (s *Server) logUngranted(spaceURI, repo string) {
+	now := time.Now()
+	if last, ok := s.ungrantedLogged.Load(spaceURI); ok && now.Sub(last.(time.Time)) < ungrantedLogEvery {
+		return
+	}
+	s.ungrantedLogged.Store(spaceURI, now)
+	s.log().Warn("a write arrived for a space the appview isn't allowed to read, so it won't be searchable: its authority must approve indexing",
+		"space", spaceURI, "repo", repo, "approvalPage", s.GrantURL())
 }
 
 // syncSpaceOnce runs a space sync unless one is already running.

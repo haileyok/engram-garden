@@ -12,7 +12,7 @@ import (
 var (
 	notifications = metrics.Factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "engram_notifications_total",
-		Help: "Notifications from space authorities, by kind (write, space_deleted) and result: accepted, deferred (the space was at its sync cap; a running sync picks it up), bad_body, unauthorized, forbidden, unknown_space, error.",
+		Help: "Notifications from space authorities, by kind (write, space_deleted) and result: accepted, deferred (the space was at its sync cap; a running sync picks it up), not_granted (the space's authority hasn't let the appview read it, so the write can't be indexed), bad_body, unauthorized, forbidden, unknown_space, error.",
 	}, []string{"kind", "result"})
 	notifiedSyncs = metrics.Factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "engram_notified_syncs_total",
@@ -36,7 +36,7 @@ func init() {
 	// Start the outcomes worth alerting on at zero, so increase() sees the
 	// first one.
 	for _, kind := range []string{"write", "space_deleted"} {
-		for _, r := range []string{"accepted", "bad_body", "unauthorized", "forbidden", "unknown_space", "error"} {
+		for _, r := range []string{"accepted", "not_granted", "bad_body", "unauthorized", "forbidden", "unknown_space", "error"} {
 			notifications.WithLabelValues(kind, r)
 		}
 	}

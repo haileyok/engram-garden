@@ -42,10 +42,12 @@ type Agent struct {
 	// ConfigTTL is how long the space's config is cached (default 5m).
 	ConfigTTL time.Duration
 
-	mu       sync.Mutex
-	cfg      *lex.Config
-	cfgAt    time.Time
-	reembeds int // memories rewritten with missing vectors, for tests
+	mu         sync.Mutex
+	cfg        *lex.Config
+	cfgAt      time.Time
+	indexing   string    // the appview's access when last asked
+	indexingAt time.Time // when it was last asked
+	reembeds   int       // memories rewritten with missing vectors, for tests
 }
 
 func (t *Agent) log() *slog.Logger {
@@ -177,6 +179,9 @@ type RememberIn struct {
 type RememberOut struct {
 	URI string `json:"uri"`
 	CID string `json:"cid"`
+	// Note says what to know about the memory, such as that it can't be
+	// found by searching yet.
+	Note string `json:"note,omitempty"`
 }
 
 // Remember embeds a memory and stores it in the agent's own repo.
@@ -414,6 +419,43 @@ func normalize(out MemoriesOut) MemoriesOut {
 		}
 	}
 	return out
+}
+
+// ---- whether the appview can index the space ----
+
+// grantedTTL is how long a space the appview may read is assumed to stay
+// readable, so remembering doesn't ask every time.
+const grantedTTL = 2 * time.Minute
+
+// Indexing says whether the appview may read the space, and so index what's
+// stored in it: "granted"; "missing" (its authority never let the appview);
+// "lapsed" (it did, and the grant stopped working); or "" when the appview
+// doesn't say (it isn't asking authorities for grants). Unless fresh, a
+// recent "granted" is trusted. Any other answer is asked again each time, so
+// approving takes effect at once.
+func (t *Agent) Indexing(ctx context.Context, fresh bool) (string, error) {
+	t.mu.Lock()
+	if !fresh && t.indexing == "granted" && time.Since(t.indexingAt) < grantedTTL {
+		t.mu.Unlock()
+		return "granted", nil
+	}
+	t.mu.Unlock()
+	var st struct {
+		Access *struct {
+			State string `json:"state"`
+		} `json:"access"`
+	}
+	if err := t.query(ctx, "garden.engram.getSpaceStatus", url.Values{"space": {t.Space}}, &st); err != nil {
+		return "", unwrap(err)
+	}
+	state := ""
+	if st.Access != nil {
+		state = st.Access.State
+	}
+	t.mu.Lock()
+	t.indexing, t.indexingAt = state, time.Now()
+	t.mu.Unlock()
+	return state, nil
 }
 
 // ---- session start and model changes ----

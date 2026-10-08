@@ -83,7 +83,7 @@ the Go runtime's (`go_*`) and the process's (`process_*`) metrics, and
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
 | `engram_index_lag_seconds` | histogram | | From a repo commit to its changes being in the index, for incremental syncs: how long a new memory takes to become searchable. Seconds when notifications arrive; up to `ENGRAM_POLL_INTERVAL` when they don't. |
-| `engram_notifications_total` | counter | `kind` (`write`, `space_deleted`), `result` | Notifications from authorities. `accepted` and `deferred` (the space was at its sync cap; a running sync covers it) are normal. `bad_body`, `unauthorized`, `forbidden`, `unknown_space` and `error` are refusals, which authorities don't retry. |
+| `engram_notifications_total` | counter | `kind` (`write`, `space_deleted`), `result` | Notifications from authorities. `accepted` and `deferred` (the space was at its sync cap; a running sync covers it) are normal. `not_granted` means writes are arriving for a space whose authority hasn't let the appview read it (or took that back): none of them will be searchable until the authority approves indexing (`engram index`, or the web app). `bad_body`, `unauthorized`, `forbidden`, `unknown_space` and `error` are refusals, which authorities don't retry. |
 | `engram_notified_syncs_total` | counter | `result` (`ok`, `error`, `no_slot`) | Repo syncs started by a notification. |
 | `engram_notify_registrations_total` | counter | `result` | Requests asking authorities to send notifications (renewed about every 12 hours per space). |
 | `engram_repo_syncs_total` | counter | `mode` (`incremental`, `full`), `result` | |

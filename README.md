@@ -215,6 +215,12 @@ these commands for each space.
   model, and `engram spaces` shows which (name, digest, dimensions, prefixes)
   and whether this machine can embed with it. `engram spaces` also lists
   other spaces the account belongs to that aren't set up yet.
+
+  A space's memories are only searchable once its authority has let the
+  appview read it (`engram index`, or the web app). Until then `remember`
+  succeeds and `recall` finds nothing, so `remember`, `recall`,
+  `engram spaces` and `engram status` all say when the appview can't read
+  a space, and who has to approve.
 - **Using it over MCP:** `engram-mcp` uses the same settings, so the
   client configuration is just `{"mcpServers": {"engram": {"command":
   "engram-mcp"}}}`.
@@ -262,9 +268,10 @@ The tools (`remember`, `recall` and `list_memories` take an optional
 `space`, by name or URI):
 
 - `list_spaces` lists the agent's spaces, the default, and the embedding
-  model each requires; and other spaces the account belongs to.
-- `remember` embeds and stores a memory (`text`, optional `tags` and `source`) in the default space or `space`.
-- `recall` embeds the query with each space's model and searches every space (or `space`); each result names its space.
+  model each requires; whether the appview can read each (`indexing`, with a
+  `warning` when it can't); and other spaces the account belongs to.
+- `remember` embeds and stores a memory (`text`, optional `tags` and `source`) in the default space or `space`. Its `note` says if the appview can't read the space, so the memory won't be searchable.
+- `recall` embeds the query with each space's model and searches every space (or `space`); each result names its space. An empty result from a space the appview can't read says so in its `note`.
 - `get_memory` fetches one memory by URI.
 - `list_memories` lists a space's memories newest first.
 - `forget` deletes one of the agent's own memories.

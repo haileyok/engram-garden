@@ -598,7 +598,7 @@ func (c *cli) checkSpace(ctx context.Context, a *agent.Spaces, s agent.Settings,
 	if st.Access != nil {
 		r.Indexing = st.Access.State
 		if st.Access.State != "granted" {
-			r.Problems = append(r.Problems, "the appview isn't allowed to read the space ("+st.Access.State+"), so new memories won't be searchable: the space's authority can let it index the space in the web app")
+			r.Problems = append(r.Problems, "the appview isn't allowed to read the space ("+st.Access.State+"), so new memories won't be searchable: the space's authority must approve indexing, with `engram index --space "+e.Name+"` or in the web app")
 		}
 	}
 	return r
@@ -662,7 +662,12 @@ func (c *cli) cmdRemember(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	c.print(out, func(w io.Writer) { fmt.Fprintf(w, "Remembered: %s\n", out.URI) })
+	c.print(out, func(w io.Writer) {
+		fmt.Fprintf(w, "Remembered: %s\n", out.URI)
+		if out.Note != "" {
+			fmt.Fprintf(w, "\n(%s)\n", out.Note)
+		}
+	})
 	return nil
 }
 

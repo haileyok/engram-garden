@@ -115,7 +115,7 @@ stat("Index lag p95", q(0.95, "engram_index_lag_seconds", APPVIEW, window="30m")
      thresholds=[{"color": "green", "value": None}, {"color": "orange", "value": 30}, {"color": "red", "value": 120}])
 stat("Rejected notifications (1h)",
      f'sum(increase(engram_notifications_total{{{APPVIEW}, result!~"accepted|deferred"}}[1h]))', w=4,
-     desc="Authorities don't retry a rejected notification; the write waits for the next poll.", thresholds=red(1), decimals=0)
+     desc="Authorities don't retry a rejected notification; the write waits for the next poll. not_granted: the space's authority hasn't let the appview read it, so its writes are never searchable.", thresholds=red(1), decimals=0)
 stat("5xx responses (1h)", f'sum(increase(engram_http_requests_total{{{ALL}, code=~"5.."}}[1h]))', w=4,
      thresholds=red(1), decimals=0)
 newline()
@@ -134,7 +134,7 @@ timeseries("Memories becoming searchable", [
 row("Indexing and notifications")
 timeseries("Notifications by result", [
     (f"sum by (kind, result) (rate(engram_notifications_total{{{APPVIEW}}}[$__rate_interval]))", "{{kind}} {{result}}")],
-    unit="ops", desc="accepted and deferred are good; anything else means an authority's notification was refused.")
+    unit="ops", desc="accepted and deferred are good; anything else means a notification was refused, or (not_granted) arrived for a space the appview isn't allowed to read.")
 timeseries("Notified syncs", [
     (f"sum by (result) (rate(engram_notified_syncs_total{{{APPVIEW}}}[$__rate_interval]))", "{{result}}")], unit="ops")
 timeseries("Repo syncs", [
