@@ -58,18 +58,16 @@ func main() {
 			acct.SignedInAt = time.Now().UTC()
 			return acct, nil
 		},
-		readSecret: func(prompt string) (string, error) {
+		revoke: func(ctx context.Context, a agent.Account) error { return agent.Revoke(ctx, a, opts) },
+		pull:   ollamaPull(os.Stderr),
+	}
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		c.readSecret = func(prompt string) (string, error) {
 			fmt.Fprint(os.Stderr, prompt)
 			defer fmt.Fprintln(os.Stderr)
-			if !term.IsTerminal(int(os.Stdin.Fd())) {
-				var line string
-				_, err := fmt.Fscanln(os.Stdin, &line)
-				return line, err
-			}
 			b, err := term.ReadPassword(int(os.Stdin.Fd()))
 			return string(b), err
-		},
-		pull: ollamaPull(os.Stderr),
+		}
 	}
 	os.Exit(c.run(ctx, os.Args[1:]))
 }

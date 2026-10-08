@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -83,6 +84,11 @@ type agentCLI struct {
 	path  string
 	env   map[string]string
 	stdin string
+	// noTerminal reads passwords as lines of stdin, as without a terminal.
+	noTerminal bool
+	// revoked are the OAuth sessions ended after signing in again.
+	revoked []string
+	n       int
 }
 
 func (w *world) agent(t *testing.T) *agentCLI {
@@ -118,9 +124,17 @@ func (a *agentCLI) run(args ...string) (int, string, string) {
 			if password != "" {
 				return agent.Account{Handle: handle, DID: did, SignIn: agent.SignInPassword, Password: password}, nil
 			}
-			return agent.Account{Handle: handle, DID: did, SignIn: agent.SignInOAuth, SessionID: "s", Callback: "http://127.0.0.1:1/callback", SignedInAt: time.Now()}, nil
+			a.n++
+			return agent.Account{Handle: handle, DID: did, SignIn: agent.SignInOAuth, SessionID: fmt.Sprintf("s%d", a.n), Callback: "http://127.0.0.1:1/callback", SignedInAt: time.Now()}, nil
 		},
 		readSecret: func(string) (string, error) { return "typed-password", nil },
+		revoke: func(_ context.Context, acct agent.Account) error {
+			a.revoked = append(a.revoked, acct.SessionID)
+			return nil
+		},
+	}
+	if a.noTerminal {
+		c.readSecret = nil
 	}
 	code := c.run(context.Background(), args)
 	a.stdin = ""
@@ -248,6 +262,69 @@ func TestExpiredSignIn(t *testing.T) {
 	w.signInErr = errors.New("token refresh failed (HTTP 400): invalid_grant")
 	if code, _, errOut := a.run("recall", "anything"); code != 1 || !strings.Contains(errOut, "run `engram login`") {
 		t.Fatalf("expired sign-in: %d %s", code, errOut)
+	}
+}
+
+// TestJSONFailureIsOneDocument: a failed check prints one JSON document,
+// so programs can parse it.
+func TestJSONFailureIsOneDocument(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	a := w.agent(t)
+	code, out, _ := a.run("init", "--space", w.net.Space, "--handle", "outsider.test", "--json")
+	var r checkResult
+	if err := json.Unmarshal([]byte(out), &r); code != 1 || err != nil || r.OK || len(r.Problems) == 0 {
+		t.Fatalf("init --json as an outsider: %d %v %s", code, err, out)
+	}
+	code, out, _ = a.run("status", "--json")
+	if err := json.Unmarshal([]byte(out), &r); code != 1 || err != nil || r.OK {
+		t.Fatalf("status --json: %d %v %s", code, err, out)
+	}
+}
+
+// TestSigningInAgain: login ends the sign-in it replaces, keeps password
+// sign-in unless told otherwise, and reads a whole password line.
+func TestSigningInAgain(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	a := w.agent(t)
+	a.mustRun("init", "--space", w.net.Space, "--handle", "alice.test")
+	a.mustRun("login")
+	if len(a.revoked) != 1 || a.revoked[0] != "s1" {
+		t.Fatalf("revoked after login: %v", a.revoked)
+	}
+	a.noTerminal = true
+	a.stdin = "correct horse battery\n"
+	if _, _, errOut := a.run("login", "--password"); !strings.Contains(errOut, "password is saved") {
+		t.Fatalf("no notice that the password was saved: %s", errOut)
+	}
+	if len(a.revoked) != 2 || a.revoked[1] != "s2" {
+		t.Fatalf("revoked after password login: %v", a.revoked)
+	}
+	a.stdin = "another one\n"
+	a.mustRun("login") // stays with the password
+	if s, _ := agent.LoadSettings(a.path, nil); s.Account.SignIn != agent.SignInPassword || s.Account.Password != "another one" {
+		t.Fatalf("login after a password sign-in: %+v", s.Account)
+	}
+}
+
+// TestDoubleDash: text after -- is the memory's, even if it looks like a flag.
+func TestDoubleDash(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	a := w.agent(t)
+	a.mustRun("init", "--space", w.net.Space, "--handle", "alice.test")
+	var out agent.RememberOut
+	if err := json.Unmarshal([]byte(a.mustRun("remember", "--json", "--", "--json", "-t", "is", "text")), &out); err != nil {
+		t.Fatal(err)
+	}
+	w.deliver("did:plc:alice")
+	code, text, _ := a.run("get", out.URI)
+	if code != 0 || !strings.Contains(text, "--json -t is text") {
+		t.Fatalf("remembered: %s", text)
+	}
+	if code, _, errOut := a.run("status", "--config"); code != 2 || !strings.Contains(errOut, "needs a path") {
+		t.Fatalf("--config without a path: %d %s", code, errOut)
 	}
 }
 

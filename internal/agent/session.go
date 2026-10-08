@@ -109,6 +109,19 @@ func (s Settings) Session(ctx context.Context, o Options) (*atclient.APIClient, 
 	return nil, s.Check()
 }
 
+// Revoke ends an OAuth sign-in: the server revokes its tokens, and the
+// session is forgotten.
+func Revoke(ctx context.Context, a Account, o Options) error {
+	if a.SignIn != SignInOAuth || a.SessionID == "" {
+		return nil
+	}
+	did, err := syntax.ParseDID(a.DID)
+	if err != nil {
+		return err
+	}
+	return OAuthApp(a.Callback, o).Logout(ctx, did, a.SessionID)
+}
+
 // Provider builds the embedding provider.
 func (s Settings) Provider() (embed.Provider, error) {
 	switch p := s.Embed.Provider; p {

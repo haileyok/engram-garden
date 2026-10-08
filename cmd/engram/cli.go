@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,13 +29,38 @@ type cli struct {
 	open func(context.Context, agent.Settings) (*agent.Agent, error)
 	// signIn signs in to an account: OAuth, or password when password is set.
 	signIn func(ctx context.Context, handle, password string) (agent.Account, error)
-	// readSecret reads a password without echoing it.
+	// readSecret reads a password without echoing it, from a terminal; nil
+	// when stdin isn't one, so the password is read as a line.
 	readSecret func(prompt string) (string, error)
+	// revoke ends an earlier OAuth sign-in after signing in again.
+	revoke func(ctx context.Context, a agent.Account) error
 	// pull fetches an embedding model (`ollama pull`); nil when unavailable.
 	pull func(ctx context.Context, model string) error
 
-	json bool
+	json  bool
+	lines *bufio.Reader
 }
+
+// reader is stdin, buffered once so prompts and stdin text share it.
+func (c *cli) reader() *bufio.Reader {
+	if c.lines == nil {
+		c.lines = bufio.NewReader(c.in)
+	}
+	return c.lines
+}
+
+// readLine reads one line of input, whole.
+func (c *cli) readLine() (string, error) {
+	line, err := c.reader().ReadString('\n')
+	line = strings.TrimRight(line, "\r\n")
+	if err != nil && (line == "" || !errors.Is(err, io.EOF)) {
+		return line, err
+	}
+	return line, nil
+}
+
+// reportedError is a failure the command already reported in its output.
+type reportedError struct{ error }
 
 const usage = `engram: shared memory for agents, on Engram Garden
 
@@ -61,9 +87,17 @@ func (c *cli) run(ctx context.Context, args []string) int {
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; {
+		case a == "--":
+			// Everything after -- is the command's, unread.
+			rest = append(rest, args[i:]...)
+			i = len(args)
 		case a == "--json" || a == "-json":
 			c.json = true
-		case a == "--config" && i+1 < len(args):
+		case a == "--config":
+			if i+1 >= len(args) {
+				fmt.Fprintln(c.err, "engram: --config needs a path")
+				return 2
+			}
 			c.configPath = args[i+1]
 			i++
 		case strings.HasPrefix(a, "--config="):
@@ -90,6 +124,15 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		if errors.As(err, &ue) {
 			fmt.Fprintf(c.err, "engram %s: %v\n", rest[0], err)
 			return 2
+		}
+		var re reportedError
+		if errors.As(err, &re) {
+			// The output already says what's wrong (and with --json, is
+			// the one JSON document).
+			if !c.json {
+				fmt.Fprintf(c.err, "engram %s: %v\n", rest[0], err)
+			}
+			return 1
 		}
 		err = agent.Explain(err)
 		if c.json {
@@ -119,15 +162,16 @@ func parse(fs *flag.FlagSet, args []string) ([]string, error) {
 		if err := fs.Parse(args); err != nil {
 			return nil, usageError{err}
 		}
-		args = fs.Args()
-		if len(args) == 0 {
+		rest := fs.Args()
+		// The flag package stops at, and consumes, "--": the rest is text.
+		if used := len(args) - len(rest); used > 0 && args[used-1] == "--" {
+			return append(pos, rest...), nil
+		}
+		if len(rest) == 0 {
 			return pos, nil
 		}
-		if args[0] == "--" {
-			return append(pos, args[1:]...), nil
-		}
-		pos = append(pos, args[0])
-		args = args[1:]
+		pos = append(pos, rest[0])
+		args = rest[1:]
 	}
 }
 
@@ -201,17 +245,14 @@ func (c *cli) cmdInit(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	s.Account = acct
-	if err := s.Check(); err != nil {
-		return err
-	}
-	if err := s.Save(c.configPath); err != nil {
+	if s, err = c.saveAccount(ctx, s, acct); err != nil {
 		return err
 	}
 	if !c.json {
 		fmt.Fprintf(c.out, "Signed in as %s (%s). Settings saved to %s.\n\nChecking the space…\n", acct.Handle, acct.DID, c.configPath)
 	}
-	st := c.check(ctx, s, *yes)
+	// Offer to pull a missing model, unless the output is for a program.
+	st := c.check(ctx, s, !c.json || *yes, *yes)
 	c.print(st, func(w io.Writer) {
 		st.write(w)
 		if st.OK {
@@ -226,7 +267,7 @@ For MCP clients:
 		}
 	})
 	if !st.OK {
-		return errors.New("set up, but not ready yet: see above")
+		return reportedError{errors.New("set up, but not ready yet: see above")}
 	}
 	return nil
 }
@@ -255,8 +296,7 @@ func (c *cli) cmdLogin(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	s.Account = acct
-	if err := s.Save(c.configPath); err != nil {
+	if _, err := c.saveAccount(ctx, s, acct); err != nil {
 		return err
 	}
 	c.print(map[string]any{"handle": acct.Handle, "did": acct.DID, "signIn": acct.SignIn, "expires": timeOrNil(acct.Expires())}, func(w io.Writer) {
@@ -267,6 +307,28 @@ func (c *cli) cmdLogin(ctx context.Context, args []string) error {
 		fmt.Fprintln(w)
 	})
 	return nil
+}
+
+// saveAccount saves a new sign-in, then ends the one it replaces so its
+// tokens don't linger.
+func (c *cli) saveAccount(ctx context.Context, s agent.Settings, acct agent.Account) (agent.Settings, error) {
+	old := s.Account
+	s.Account = acct
+	if err := s.Check(); err != nil {
+		return s, err
+	}
+	if err := s.Save(c.configPath); err != nil {
+		return s, err
+	}
+	if acct.SignIn == agent.SignInPassword {
+		fmt.Fprintf(c.err, "The account's password is saved in %s (readable only by you).\n", c.configPath)
+	}
+	if old.SignIn == agent.SignInOAuth && old.SessionID != "" && old.SessionID != acct.SessionID && c.revoke != nil {
+		if err := c.revoke(ctx, old); err != nil {
+			fmt.Fprintf(c.err, "(couldn't end the previous sign-in: %v)\n", err)
+		}
+	}
+	return s, nil
 }
 
 func flagSet(fs *flag.FlagSet, name string) bool {
@@ -283,8 +345,15 @@ func (c *cli) doSignIn(ctx context.Context, handle string, usePassword bool) (ag
 	}
 	pw := c.getenv("ENGRAM_PASSWORD")
 	if pw == "" {
+		prompt := fmt.Sprintf("Password for %s: ", handle)
 		var err error
-		if pw, err = c.readSecret(fmt.Sprintf("Password for %s: ", handle)); err != nil {
+		if c.readSecret != nil {
+			pw, err = c.readSecret(prompt)
+		} else {
+			fmt.Fprint(c.err, prompt)
+			pw, err = c.readLine()
+		}
+		if err != nil {
 			return agent.Account{}, err
 		}
 	}
@@ -296,16 +365,14 @@ func (c *cli) doSignIn(ctx context.Context, handle string, usePassword bool) (ag
 
 func (c *cli) ask(prompt string) (string, error) {
 	fmt.Fprint(c.err, prompt)
-	var line string
-	_, err := fmt.Fscanln(c.in, &line)
-	line = strings.TrimSpace(line)
-	if line == "" {
-		if err == nil || errors.Is(err, io.EOF) || err.Error() == "unexpected newline" {
-			return "", errors.New("nothing entered")
-		}
+	line, err := c.readLine()
+	if line = strings.TrimSpace(line); line != "" {
+		return line, nil
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
-	return line, nil
+	return "", errors.New("nothing entered")
 }
 
 // ---- checks ----
@@ -363,7 +430,7 @@ func timeOrNil(t time.Time) any {
 
 // check signs in and checks the space: membership, its model, the local
 // model, and the appview. With pull set it offers to fetch a missing model.
-func (c *cli) check(ctx context.Context, s agent.Settings, yes bool) checkResult {
+func (c *cli) check(ctx context.Context, s agent.Settings, offerPull, yes bool) checkResult {
 	r := checkResult{Account: s.Account.Handle, DID: s.Account.DID, SignIn: s.Account.SignIn, Space: s.Space, Appview: s.AppviewURL, Expires: timeOrNil(s.Account.Expires())}
 	fail := func(format string, args ...any) checkResult {
 		r.Problems = append(r.Problems, fmt.Sprintf(format, args...))
@@ -389,7 +456,7 @@ func (c *cli) check(ctx context.Context, s agent.Settings, yes bool) checkResult
 		// Ollama doesn't have the model at all (rather than another version).
 		var mm *embed.ModelMismatchError
 		missing := errors.As(err, &mm) && mm.Local == "" && s.Embed.Digest == ""
-		if missing && c.pull != nil && (yes || c.confirm(fmt.Sprintf("The space uses %s, which this machine's Ollama doesn't have. Pull it now? [Y/n] ", cfg.Model))) {
+		if missing && offerPull && c.pull != nil && (yes || c.confirm(fmt.Sprintf("The space uses %s, which this machine's Ollama doesn't have. Pull it now? [Y/n] ", cfg.Model))) {
 			if perr := c.pull(ctx, cfg.Model); perr != nil {
 				return fail("pulling %s: %v", cfg.Model, perr)
 			}
@@ -421,8 +488,7 @@ func (c *cli) check(ctx context.Context, s agent.Settings, yes bool) checkResult
 
 func (c *cli) confirm(prompt string) bool {
 	fmt.Fprint(c.err, prompt)
-	var line string
-	_, _ = fmt.Fscanln(c.in, &line)
+	line, _ := c.readLine()
 	line = strings.ToLower(strings.TrimSpace(line))
 	return line == "" || line == "y" || line == "yes"
 }
@@ -438,10 +504,10 @@ func (c *cli) cmdStatus(ctx context.Context, args []string) error {
 	if err := s.Check(); err != nil {
 		return err
 	}
-	r := c.check(ctx, s, false)
+	r := c.check(ctx, s, false, false)
 	c.print(r, r.write)
 	if !r.OK {
-		return errors.New("not ready: see above")
+		return reportedError{errors.New("not ready: see above")}
 	}
 	return nil
 }
@@ -460,7 +526,7 @@ func (c *cli) cmdRemember(ctx context.Context, args []string) error {
 	}
 	text := strings.Join(pos, " ")
 	if text == "" || text == "-" {
-		raw, err := io.ReadAll(io.LimitReader(c.in, 64<<10))
+		raw, err := io.ReadAll(io.LimitReader(c.reader(), 64<<10))
 		if err != nil {
 			return err
 		}
