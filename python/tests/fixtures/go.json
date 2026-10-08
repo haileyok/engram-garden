@@ -1,0 +1,113 @@
+{
+  "privateKeyHex": "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100",
+  "didKey": "did:key:zDnaeagKWt45K6WCE6Dm3pAWvUzt7HgPtvAL1YNpBGX3YJ8eL",
+  "sigs": [
+    {
+      "authorization": "Bearer eyJ.delegation.token",
+      "audience": "",
+      "keyId": "",
+      "headers": {
+        "authorization": "Bearer eyJ.delegation.token",
+        "signature": "atproto-space=:qA3CVxJ5IILk/AJeWsanVMmxjGjtsvZJAsrCzhKl0ZtYjChbXnJbfU604z2si1gcMnfozJhrtvTAWIlVRxOpIw==:",
+        "signature-input": "atproto-space=(\"authorization\");keyid=\"did:key:zDnaeagKWt45K6WCE6Dm3pAWvUzt7HgPtvAL1YNpBGX3YJ8eL\""
+      }
+    },
+    {
+      "authorization": "Atproto-Space eyJ.credential.jwt",
+      "audience": "did:web:api.engram.garden",
+      "keyId": "did:key:zDnaeagKWt45K6WCE6Dm3pAWvUzt7HgPtvAL1YNpBGX3YJ8eL",
+      "headers": {
+        "atproto-space-audience": "did:web:api.engram.garden",
+        "authorization": "Atproto-Space eyJ.credential.jwt",
+        "signature": "atproto-space=:iKbsxeihaU3CefwYSEx7PexoXiIqwwdjqXYgJWmkoa4YEUEB/5zP+7RizNpEx1X8lcCgrgPD2A3Me6p1sEsdkg==:",
+        "signature-input": "atproto-space=(\"authorization\" \"atproto-space-audience\")"
+      }
+    },
+    {
+      "authorization": "Atproto-Space eyJ.credential.jwt",
+      "audience": "did:plc:abcdefghijklmnopqrstuvwx",
+      "keyId": "did:key:zDnaeagKWt45K6WCE6Dm3pAWvUzt7HgPtvAL1YNpBGX3YJ8eL",
+      "headers": {
+        "atproto-space-audience": "did:plc:abcdefghijklmnopqrstuvwx",
+        "authorization": "Atproto-Space eyJ.credential.jwt",
+        "signature": "atproto-space=:Fb0IWWOwFtdojkzH54FDfaj/0eLy/KR7tNfTlEf8BcIaXZcRHL2ftiGUj3qL5gn5hKRN2un5gCaqs+IJtldN4w==:",
+        "signature-input": "atproto-space=(\"authorization\" \"atproto-space-audience\")"
+      }
+    }
+  ],
+  "vectors": [
+    {
+      "bits": [
+        1036831949,
+        3204448256,
+        1078530000,
+        925353388,
+        1199562752,
+        865489640,
+        0,
+        2147483648,
+        3139688202,
+        1051372191
+      ],
+      "f16Hex": "662e00b84842a800ff7b0100000000801f995535",
+      "queryVector": "Zi4AuEhCqAD_ewEAAAAAgB-ZVTU",
+      "record": {
+        "dims": 10,
+        "encoding": "f16le",
+        "model": "nomic-embed-text",
+        "modelDigest": "sha256:0a109f42",
+        "vector": {
+          "$bytes": "Zi4AuEhCqAD/ewEAAAAAgB+ZVTU"
+        }
+      }
+    },
+    {
+      "bits": [
+        1015759766,
+        3117528855,
+        1063675494,
+        956392687,
+        3196059648,
+        1065353216,
+        3212836864,
+        1056964608
+      ],
+      "f16Hex": "5a248e8e333b0b0800b4003c00bc0038",
+      "queryVector": "WiSOjjM7CwgAtAA8ALwAOA",
+      "record": {
+        "dims": 8,
+        "encoding": "f16le",
+        "model": "nomic-embed-text",
+        "modelDigest": "sha256:0a109f42",
+        "vector": {
+          "$bytes": "WiSOjjM7CwgAtAA8ALwAOA"
+        }
+      }
+    }
+  ],
+  "embedText": [
+    {
+      "prefix": "search_document: ",
+      "text": "hello world",
+      "tags": null,
+      "want": "search_document: hello world"
+    },
+    {
+      "prefix": "search_document: ",
+      "text": "hello world",
+      "tags": [
+        "a",
+        "b c"
+      ],
+      "want": "search_document: hello world\n\nTags: a, b c"
+    },
+    {
+      "prefix": "",
+      "text": "ünïcödé text",
+      "tags": [
+        "x"
+      ],
+      "want": "ünïcödé text\n\nTags: x"
+    }
+  ]
+}

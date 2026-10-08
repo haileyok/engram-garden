@@ -1,0 +1,87 @@
+{
+  "didKey": "did:key:zDnaepw8QZDFMftwcPUgSXDfjKFetL5NKFpJEotj3uhMJLrpw",
+  "sigs": [
+    {
+      "authorization": "Bearer eyJ.delegation.token",
+      "audience": "",
+      "keyId": "",
+      "headers": {
+        "authorization": "Bearer eyJ.delegation.token",
+        "signature-input": "atproto-space=(\"authorization\");keyid=\"did:key:zDnaepw8QZDFMftwcPUgSXDfjKFetL5NKFpJEotj3uhMJLrpw\"",
+        "signature": "atproto-space=:8BeBldxPvUUi6B5snyj32O99DVfIkS7796hB+VLnOiJp+Exj/jk58BkJ0vwSf0dghfA05yQV2vmiNiqFXbW1/A==:"
+      }
+    },
+    {
+      "authorization": "Atproto-Space eyJ.credential.jwt",
+      "audience": "did:web:api.engram.garden",
+      "keyId": "did:key:zDnaepw8QZDFMftwcPUgSXDfjKFetL5NKFpJEotj3uhMJLrpw",
+      "headers": {
+        "authorization": "Atproto-Space eyJ.credential.jwt",
+        "signature-input": "atproto-space=(\"authorization\" \"atproto-space-audience\")",
+        "signature": "atproto-space=:fMO2X/EpQvYkMTdstnSe5bHFPOwfvsI5bHbDuTqQAYFYDW+93li/wLGZTrIBpxj2h/HAqXpJ2c8Xf5SnxrKiUA==:",
+        "atproto-space-audience": "did:web:api.engram.garden"
+      }
+    },
+    {
+      "authorization": "Atproto-Space eyJ.credential.jwt",
+      "audience": "did:plc:abcdefghijklmnopqrstuvwx",
+      "keyId": "did:key:zDnaepw8QZDFMftwcPUgSXDfjKFetL5NKFpJEotj3uhMJLrpw",
+      "headers": {
+        "authorization": "Atproto-Space eyJ.credential.jwt",
+        "signature-input": "atproto-space=(\"authorization\" \"atproto-space-audience\")",
+        "signature": "atproto-space=:s8DFHN8tZae8Mghw2XXKeWMqZOKT3jkX7Pa4q2sLHtIIM+ERV93Mstw23+RAvKGXCxpMKIdcVupsyzNgxeoiNQ==:",
+        "atproto-space-audience": "did:plc:abcdefghijklmnopqrstuvwx"
+      }
+    }
+  ],
+  "vectors": [
+    {
+      "bits": [
+        1036831949,
+        3204448256,
+        1078530000,
+        925353388,
+        1199562752,
+        865489640,
+        0,
+        2147483648,
+        3139688202,
+        1051372191
+      ],
+      "f16Hex": "662e00b84842a800ff7b0100000000801f995535",
+      "queryVector": "Zi4AuEhCqAD_ewEAAAAAgB-ZVTU",
+      "record": {
+        "model": "nomic-embed-text",
+        "modelDigest": "sha256:0a109f42",
+        "dims": 10,
+        "encoding": "f16le",
+        "vector": {
+          "$bytes": "Zi4AuEhCqAD/ewEAAAAAgB+ZVTU"
+        }
+      }
+    },
+    {
+      "bits": [
+        1015759766,
+        3117528855,
+        1063675494,
+        956392687,
+        3196059648,
+        1065353216,
+        3212836864,
+        1056964608
+      ],
+      "f16Hex": "5a248e8e333b0b0800b4003c00bc0038",
+      "queryVector": "WiSOjjM7CwgAtAA8ALwAOA",
+      "record": {
+        "model": "nomic-embed-text",
+        "modelDigest": "sha256:0a109f42",
+        "dims": 8,
+        "encoding": "f16le",
+        "vector": {
+          "$bytes": "WiSOjjM7CwgAtAA8ALwAOA"
+        }
+      }
+    }
+  ]
+}

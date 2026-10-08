@@ -19,6 +19,19 @@ jobs:
       # builds and matches the plain-Go version.
       - run: GOEXPERIMENT=simd go test -count=1 ./internal/vec/
 
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make python-lint
+      - run: make python-test
+      # Go verifies what Python signed and encoded (python/tests/fixtures/python.json).
+      - run: go test -count=1 -run 'TestPythonFixtures' ./internal/lex/
+
   web:
     runs-on: ubuntu-latest
     steps:
