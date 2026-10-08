@@ -487,9 +487,11 @@ func (t *Agent) Reembed(ctx context.Context) (int, error) {
 			params["cursor"] = cursor
 		}
 		var page struct {
-			Cursor  string `json:"cursor"`
+			Cursor string `json:"cursor"`
+			// The server's list items name a record by collection and rkey; they
+			// have no uri (getRecord's do).
 			Records []struct {
-				URI   string          `json:"uri"`
+				Rkey  string          `json:"rkey"`
 				Value json.RawMessage `json:"value"`
 			} `json:"records"`
 		}
@@ -533,13 +535,12 @@ func (t *Agent) Reembed(ctx context.Context) (int, error) {
 			if err := t.addEmbeddings(ctx, cfg, out, text, tags); err != nil {
 				return rewritten, err
 			}
-			_, _, rkey, err := t.parseURI(r.URI)
-			if err != nil {
+			if r.Rkey == "" {
 				continue
 			}
-			body := map[string]any{"space": t.Space, "repo": me, "collection": lex.MemoryCollection, "rkey": rkey, "record": out}
+			body := map[string]any{"space": t.Space, "repo": me, "collection": lex.MemoryCollection, "rkey": r.Rkey, "record": out}
 			if err := t.Client.Session.Post(ctx, "com.atproto.space.putRecord", body, nil); err != nil {
-				return rewritten, fmt.Errorf("rewriting %s: %w", r.URI, err)
+				return rewritten, fmt.Errorf("rewriting %s: %w", r.Rkey, err)
 			}
 			rewritten++
 		}

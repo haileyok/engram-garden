@@ -498,6 +498,9 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 			if e != nil {
 				return nil, e
 			}
+			// Cocoon's listRecords items have no uri (getRecord's do): a client
+			// builds it from the space, repo, collection and rkey.
+			delete(v, "uri")
 			records = append(records, v)
 		}
 		res := map[string]any{"records": records}

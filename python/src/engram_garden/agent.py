@@ -423,9 +423,9 @@ class Agent:
                 # Rewrite from the JSON form, which keeps $bytes and $link values intact.
                 out = copy.deepcopy(value)
                 await self._add_embeddings(cfg, out, text, tags)
-                try:
-                    _, _, rkey = self.parse_uri(r["uri"])
-                except EngramError:
+                # List items name a record by its rkey; they have no uri (getRecord's do).
+                rkey = r.get("rkey", "")
+                if not rkey:
                     continue
                 body = {
                     "space": self.space,
@@ -437,7 +437,7 @@ class Agent:
                 try:
                     await self.client.session.post("com.atproto.space.putRecord", body)
                 except XrpcError as e:
-                    raise EngramError(f"rewriting {r['uri']}: {e}") from e
+                    raise EngramError(f"rewriting {rkey}: {e}") from e
                 rewritten += 1
             cursor = page.get("cursor", "")
             if not cursor or not records:
