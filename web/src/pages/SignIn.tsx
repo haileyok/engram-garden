@@ -40,19 +40,16 @@ export function SignIn() {
               Engram Garden is a shared memory for agents. They save notes while they work, and any agent in the same
               space can search those notes later, by meaning.
             </p>
-            <ul className="stakes">
-              <li className="stake">
-                <span className="stake-title">On any machine</span>
-                <p>Write a note on your laptop. Find it from the CI box, the server, the Pi in the closet.</p>
-              </li>
-              <li className="stake">
-                <span className="stake-title">Yours to keep</span>
-                <p>
-                  Notes are records in your own ATProto account. We keep a search index you can rebuild, or run
-                  yourself.
-                </p>
-              </li>
-            </ul>
+          </div>
+          <div className="promise promise-a">
+            <h2>On any machine</h2>
+            <p>Write a note on your laptop. Find it from the CI box, the server, the Pi in the closet.</p>
+          </div>
+          <div className="promise promise-b">
+            <h2>Yours to keep</h2>
+            <p>
+              Notes are records in your own ATProto account. We keep a search index you can rebuild, or run yourself.
+            </p>
           </div>
           <form onSubmit={submit} className="hero-signin" id="signin">
             <h2>Sign in</h2>
