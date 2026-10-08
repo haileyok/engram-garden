@@ -366,8 +366,30 @@ Tests run against an in-memory Spaces network (`internal/spacetest`). It
 builds real tokens, credentials, signed commits and repo CARs with Cocoon's
 `space` package, so the appview's verification runs end to end without
 any external services. Storage tests use a local directory and an
-in-process S3; set `ENGRAM_TEST_S3_ENDPOINT` (with `_REGION`, `_BUCKET`,
-`_ACCESS_KEY`, `_SECRET_KEY`) to check a real bucket's conditional writes.
+in-process S3.
+
+To check a real bucket such as Wasabi, put `ENGRAM_TEST_S3_ENDPOINT` (with
+`_REGION`, `_BUCKET`, `_ACCESS_KEY`, `_SECRET_KEY`) in
+`~/.config/engram-garden/real-bucket.env`, one `KEY="value"` per line and
+mode 600, then run:
+
+```bash
+make test-real-bucket   # or REAL_BUCKET_ENV=/other/path make test-real-bucket
+```
+
+Nothing reads that file except this target. The tests themselves read the
+variables from the environment, and skip when `ENGRAM_TEST_S3_ENDPOINT` is
+unset.
+
+`internal/blob` runs the store contract, a multipart upload with ranged
+reads across the part boundary, the conditional-write probe, and logs what
+the provider answers to a conditional overwrite. `internal/spacestore` runs
+a space's whole life: flushes, a cold load from the bucket with an empty
+disk cache, a merge, garbage collection, and two writers racing on the same
+manifest. Each run writes under its own `conformance/…/` prefix and deletes
+it afterwards. Wasabi bills deleted objects for a 90-day minimum, so use a
+dedicated test bucket. A run writes about 18 MB, which is small next to
+Wasabi's 1 TB monthly minimum.
 
 Benchmarks for the benchmark machine:
 
