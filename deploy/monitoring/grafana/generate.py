@@ -222,8 +222,9 @@ timeseries("CPU", [(f"sum by (job) (rate(process_cpu_seconds_total{{{ALL}}}[$__r
 timeseries("Resident memory", [(f"sum by (job) (process_resident_memory_bytes{{{ALL}}})", "{{job}}")], unit="bytes")
 timeseries("Goroutines", [(f"sum by (job) (go_goroutines{{{ALL}}})", "{{job}}")])
 timeseries("Go heap in use", [(f'sum by (job) (go_memstats_heap_inuse_bytes{{{ALL}}})', "{{job}}")], unit="bytes")
-timeseries("GC pause p99 (estimate)", [
-    (f'max by (job) (go_gc_duration_seconds{{{ALL}, quantile="1"}})', "{{job}} max")], unit="s")
+# Prometheus 3 stores the summary's quantile="1" as "1.0".
+timeseries("Longest recent GC pause", [
+    (f'max by (job) (go_gc_duration_seconds{{{ALL}, quantile=~"1|1.0"}})', "{{job}}")], unit="s")
 timeseries("Open file descriptors", [(f"sum by (job) (process_open_fds{{{ALL}}})", "{{job}}")])
 
 # ---- Logs ----

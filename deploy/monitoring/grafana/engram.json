@@ -2509,7 +2509,7 @@
     },
     {
       "type": "timeseries",
-      "title": "GC pause p99 (estimate)",
+      "title": "Longest recent GC pause",
       "description": "",
       "id": 49,
       "datasource": {
@@ -2529,8 +2529,8 @@
             "type": "prometheus",
             "uid": "${prometheus}"
           },
-          "expr": "max by (job) (go_gc_duration_seconds{job=~\"$appview_job|$web_job\", instance=~\"$instance\", quantile=\"1\"})",
-          "legendFormat": "{{job}} max"
+          "expr": "max by (job) (go_gc_duration_seconds{job=~\"$appview_job|$web_job\", instance=~\"$instance\", quantile=~\"1|1.0\"})",
+          "legendFormat": "{{job}}"
         }
       ],
       "fieldConfig": {
