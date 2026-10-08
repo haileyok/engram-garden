@@ -1,9 +1,11 @@
-// Package mcpserver exposes an agent's view of a memory space as MCP tools.
-// The tools are internal/agent's operations.
+// Package mcpserver exposes an agent's memory spaces as MCP tools. The
+// tools are internal/agent's operations.
 package mcpserver
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -11,52 +13,82 @@ import (
 )
 
 // Version is reported to MCP clients.
-var Version = "0.3.0"
+var Version = "0.4.0"
 
-const instructions = `Engram Garden is a memory space shared by a group of agents. Use recall before starting work that may have been done or discussed before, and remember durable facts, decisions, preferences and lessons other agents (or a future you) would want. Write each memory so it stands on its own: say who/what/why, not "as discussed above". Other agents can read everything you remember, so never store secrets or credentials.`
+const instructions = `Engram Garden memory spaces are shared by groups of agents. Use recall before starting work that may have been done or discussed before, and remember durable facts, decisions, preferences and lessons other agents (or a future you) would want. Write each memory so it stands on its own: say who/what/why, not "as discussed above". Other agents in a space can read everything you remember there, so never store secrets or credentials.`
 
 // The tools' inputs and outputs are the agent's.
 type (
-	RememberIn  = agent.RememberIn
-	RememberOut = agent.RememberOut
-	RecallIn    = agent.RecallIn
-	MemoriesOut = agent.MemoriesOut
-	GetIn       = agent.GetIn
-	GetOut      = agent.GetOut
-	ListIn      = agent.ListIn
-	ForgetIn    = agent.ForgetIn
-	ForgetOut   = agent.ForgetOut
+	RememberIn    = agent.RememberIn
+	RememberOut   = agent.RememberOut
+	RecallIn      = agent.RecallIn
+	MemoriesOut   = agent.MemoriesOut
+	GetIn         = agent.GetIn
+	GetOut        = agent.GetOut
+	ListIn        = agent.ListIn
+	ForgetIn      = agent.ForgetIn
+	ForgetOut     = agent.ForgetOut
+	ListSpacesIn  = agent.ListSpacesIn
+	ListSpacesOut = agent.ListSpacesOut
 )
 
+// serverInstructions adds the spaces to the instructions, so the agent knows
+// them without a call.
+func serverInstructions(s *agent.Spaces) string {
+	var b strings.Builder
+	b.WriteString(instructions)
+	def, _ := s.Settings.Default()
+	if len(s.Settings.Spaces) > 1 {
+		b.WriteString("\n\nYou use these spaces (pass a name as the space argument; list_spaces describes them):")
+		for _, e := range s.Settings.Spaces {
+			mark := ""
+			if e.URI == def.URI {
+				mark = " (default for remember and list_memories)"
+			}
+			fmt.Fprintf(&b, "\n- %s%s: %s", e.Name, mark, e.URI)
+		}
+		b.WriteString("\nrecall searches all of them unless you name one.")
+	} else if len(s.Settings.Spaces) == 1 {
+		fmt.Fprintf(&b, "\n\nYou use one space, %q (%s).", def.Name, def.URI)
+	}
+	return b.String()
+}
+
 // NewServer builds an MCP server with the agent's memory tools.
-func NewServer(a *agent.Agent) *mcp.Server {
-	s := mcp.NewServer(&mcp.Implementation{Name: "engram-garden", Title: "Engram Garden", Version: Version}, &mcp.ServerOptions{Instructions: instructions})
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        "remember",
-		Description: "Store a memory in the shared memory space. It becomes searchable by every agent in the space within a few seconds.",
-		Annotations: &mcp.ToolAnnotations{IdempotentHint: false},
-	}, handler(a.Remember))
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        "recall",
-		Description: "Semantic search over every agent's memories in the shared space. Returns the closest matches first, each with a similarity from 0 to 1000.",
+func NewServer(s *agent.Spaces) *mcp.Server {
+	srv := mcp.NewServer(&mcp.Implementation{Name: "engram-garden", Title: "Engram Garden", Version: Version},
+		&mcp.ServerOptions{Instructions: serverInstructions(s)})
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_spaces",
+		Description: "List the memory spaces you use, which one is the default, and the embedding model each requires (memories and queries are embedded with exactly that model). Also lists other spaces your account belongs to that aren't set up.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-	}, handler(a.Recall))
-	mcp.AddTool(s, &mcp.Tool{
+	}, handler(s.ListSpaces))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "remember",
+		Description: "Store a memory in a memory space (the default one unless you pass space). It becomes searchable by every agent in that space within a few seconds.",
+		Annotations: &mcp.ToolAnnotations{IdempotentHint: false},
+	}, handler(s.Remember))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "recall",
+		Description: "Semantic search over every agent's memories, in all your spaces unless you pass space. Returns the closest matches first, each with its space and a similarity from 0 to 1000.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, handler(s.Recall))
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_memory",
 		Description: "Fetch one memory by its URI.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-	}, handler(a.Get))
-	mcp.AddTool(s, &mcp.Tool{
+	}, handler(s.Get))
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_memories",
-		Description: "List memories newest first, optionally filtered by author or tags. Use the returned cursor for the next page.",
+		Description: "List a space's memories newest first (the default space unless you pass space), optionally filtered by author or tags. Use the returned cursor for the next page.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-	}, handler(a.List))
-	mcp.AddTool(s, &mcp.Tool{
+	}, handler(s.List))
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "forget",
 		Description: "Delete one of your own memories by URI. You can't delete memories other agents wrote.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), IdempotentHint: true},
-	}, handler(a.Forget))
-	return s
+	}, handler(s.Forget))
+	return srv
 }
 
 // handler adapts an agent operation to an MCP tool handler.

@@ -34,6 +34,7 @@ describe("space URIs", () => {
     const s = agentSetup(space, "https://api.engram.garden");
     expect(s.init).toBe(`engram init --space ${space}`);
     expect(s.initHeadless).toBe(`engram init --space ${space} --password`);
+    expect(s.add).toBe(`engram spaces add ${space}`);
     expect(JSON.parse(s.mcp)).toEqual({ mcpServers: { engram: { command: "engram-mcp" } } });
     expect(agentSetup(space, "https://appview.example").init).toBe(`engram init --space ${space} --appview https://appview.example`);
     expect(originOf("https://appview.example/oauth/grant")).toBe("https://appview.example");

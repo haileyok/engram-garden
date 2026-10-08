@@ -40,7 +40,14 @@ type world struct {
 
 func newWorld(t *testing.T) *world {
 	t.Helper()
-	n := spacetest.New(t)
+	return newSpaceWorld(t, "authority", "memory")
+}
+
+// newSpaceWorld is a world for a space with the given authority and key.
+// Agents in several spaces use one world per space.
+func newSpaceWorld(t *testing.T, authority, skey string) *world {
+	t.Helper()
+	n := spacetest.NewSpace(t, authority, skey)
 	indexerAcct := n.NewAccount("did:plc:indexer")
 	for _, did := range []string{"did:plc:alice", "did:plc:bob"} {
 		n.AddMember(n.NewAccount(did).DID)
@@ -94,6 +101,17 @@ type agentCLI struct {
 	// when the browser is on another machine; pasted records them.
 	pastes bool
 	pasted []string
+	// others are more spaces' worlds, by space URI.
+	others map[string]*world
+}
+
+// join puts the agent in another world's space too (it still has to add the
+// space to its settings).
+func (a *agentCLI) join(w *world) {
+	if a.others == nil {
+		a.others = map[string]*world{}
+	}
+	a.others[w.net.Space] = w
 }
 
 func (w *world) agent(t *testing.T) *agentCLI {
@@ -109,7 +127,7 @@ func (a *agentCLI) run(args ...string) (int, string, string) {
 		in: strings.NewReader(a.stdin), out: &out, err: &errOut,
 		getenv:     func(k string) string { return a.env[k] },
 		configPath: a.path,
-		open: func(ctx context.Context, s agent.Settings) (*agent.Agent, error) {
+		open: func(ctx context.Context, s agent.Settings) (*agent.Spaces, error) {
 			if a.w.signInErr != nil {
 				return nil, a.w.signInErr
 			}
@@ -117,12 +135,22 @@ func (a *agentCLI) run(args ...string) (int, string, string) {
 			if err != nil {
 				return nil, err
 			}
-			acct := a.w.net.AccountByDID(s.Account.DID)
-			sc, err := spaceclient.New(a.w.net.Session(acct), a.w.net.Dir, nil)
-			if err != nil {
-				return nil, err
+			client := func(w *world) *spaceclient.Client {
+				sc, err := spaceclient.New(w.net.Session(w.net.AccountByDID(s.Account.DID)), w.net.Dir, nil)
+				if err != nil {
+					a.t.Fatal(err)
+				}
+				return sc
 			}
-			return &agent.Agent{Client: sc, Space: s.Space, AppviewURL: s.AppviewURL, AppviewDID: s.AppviewDID, Provider: p}, nil
+			sp := &agent.Spaces{Client: client(a.w), AppviewURL: s.AppviewURL, AppviewDID: s.AppviewDID, Provider: p, Settings: s}
+			// Each space is on its own fake network, with its own appview.
+			sp.NewAgent = func(e agent.SpaceEntry) *agent.Agent {
+				if w := a.others[e.URI]; w != nil {
+					return &agent.Agent{Client: client(w), Space: e.URI, AppviewURL: w.url, AppviewDID: serviceDID, Provider: p}
+				}
+				return &agent.Agent{Client: sp.Client, Space: e.URI, AppviewURL: s.AppviewURL, AppviewDID: s.AppviewDID, Provider: p}
+			}
+			return sp, nil
 		},
 		signIn: func(_ context.Context, handle, password string, lines <-chan string) (agent.Account, error) {
 			did := "did:plc:" + strings.TrimSuffix(handle, ".test")
@@ -222,11 +250,11 @@ func TestInitSavesSettings(t *testing.T) {
 	if err := json.Unmarshal([]byte(a.mustRun("init", "--json")), &r); err != nil {
 		t.Fatal(err)
 	}
-	if !r.OK || r.DID != "did:plc:alice" || r.Memories == nil || r.Expires == nil {
+	if !r.OK || r.DID != "did:plc:alice" || len(r.Spaces) != 1 || r.Spaces[0].Memories == nil || !r.Spaces[0].Default || r.Expires == nil {
 		t.Fatalf("init: %+v", r)
 	}
 	s, err := agent.LoadSettings(a.path, nil)
-	if err != nil || s.Space != w.net.Space || s.Account.SignIn != agent.SignInOAuth || s.Account.Password != "" {
+	if def, _ := s.Default(); err != nil || def.URI != w.net.Space || s.Account.SignIn != agent.SignInOAuth || s.Account.Password != "" {
 		t.Fatalf("saved settings: %+v %v", s, err)
 	}
 
@@ -319,7 +347,8 @@ func TestJSONFailureIsOneDocument(t *testing.T) {
 	a := w.agent(t)
 	code, out, _ := a.run("init", "--space", w.net.Space, "--handle", "outsider.test", "--json")
 	var r checkResult
-	if err := json.Unmarshal([]byte(out), &r); code != 1 || err != nil || r.OK || len(r.Problems) == 0 {
+	// The problem is the space's: the account isn't a member.
+	if err := json.Unmarshal([]byte(out), &r); code != 1 || err != nil || r.OK || len(r.Spaces) != 1 || len(r.Spaces[0].Problems) == 0 {
 		t.Fatalf("init --json as an outsider: %d %v %s", code, err, out)
 	}
 	code, out, _ = a.run("status", "--json")
@@ -403,7 +432,84 @@ func TestEnvOverridesSettings(t *testing.T) {
 	// The fake open finds the account by DID, which a password settings
 	// file would have from signing in; ENGRAM_IDENTIFIER alone doesn't.
 	s, err := agent.LoadSettings(a.path, func(k string) string { return a.env[k] })
-	if err != nil || s.Account.SignIn != agent.SignInPassword || s.Space != w.net.Space {
+	if def, _ := s.Default(); err != nil || s.Account.SignIn != agent.SignInPassword || def.URI != w.net.Space {
 		t.Fatalf("env settings: %+v %v", s, err)
+	}
+}
+
+// TestSeveralSpaces: an agent adds a second space, sees both with their
+// models, writes to either, recalls from both or one, and switches the
+// default.
+func TestSeveralSpaces(t *testing.T) {
+	t.Parallel()
+	team := newWorld(t)
+	notes := newSpaceWorld(t, "noteskeeper", "notes")
+	a := team.agent(t)
+	a.join(notes)
+	a.mustRun("init", "--space", team.net.Space, "--handle", "alice.test")
+
+	// A new space by URI, named after its key; the default stays.
+	if out := a.mustRun("spaces", "add", notes.net.Space); !strings.Contains(out, `"notes"`) || !strings.Contains(out, "Default space: memory") {
+		t.Fatalf("spaces add: %s", out)
+	}
+	var listed agent.ListSpacesOut
+	if err := json.Unmarshal([]byte(a.mustRun("spaces", "--json")), &listed); err != nil {
+		t.Fatal(err)
+	}
+	set := map[string]agent.SpaceInfo{}
+	for _, s := range listed.Spaces {
+		if s.SetUp {
+			set[s.Name] = s
+		}
+	}
+	if len(set) != 2 || !set["memory"].Default || set["notes"].Model == nil || set["notes"].Model.Dims != model.Dims || set["notes"].LocalModel != "ready" {
+		t.Fatalf("spaces: %+v", listed)
+	}
+	if out := a.mustRun("spaces"); !strings.Contains(out, "* memory") || !strings.Contains(out, "model: hashing-256, 256 dimensions") {
+		t.Fatalf("spaces, for people: %s", out)
+	}
+
+	a.mustRun("remember", "the", "friday", "deploy", "needs", "two", "approvals")
+	team.deliver("did:plc:alice")
+	a.mustRun("remember", "--space", "notes", "my", "friday", "deploy", "checklist")
+	notes.deliver("did:plc:alice")
+
+	var found agent.MemoriesOut
+	if err := json.Unmarshal([]byte(a.mustRun("recall", "friday deploy", "--json")), &found); err != nil {
+		t.Fatal(err)
+	}
+	spaces := map[string]bool{}
+	for _, m := range found.Memories {
+		spaces[m.Space] = true
+	}
+	if len(found.Memories) != 2 || !spaces["memory"] || !spaces["notes"] {
+		t.Fatalf("recall across spaces: %+v", found)
+	}
+	if out := a.mustRun("recall", "friday deploy", "--space", "notes"); !strings.Contains(out, "checklist") || strings.Contains(out, "approvals") || !strings.Contains(out, "in notes") {
+		t.Fatalf("recall in one space: %s", out)
+	}
+
+	// The default space decides where list and remember go.
+	a.mustRun("use", "notes")
+	if out := a.mustRun("list"); !strings.Contains(out, "checklist") || strings.Contains(out, "approvals") {
+		t.Fatalf("list after use: %s", out)
+	}
+	if code, _, errOut := a.run("use", "nowhere"); code != 2 || !strings.Contains(errOut, "nowhere") {
+		t.Fatalf("use an unknown name: %d %s", code, errOut)
+	}
+
+	// status checks each space.
+	var st checkResult
+	if err := json.Unmarshal([]byte(a.mustRun("status", "--json")), &st); err != nil {
+		t.Fatal(err)
+	}
+	if !st.OK || len(st.Spaces) != 2 {
+		t.Fatalf("status: %+v", st)
+	}
+
+	a.mustRun("spaces", "remove", "notes")
+	s, err := agent.LoadSettings(a.path, nil)
+	if def, _ := s.Default(); err != nil || len(s.Spaces) != 1 || def.Name != "memory" {
+		t.Fatalf("after removing: %+v %v", s, err)
 	}
 }

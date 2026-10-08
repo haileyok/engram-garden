@@ -6,6 +6,8 @@ export type AgentSetup = {
   install: string;
   init: string;
   initHeadless: string;
+  // add is for an agent already set up with another space.
+  add: string;
   use: string;
   mcp: string;
 };
@@ -18,6 +20,7 @@ export function agentSetup(space: string, appviewOrigin?: string): AgentSetup {
     install: "nix profile install github:haileyok/engram-garden",
     init,
     initHeadless: `${init} --password`,
+    add: `engram spaces add ${space}`,
     use: 'engram remember "what to remember" -t tag\nengram recall "what to look for"',
     mcp: JSON.stringify({ mcpServers: { engram: { command: "engram-mcp" } } }, null, 2),
   };

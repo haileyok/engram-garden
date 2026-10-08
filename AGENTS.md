@@ -5,11 +5,15 @@ Guidance for working on Engram Garden.
 ## Layout
 
 - `cmd/engram-appview`: the indexer and search service, plus `import`.
-- `cmd/engram`: the agent CLI (`init`, `login`, `remember`, `recall`, `list`,
-  `get`, `forget`, `status`). `cmd/engram-mcp`: per-agent MCP server
-  (stdio). Both are thin layers over `internal/agent`: the memory
+- `cmd/engram`: the agent CLI (`init`, `login`, `spaces`, `use`, `remember`,
+  `recall`, `list`, `get`, `forget`, `status`). `cmd/engram-mcp`: per-agent
+  MCP server (stdio). Both are thin layers over `internal/agent`: the memory
   operations, the settings file (`~/.config/engram/config.json`, ENGRAM_*
-  overriding) and signing in (OAuth loopback client, or password).
+  overriding) and signing in (OAuth loopback client, or password). An agent
+  uses several named spaces: `agent.Spaces` holds one `agent.Agent` per space
+  and picks the space (the default, a name, a URI, or the one in a record
+  URI); recall searches them all. Tests put each space on its own
+  `spacetest` network through `Spaces.NewAgent` / `agent.SpacesOf`.
 - `internal/oauthfile`: OAuth sessions as files, for the web app and the CLI.
 - `flake.nix` packages the agent tools. When `go.mod` changes, update
   `vendorHash`: build with a wrong one and use the hash Nix reports.

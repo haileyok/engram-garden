@@ -74,7 +74,12 @@ type Net struct {
 }
 
 // New starts a network whose authority governs one space.
-func New(t testing.TB) *Net {
+func New(t testing.TB) *Net { return NewSpace(t, "authority", "memory") }
+
+// NewSpace is New with the authority's DID (did:plc:<authority>) and the
+// space's key chosen, so networks standing in for different spaces have
+// different space URIs.
+func NewSpace(t testing.TB, authority, skey string) *Net {
 	t.Helper()
 	n := &Net{
 		T:             t,
@@ -88,8 +93,8 @@ func New(t testing.TB) *Net {
 	n.Dir = identity.NewMockDirectory()
 	n.Server = httptest.NewServer(http.HandlerFunc(n.serve))
 	t.Cleanup(n.Server.Close)
-	n.Authority = n.NewAccount("did:plc:authority")
-	n.Space = "at://" + n.Authority.DID + "/space/garden.engram.space/memory"
+	n.Authority = n.NewAccount("did:plc:" + authority)
+	n.Space = "at://" + n.Authority.DID + "/space/garden.engram.space/" + skey
 	return n
 }
 

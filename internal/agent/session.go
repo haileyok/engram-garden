@@ -166,9 +166,10 @@ func (s Settings) Provider() (embed.Provider, error) {
 	}
 }
 
-// Open signs in and returns the agent.
-func Open(ctx context.Context, s Settings, o Options) (*Agent, error) {
-	if err := s.Check(); err != nil {
+// Open signs in and returns the agent's spaces. It needs no space set up:
+// ListSpaces then lists the ones the account belongs to.
+func Open(ctx context.Context, s Settings, o Options) (*Spaces, error) {
+	if err := s.CheckAccount(); err != nil {
 		return nil, err
 	}
 	p, err := s.Provider()
@@ -183,7 +184,7 @@ func Open(ctx context.Context, s Settings, o Options) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Agent{Client: c, Space: s.Space, AppviewURL: s.AppviewURL, AppviewDID: s.AppviewDID, Provider: p, Log: o.Log}, nil
+	return &Spaces{Client: c, AppviewURL: s.AppviewURL, AppviewDID: s.AppviewDID, Provider: p, Log: o.Log, Settings: s}, nil
 }
 
 // ErrSignInExpired means the account's server no longer accepts the

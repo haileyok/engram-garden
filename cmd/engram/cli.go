@@ -26,7 +26,7 @@ type cli struct {
 	// configPath is the settings file.
 	configPath string
 	// open signs in with settings.
-	open func(context.Context, agent.Settings) (*agent.Agent, error)
+	open func(context.Context, agent.Settings) (*agent.Spaces, error)
 	// signIn signs in to an account: OAuth, or password when password is set.
 	// lines is input, which an OAuth sign-in watches for an address pasted
 	// from the browser.
@@ -105,13 +105,19 @@ Set up once:
   engram init --space <space URI>     sign in as the agent's account and check everything works
   engram login                        sign in again (OAuth sign-ins last two weeks)
 
-Use:
+Spaces:
+  engram spaces                       the spaces you use, each one's embedding model, and others you belong to
+  engram use <name|URI>               make a space the default (a new URI is added first)
+  engram spaces add <URI> [--name n]  use another space
+  engram spaces remove <name>         stop using a space
+
+Use (--space <name|URI> picks a space; otherwise the default):
   engram remember <text> [-t tag]... [--source s]   store a memory (text from stdin if omitted)
-  engram recall <query> [-n 10] [-t tag]...          search every agent's memories by meaning
+  engram recall <query> [-n 10] [-t tag]...          search by meaning, in every space unless --space
   engram list [-n 25] [--author did] [-t tag]...     newest memories first
   engram get <uri>                                   one memory
   engram forget <uri>                                delete one of your own memories
-  engram status                                      account, space, model and sign-in
+  engram status                                      account, spaces, models and sign-in
 
 Add --json to any command for machine-readable output. MCP clients can run
 engram-mcp, which uses the same settings.
@@ -150,6 +156,7 @@ func (c *cli) run(ctx context.Context, args []string) int {
 	cmds := map[string]func(context.Context, []string) error{
 		"init": c.cmdInit, "login": c.cmdLogin, "remember": c.cmdRemember, "recall": c.cmdRecall,
 		"list": c.cmdList, "get": c.cmdGet, "forget": c.cmdForget, "status": c.cmdStatus,
+		"spaces": c.cmdSpaces, "use": c.cmdUse,
 	}
 	cmd, ok := cmds[rest[0]]
 	if !ok {
@@ -216,7 +223,13 @@ func (c *cli) settings() (agent.Settings, error) {
 	return agent.LoadSettings(c.configPath, c.getenv)
 }
 
-func (c *cli) agent(ctx context.Context) (*agent.Agent, agent.Settings, error) {
+// fileSettings reads only the settings file, for commands that change and
+// save it: ENGRAM_* variables apply to a run, not to the file.
+func (c *cli) fileSettings() (agent.Settings, error) {
+	return agent.LoadSettings(c.configPath, nil)
+}
+
+func (c *cli) agent(ctx context.Context) (*agent.Spaces, agent.Settings, error) {
 	s, err := c.settings()
 	if err != nil {
 		return nil, s, err
@@ -252,12 +265,9 @@ func (c *cli) cmdInit(ctx context.Context, args []string) error {
 	if _, err := parse(fs, args); err != nil {
 		return err
 	}
-	s, err := c.settings()
+	s, err := c.fileSettings()
 	if err != nil {
 		return err
-	}
-	if *spaceURI != "" {
-		s.Space = *spaceURI
 	}
 	if *appview != "" {
 		s.SetAppview(*appview)
@@ -265,10 +275,19 @@ func (c *cli) cmdInit(ctx context.Context, args []string) error {
 	if *embedURL != "" {
 		s.Embed.URL = *embedURL
 	}
-	if s.Space == "" {
-		if s.Space, err = c.ask("Memory space URI (from the space's page in the web app): "); err != nil {
+	if *spaceURI == "" && len(s.Spaces) == 0 {
+		if *spaceURI, err = c.ask("Memory space URI (from the space's page in the web app): "); err != nil {
 			return err
 		}
+	}
+	// The space set up here becomes the default; others stay.
+	checkSpace := ""
+	if *spaceURI != "" {
+		e, err := s.UseSpace(*spaceURI)
+		if err != nil {
+			return usageError{err}
+		}
+		checkSpace = e.Name
 	}
 	if *handle == "" {
 		*handle = s.Account.Handle
@@ -282,14 +301,18 @@ func (c *cli) cmdInit(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if s, err = c.saveAccount(ctx, s, acct); err != nil {
+	if _, err = c.saveAccount(ctx, s, acct); err != nil {
+		return err
+	}
+	// Check with ENGRAM_* variables applied, as the commands will run.
+	if s, err = c.settings(); err != nil {
 		return err
 	}
 	if !c.json {
 		fmt.Fprintf(c.out, "Signed in as %s (%s). Settings saved to %s.\n\nChecking the space…\n", acct.Handle, acct.DID, c.configPath)
 	}
 	// Offer to pull a missing model, unless the output is for a program.
-	st := c.check(ctx, s, !c.json || *yes, *yes)
+	st := c.check(ctx, s, checkSpace, !c.json || *yes, *yes)
 	c.print(st, func(w io.Writer) {
 		st.write(w)
 		if st.OK {
@@ -300,6 +323,8 @@ Ready. Try:
 
 For MCP clients:
   {"mcpServers": {"engram": {"command": "engram-mcp"}}}
+
+To use another space too: engram spaces add <space URI>
 `)
 		}
 	})
@@ -316,7 +341,7 @@ func (c *cli) cmdLogin(ctx context.Context, args []string) error {
 	if _, err := parse(fs, args); err != nil {
 		return err
 	}
-	s, err := c.settings()
+	s, err := c.fileSettings()
 	if err != nil {
 		return err
 	}
@@ -351,7 +376,7 @@ func (c *cli) cmdLogin(ctx context.Context, args []string) error {
 func (c *cli) saveAccount(ctx context.Context, s agent.Settings, acct agent.Account) (agent.Settings, error) {
 	old := s.Account
 	s.Account = acct
-	if err := s.Check(); err != nil {
+	if err := s.CheckAccount(); err != nil {
 		return s, err
 	}
 	if err := s.Save(c.configPath); err != nil {
@@ -415,19 +440,27 @@ func (c *cli) ask(prompt string) (string, error) {
 // ---- checks ----
 
 type checkResult struct {
-	OK       bool     `json:"ok"`
-	Account  string   `json:"account"`
-	DID      string   `json:"did,omitempty"`
-	SignIn   string   `json:"signIn,omitempty"`
-	Expires  any      `json:"signInExpires,omitempty"`
-	Space    string   `json:"space"`
-	Appview  string   `json:"appview"`
+	OK      bool         `json:"ok"`
+	Account string       `json:"account"`
+	DID     string       `json:"did,omitempty"`
+	SignIn  string       `json:"signIn,omitempty"`
+	Expires any          `json:"signInExpires,omitempty"`
+	Appview string       `json:"appview"`
+	Spaces  []spaceCheck `json:"spaces"`
+	// Problems are the account's; each space has its own.
+	Problems []string `json:"problems,omitempty"`
+	// Warnings need attention soon but don't stop anything working.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+type spaceCheck struct {
+	Name     string   `json:"name"`
+	URI      string   `json:"uri"`
+	Default  bool     `json:"default,omitempty"`
 	Model    string   `json:"model,omitempty"`
 	Memories *int     `json:"memories,omitempty"`
 	Indexing string   `json:"indexing,omitempty"`
 	Problems []string `json:"problems,omitempty"`
-	// Warnings need attention soon but don't stop anything working.
-	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (r checkResult) write(w io.Writer) {
@@ -437,18 +470,28 @@ func (r checkResult) write(w io.Writer) {
 	} else if r.SignIn != "" {
 		fmt.Fprintf(w, "Sign-in:  %s\n", r.SignIn)
 	}
-	fmt.Fprintf(w, "Space:    %s\nAppview:  %s\n", r.Space, r.Appview)
-	if r.Model != "" {
-		fmt.Fprintf(w, "Model:    %s\n", r.Model)
-	}
-	if r.Memories != nil {
-		fmt.Fprintf(w, "Memories: %d\n", *r.Memories)
-	}
-	if r.Indexing != "" {
-		fmt.Fprintf(w, "Indexing: %s\n", r.Indexing)
-	}
+	fmt.Fprintf(w, "Appview:  %s\n", r.Appview)
 	for _, p := range r.Problems {
 		fmt.Fprintf(w, "\n✗ %s\n", p)
+	}
+	for _, sp := range r.Spaces {
+		def := ""
+		if sp.Default {
+			def = " (default)"
+		}
+		fmt.Fprintf(w, "\nSpace:    %s%s\n          %s\n", sp.Name, def, sp.URI)
+		if sp.Model != "" {
+			fmt.Fprintf(w, "Model:    %s\n", sp.Model)
+		}
+		if sp.Memories != nil {
+			fmt.Fprintf(w, "Memories: %d\n", *sp.Memories)
+		}
+		if sp.Indexing != "" {
+			fmt.Fprintf(w, "Indexing: %s\n", sp.Indexing)
+		}
+		for _, p := range sp.Problems {
+			fmt.Fprintf(w, "✗ %s\n", p)
+		}
 	}
 	for _, p := range r.Warnings {
 		fmt.Fprintf(w, "\n! %s\n", p)
@@ -465,26 +508,49 @@ func timeOrNil(t time.Time) any {
 	return t.Format(time.RFC3339)
 }
 
-// check signs in and checks the space: membership, its model, the local
-// model, and the appview. With pull set it offers to fetch a missing model.
-func (c *cli) check(ctx context.Context, s agent.Settings, offerPull, yes bool) checkResult {
-	r := checkResult{Account: s.Account.Handle, DID: s.Account.DID, SignIn: s.Account.SignIn, Space: s.Space, Appview: s.AppviewURL, Expires: timeOrNil(s.Account.Expires())}
-	fail := func(format string, args ...any) checkResult {
-		r.Problems = append(r.Problems, fmt.Sprintf(format, args...))
-		return r
-	}
+// check signs in and checks each space (or only the one named): membership,
+// its model, the local model, and the appview. With offerPull set it offers
+// to fetch a missing model.
+func (c *cli) check(ctx context.Context, s agent.Settings, only string, offerPull, yes bool) checkResult {
+	r := checkResult{Account: s.Account.Handle, DID: s.Account.DID, SignIn: s.Account.SignIn, Appview: s.AppviewURL,
+		Expires: timeOrNil(s.Account.Expires()), Spaces: []spaceCheck{}}
 	if exp := s.Account.Expires(); !exp.IsZero() && time.Until(exp) < 3*24*time.Hour {
 		r.Warnings = append(r.Warnings, "the sign-in ends soon: run `engram login` to renew it")
 	}
 	a, err := c.open(ctx, s)
 	if err != nil {
-		return fail("signing in: %v", agent.Explain(err))
+		r.Problems = append(r.Problems, fmt.Sprintf("signing in: %v", agent.Explain(err)))
+		return r
 	}
 	r.DID = a.Client.DID().String()
-	if _, err := a.Client.Credential(ctx, s.Space); err != nil {
-		return fail("this account can't read the space: %v\n  The space's authority needs to add %s as a member who can write (under Manage in the web app).", err, r.DID)
+	def, _ := s.Default()
+	r.OK = true
+	for _, e := range s.Spaces {
+		if only != "" && e.Name != only {
+			continue
+		}
+		sc := c.checkSpace(ctx, a, s, e, offerPull, yes)
+		sc.Default = e.URI == def.URI
+		r.OK = r.OK && len(sc.Problems) == 0
+		r.Spaces = append(r.Spaces, sc)
 	}
-	cfg, err := a.Config(ctx, true)
+	return r
+}
+
+func (c *cli) checkSpace(ctx context.Context, a *agent.Spaces, s agent.Settings, e agent.SpaceEntry, offerPull, yes bool) spaceCheck {
+	r := spaceCheck{Name: e.Name, URI: e.URI}
+	fail := func(format string, args ...any) spaceCheck {
+		r.Problems = append(r.Problems, fmt.Sprintf(format, args...))
+		return r
+	}
+	sp, _, err := a.Agent(e.URI)
+	if err != nil {
+		return fail("%v", err)
+	}
+	if _, err := sp.Client.Credential(ctx, e.URI); err != nil {
+		return fail("this account can't read the space: %v\n  The space's authority needs to add %s as a member who can write (under Manage in the web app).", err, sp.Client.DID())
+	}
+	cfg, err := sp.Config(ctx, true)
 	if err != nil {
 		return fail("%v", err)
 	}
@@ -509,7 +575,7 @@ func (c *cli) check(ctx context.Context, s agent.Settings, offerPull, yes bool) 
 			State string `json:"state"`
 		} `json:"access"`
 	}
-	if err := a.Client.Query(ctx, s.AppviewURL, s.Space, s.AppviewDID, "garden.engram.getSpaceStatus", url.Values{"space": {s.Space}}, &st); err != nil {
+	if err := sp.Client.Query(ctx, sp.AppviewURL, e.URI, sp.AppviewDID, "garden.engram.getSpaceStatus", url.Values{"space": {e.URI}}, &st); err != nil {
 		return fail("the appview at %s can't search the space yet: %v\n  The space's authority needs to let the appview index it (in the web app).", s.AppviewURL, err)
 	}
 	r.Memories = &st.Memories
@@ -519,7 +585,6 @@ func (c *cli) check(ctx context.Context, s agent.Settings, offerPull, yes bool) 
 			r.Problems = append(r.Problems, "the appview isn't allowed to read the space ("+st.Access.State+"), so new memories won't be searchable: the space's authority can let it index the space in the web app")
 		}
 	}
-	r.OK = len(r.Problems) == 0
 	return r
 }
 
@@ -541,7 +606,7 @@ func (c *cli) cmdStatus(ctx context.Context, args []string) error {
 	if err := s.Check(); err != nil {
 		return err
 	}
-	r := c.check(ctx, s, false, false)
+	r := c.check(ctx, s, "", false, false)
 	c.print(r, r.write)
 	if !r.OK {
 		return reportedError{errors.New("not ready: see above")}
@@ -557,6 +622,7 @@ func (c *cli) cmdRemember(ctx context.Context, args []string) error {
 	fs.Var(&tags, "t", "a tag (repeatable)")
 	fs.Var(&tags, "tag", "a tag (repeatable)")
 	source := fs.String("source", "", "where this came from: a URL, file, PR or task")
+	sp := fs.String("space", "", "the space to store it in, by name or URI (default: the default space)")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -576,7 +642,7 @@ func (c *cli) cmdRemember(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	out, err := a.Remember(ctx, agent.RememberIn{Text: text, Tags: tags, Source: *source})
+	out, err := a.Remember(ctx, agent.RememberIn{Text: text, Tags: tags, Source: *source, Space: *sp})
 	if err != nil {
 		return err
 	}
@@ -592,6 +658,7 @@ func (c *cli) cmdRecall(ctx context.Context, args []string) error {
 	n := fs.Int("n", 10, "how many results (1-50)")
 	author := fs.String("author", "", "only memories by this agent DID")
 	since := fs.String("since", "", "only memories created at or after this RFC 3339 time")
+	sp := fs.String("space", agent.AllSpaces, "search only this space, by name or URI (default: every space)")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -604,7 +671,7 @@ func (c *cli) cmdRecall(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	out, err := a.Recall(ctx, agent.RecallIn{Query: q, Limit: *n, Author: *author, Tags: tags, Since: *since})
+	out, err := a.Recall(ctx, agent.RecallIn{Query: q, Limit: *n, Author: *author, Tags: tags, Since: *since, Space: *sp})
 	if err != nil {
 		return err
 	}
@@ -621,6 +688,7 @@ func (c *cli) cmdList(ctx context.Context, args []string) error {
 	author := fs.String("author", "", "only memories by this agent DID")
 	mine := fs.Bool("mine", false, "only this agent's memories")
 	cursor := fs.String("cursor", "", "continue from a previous page")
+	sp := fs.String("space", "", "the space to list, by name or URI (default: the default space)")
 	if _, err := parse(fs, args); err != nil {
 		return err
 	}
@@ -631,14 +699,18 @@ func (c *cli) cmdList(ctx context.Context, args []string) error {
 	if *mine {
 		*author = a.Client.DID().String()
 	}
-	out, err := a.List(ctx, agent.ListIn{Limit: *n, Cursor: *cursor, Author: *author, Tags: tags})
+	out, err := a.List(ctx, agent.ListIn{Limit: *n, Cursor: *cursor, Author: *author, Tags: tags, Space: *sp})
 	if err != nil {
 		return err
 	}
 	c.print(out, func(w io.Writer) {
 		writeMemories(w, out)
 		if out.Cursor != "" {
-			fmt.Fprintf(w, "More: engram list --cursor %s\n", out.Cursor)
+			more := "engram list --cursor " + out.Cursor
+			if *sp != "" {
+				more += " --space " + *sp
+			}
+			fmt.Fprintf(w, "More: %s\n", more)
 		}
 	})
 	return nil
@@ -697,6 +769,9 @@ func writeMemories(w io.Writer, out agent.MemoriesOut) {
 			head = t.Local().Format("2006-01-02 15:04")
 		}
 		head += "  " + m.Author
+		if m.Space != "" {
+			head += "  in " + m.Space
+		}
 		if m.Similarity != nil {
 			head = fmt.Sprintf("[%d] %s", *m.Similarity, head)
 		}

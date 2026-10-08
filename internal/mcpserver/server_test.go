@@ -36,7 +36,14 @@ type world struct {
 
 func newWorld(t *testing.T, declare bool) *world {
 	t.Helper()
-	n := spacetest.New(t)
+	return newSpaceWorld(t, declare, "authority", "memory")
+}
+
+// newSpaceWorld is newWorld for a space with the given authority and key,
+// each world its own network and appview.
+func newSpaceWorld(t *testing.T, declare bool, authority, skey string) *world {
+	t.Helper()
+	n := spacetest.NewSpace(t, authority, skey)
 	avAcct := n.NewAccount("did:plc:appview")
 	alice := n.NewAccount("did:plc:alice")
 	bob := n.NewAccount("did:plc:bob")
@@ -85,11 +92,13 @@ func (w *world) tools(t *testing.T, did string, p embed.Provider) *agent.Agent {
 	return &agent.Agent{Client: c, Space: w.net.Space, AppviewURL: w.url, AppviewDID: serviceDID, Provider: p, ConfigTTL: time.Millisecond}
 }
 
-func connect(t *testing.T, a *agent.Agent) *mcp.ClientSession {
+// connect starts the MCP server over agents for one or more spaces (the
+// first is the default) and connects a client.
+func connect(t *testing.T, agents ...*agent.Agent) *mcp.ClientSession {
 	t.Helper()
 	ct, st := mcp.NewInMemoryTransports()
 	ctx := context.Background()
-	if _, err := NewServer(a).Connect(ctx, st, nil); err != nil {
+	if _, err := NewServer(agent.SpacesOf(agents...)).Connect(ctx, st, nil); err != nil {
 		t.Fatal(err)
 	}
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(ctx, ct, nil)
@@ -132,6 +141,81 @@ func (w *world) deliver(t *testing.T, did string) {
 	t.Helper()
 	w.net.DeliverWrite(w.net.AccountByDID(did), "")
 	w.av.Jobs.Wait()
+}
+
+// TestSeveralSpaces: one agent in two spaces stores where it's told, recalls
+// from both (each result naming its space) or one, and learns each space's
+// model from list_spaces.
+func TestSeveralSpaces(t *testing.T) {
+	t.Parallel()
+	team := newSpaceWorld(t, true, "teamlead", "team")
+	mine := newSpaceWorld(t, true, "noteskeeper", "notes")
+	alice := connect(t, team.tools(t, "did:plc:alice", embed.HashingProvider{}), mine.tools(t, "did:plc:alice", embed.HashingProvider{}))
+
+	var spaces ListSpacesOut
+	if msg := call(t, alice, "list_spaces", nil, &spaces); msg != "" {
+		t.Fatal(msg)
+	}
+	byName := map[string]agent.SpaceInfo{}
+	for _, s := range spaces.Spaces {
+		byName[s.Name] = s
+	}
+	if len(byName) != 2 || !byName["team"].Default || byName["notes"].Default || !byName["notes"].SetUp ||
+		byName["team"].Model == nil || *byName["team"].Model != model || byName["notes"].LocalModel != "ready" ||
+		byName["team"].QueryPrefix != "search_query: " {
+		t.Fatalf("list_spaces: %+v", spaces)
+	}
+
+	var stored RememberOut
+	if msg := call(t, alice, "remember", map[string]any{"text": "the deploy key rotates every friday", "space": "team"}, &stored); msg != "" {
+		t.Fatal(msg)
+	}
+	team.deliver(t, "did:plc:alice")
+	var note RememberOut
+	if msg := call(t, alice, "remember", map[string]any{"text": "my friday deploy checklist lives in notes.md", "space": "notes"}, &note); msg != "" {
+		t.Fatal(msg)
+	}
+	mine.deliver(t, "did:plc:alice")
+	if !strings.HasPrefix(note.URI, mine.net.Space+"/") || !strings.HasPrefix(stored.URI, team.net.Space+"/") {
+		t.Fatalf("stored in the wrong spaces: %s %s", stored.URI, note.URI)
+	}
+
+	var found MemoriesOut
+	if msg := call(t, alice, "recall", map[string]any{"query": "friday deploy"}, &found); msg != "" {
+		t.Fatal(msg)
+	}
+	got := map[string]string{}
+	for _, m := range found.Memories {
+		got[m.Space] = m.Text
+	}
+	if len(found.Memories) != 2 || got["team"] == "" || got["notes"] == "" {
+		t.Fatalf("recall across spaces: %+v", found)
+	}
+	if msg := call(t, alice, "recall", map[string]any{"query": "friday deploy", "space": "notes"}, &found); msg != "" {
+		t.Fatal(msg)
+	}
+	if len(found.Memories) != 1 || found.Memories[0].Space != "notes" {
+		t.Fatalf("recall in one space: %+v", found)
+	}
+
+	// list_memories is the default space unless told otherwise.
+	if msg := call(t, alice, "list_memories", nil, &found); msg != "" {
+		t.Fatal(msg)
+	}
+	if len(found.Memories) != 1 || found.Memories[0].Space != "team" {
+		t.Fatalf("list default space: %+v", found)
+	}
+	// get_memory and forget find the space from the URI.
+	var one GetOut
+	if msg := call(t, alice, "get_memory", map[string]any{"uri": note.URI}, &one); msg != "" || one.Memory.Space != "notes" {
+		t.Fatalf("get_memory: %q %+v", msg, one)
+	}
+	if msg := call(t, alice, "forget", map[string]any{"uri": note.URI}, nil); msg != "" {
+		t.Fatal(msg)
+	}
+	if msg := call(t, alice, "remember", map[string]any{"text": "x", "space": "nowhere"}, nil); !strings.Contains(msg, "nowhere") {
+		t.Fatalf("unknown space: %q", msg)
+	}
 }
 
 func TestAgentsShareMemories(t *testing.T) {
