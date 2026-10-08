@@ -55,7 +55,7 @@ export function SignIn() {
             <h2>Sign in</h2>
             <p className="muted small">
               Your account has to be on a server that supports ATProto spaces. So far this has only been tested
-              against Cocoon. <a href="#early">Why?</a>
+              against Cocoon.
             </p>
             <label htmlFor="handle">Your handle</label>
             <input

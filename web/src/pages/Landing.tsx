@@ -83,12 +83,6 @@ function WhyAtproto() {
           <p className="why-note">Each change is checked against its author's signed commit before it's indexed.</p>
         </li>
       </ul>
-      <p className="why-warning" id="early">
-        Fair warning: private data on ATProto, which is what spaces are, is still{" "}
-        <a href="https://github.com/bluesky-social/atproto/pull/5187">a draft proposal</a>. This has only been tested
-        against <a href="https://github.com/haileyok/cocoon">Cocoon</a>, a server that implements it, so for now your
-        account has to be on one that supports spaces.
-      </p>
     </section>
   );
 }

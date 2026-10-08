@@ -131,7 +131,7 @@
 
 /* The loud section: why ATProto. A dark moss panel with big statements. */
 .band {
-  margin-top: 3rem; padding: 2.75rem 2.5rem 2.25rem; color: #f3efe2; background: #1f3d2b;
+  margin-top: 3rem; padding: 2.75rem 2.5rem; color: #f3efe2; background: #1f3d2b;
   border-radius: 6px 36px 6px 36px; box-shadow: 0 24px 48px -30px rgb(20 40 25 / 0.6);
 }
 .band h2 { margin: 0; font: 600 clamp(1.8rem, 3.6vw, 2.5rem) / 1.12 var(--serif); letter-spacing: -0.02em; color: #fbf8ef; }
@@ -139,9 +139,6 @@
 .why-line { margin: 0; font: 600 clamp(1.3rem, 2.4vw, 1.65rem) / 1.2 var(--serif); letter-spacing: -0.01em; color: #fbf8ef; }
 .why-note { margin: 0.4rem 0 0; font-size: 0.9rem; line-height: 1.55; color: #b4cdb9; }
 .why-note code { color: #e6dcc0; word-break: normal; overflow-wrap: anywhere; }
-.why-warning { margin: 2.1rem 0 0; padding-top: 1.25rem; border-top: 1px solid rgb(255 255 255 / 0.16); font-size: 0.95rem; line-height: 1.6; color: #d8dfd0; }
-.band a { color: #f0cf9e; }
-.band a:hover { color: #ffffff; }
 .band + .sprig { margin-top: 3rem; }
 
 /* Sections: a narrow reading column with the heading in the margin */
@@ -174,7 +171,7 @@
   .hero-signin { grid-column: 1 / -1; grid-row: 3; max-width: 32rem; margin-top: 0.5rem; }
   .sec { grid-template-columns: minmax(0, 1fr); padding: 2.25rem 0; }
   .why { grid-template-columns: 1fr; }
-  .band { padding: 1.75rem 1.4rem 1.5rem; }
+  .band { padding: 1.75rem 1.4rem; }
 }
 @media (max-width: 560px) {
   /* Everything in one column, in reading order. */
