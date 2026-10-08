@@ -31,6 +31,8 @@ type Spaces struct {
 	// NewAgent builds a space's Agent, when set; tests use it to put each
 	// space on its own fake network.
 	NewAgent func(SpaceEntry) *Agent
+	// Save writes the settings back after a space is created; nil doesn't.
+	Save func(Settings) error
 
 	mu     sync.Mutex
 	agents map[string]*Agent // by space URI
@@ -58,9 +60,34 @@ func SpacesOf(agents ...*Agent) *Spaces {
 	return s
 }
 
+// settings is a snapshot of Settings: CreateSpace may add a space while
+// other operations run.
+func (s *Spaces) settings() Settings {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.Settings
+	c.Spaces = slices.Clone(s.Settings.Spaces)
+	return c
+}
+
+// SaveSettings calls Save with a snapshot of the settings.
+func (s *Spaces) SaveSettings() error {
+	if s.Save == nil {
+		return nil
+	}
+	return s.Save(s.settings())
+}
+
+// addSpace adds a space to Settings.
+func (s *Spaces) addSpace(uri string) (SpaceEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Settings.AddSpace(uri, "")
+}
+
 // Agent returns the Agent for a space, by name or URI ("" is the default).
 func (s *Spaces) Agent(nameOrURI string) (*Agent, SpaceEntry, error) {
-	e, err := s.Settings.Resolve(nameOrURI)
+	e, err := s.settings().Resolve(nameOrURI)
 	if err != nil {
 		return nil, e, err
 	}
@@ -123,9 +150,9 @@ func (s *Spaces) Recall(ctx context.Context, in RecallIn) (MemoriesOut, error) {
 	if strings.TrimSpace(in.Query) == "" {
 		return MemoriesOut{}, errors.New("query is required")
 	}
-	spaces := s.Settings.Spaces
+	spaces := s.settings().Spaces
 	if len(spaces) == 0 {
-		return MemoriesOut{}, s.Settings.Check()
+		return MemoriesOut{}, s.settings().Check()
 	}
 	type result struct {
 		name string
@@ -265,10 +292,11 @@ type ListSpacesOut struct {
 // this machine can embed with it, then any other spaces the account's PDS
 // lists for it.
 func (s *Spaces) ListSpaces(ctx context.Context, _ ListSpacesIn) (ListSpacesOut, error) {
-	def, _ := s.Settings.Default()
-	infos := make([]SpaceInfo, len(s.Settings.Spaces))
+	set := s.settings()
+	def, _ := set.Default()
+	infos := make([]SpaceInfo, len(set.Spaces))
 	var wg sync.WaitGroup
-	for i, e := range s.Settings.Spaces {
+	for i, e := range set.Spaces {
 		wg.Go(func() {
 			infos[i] = s.describe(ctx, e)
 			infos[i].Default = e.URI == def.URI
@@ -284,7 +312,7 @@ func (s *Spaces) ListSpaces(ctx context.Context, _ ListSpacesIn) (ListSpacesOut,
 		if slices.ContainsFunc(infos, func(i SpaceInfo) bool { return i.URI == uri }) {
 			continue
 		}
-		e, _ := s.Settings.Resolve(uri)
+		e, _ := set.Resolve(uri)
 		out.Spaces = append(out.Spaces, SpaceInfo{Name: e.Name, URI: uri})
 	}
 	return out, nil
@@ -346,7 +374,7 @@ func (s *Spaces) memberSpaces(ctx context.Context) ([]string, error) {
 // embedded with the space's model(s), until ctx ends.
 func (s *Spaces) Run(ctx context.Context, every time.Duration) {
 	var wg sync.WaitGroup
-	for _, e := range s.Settings.Spaces {
+	for _, e := range s.settings().Spaces {
 		a, _, err := s.Agent(e.URI)
 		if err != nil {
 			continue

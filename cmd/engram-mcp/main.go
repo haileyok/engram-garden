@@ -74,6 +74,19 @@ func run(log *slog.Logger) error {
 	if exp := settings.Account.Expires(); !exp.IsZero() && time.Until(exp) < 3*24*time.Hour {
 		log.Warn("the agent's sign-in ends soon; run `engram login` to renew it", "ends", exp.Format(time.RFC3339))
 	}
+	// A space created through create_space is saved to the settings file
+	// (not ENGRAM_* overrides, which stay the environment's).
+	path := filepath.Join(dir, "config.json")
+	a.Save = func(current agent.Settings) error {
+		file, err := agent.LoadSettings(path, nil)
+		if err != nil {
+			return err
+		}
+		for _, e := range current.Spaces {
+			_, _ = file.AddSpace(e.URI, "")
+		}
+		return file.Save(path)
+	}
 	names := make([]string, 0, len(settings.Spaces))
 	for _, e := range settings.Spaces {
 		names = append(names, e.Name)
