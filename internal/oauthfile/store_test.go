@@ -1,4 +1,4 @@
-package web
+package oauthfile
 
 import (
 	"context"
@@ -56,7 +56,7 @@ func TestFileStore(t *testing.T) {
 	}
 
 	// Old sign-ins expire.
-	now = now.Add(authRequestTTL + time.Minute)
+	now = now.Add(AuthRequestTTL + time.Minute)
 	if _, err := s.GetAuthRequestInfo(ctx, "st"); err == nil {
 		t.Fatal("expired request still found")
 	}

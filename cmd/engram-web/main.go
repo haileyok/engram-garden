@@ -24,6 +24,7 @@ import (
 	"github.com/bluesky-social/indigo/util/ssrf"
 
 	"github.com/haileyok/engram-garden/internal/config"
+	"github.com/haileyok/engram-garden/internal/oauthfile"
 	"github.com/haileyok/engram-garden/internal/web"
 )
 
@@ -89,7 +90,7 @@ func run(log *slog.Logger) error {
 	}
 
 	dir := config.Directory()
-	store := &web.FileStore{Dir: filepath.Join(dataDir, "oauth")}
+	store := &oauthfile.FileStore{Dir: filepath.Join(dataDir, "oauth")}
 	o, err := web.NewOAuth(web.OAuthConfig{PublicURL: publicURL, Key: key, Store: store, Dir: dir, HTTP: outbound})
 	if err != nil {
 		return err

@@ -155,24 +155,64 @@ drop out of search after the switch.
 
 ## Giving an agent memory tools
 
-`engram-mcp` speaks MCP over stdio as one agent's account, and embeds with
-the space's model through an OpenAI-compatible endpoint:
+Each agent has its own ATProto account, which the space's authority adds
+as a member who can write. Then, on the agent's machine:
+
+```bash
+nix profile install github:haileyok/engram-garden   # engram, engram-mcp, engram-config
+engram init --space at://did:plc:you/space/garden.engram.space/memory
+```
+
+`engram init` signs in to the agent's account through the browser (OAuth),
+then checks that the account can read the space, that the local Ollama has
+the space's model (offering to `ollama pull` it), and that the appview
+indexes the space. It saves its settings to `~/.config/engram/config.json`
+(or `$ENGRAM_CONFIG_DIR`). The web app's **Connect an agent** tab shows
+these commands for each space.
+
+- **Signing in.** OAuth sign-ins last two weeks: account servers limit
+  sessions for command-line tools, which can't keep a client secret.
+  `engram login` renews one. On a machine without a browser, `engram init
+  --password` (or `engram login --password`) stores the account's password
+  instead; or open the sign-in address on another machine and paste the
+  address it ends on back into the terminal.
+- **Using it from a shell:**
+
+  ```bash
+  engram remember "Deploys go through the deploy repo's workflow" -t ops --source docs/deploy.md
+  echo "a longer memory" | engram remember -t notes
+  engram recall "how do we deploy" -n 5
+  engram list --mine
+  engram forget <uri>
+  engram status
+  ```
+
+  Add `--json` to any command for machine-readable output.
+- **Using it over MCP:** `engram-mcp` uses the same settings, so the
+  client configuration is just `{"mcpServers": {"engram": {"command":
+  "engram-mcp"}}}`.
+
+`engram-mcp` (and `engram`) can also be configured entirely with environment
+variables, which override the settings file:
 
 | Variable | Default | |
 |---|---|---|
 | `ENGRAM_SPACE` | | The memory space URI (required) |
-| `ENGRAM_IDENTIFIER` / `ENGRAM_PASSWORD` | | The agent account's handle or DID, and its password (required) |
+| `ENGRAM_IDENTIFIER` / `ENGRAM_PASSWORD` | | The agent account's handle or DID, and its password (instead of `engram init`'s sign-in) |
+| `ENGRAM_PDS_HOST` | resolved | Skip resolving the account's PDS (password sign-in) |
+| `ENGRAM_CONFIG_DIR` | `~/.config/engram` | Where the settings and OAuth sessions live; one per agent on a shared machine |
 | `ENGRAM_APPVIEW_URL` | `https://api.engram.garden` | |
 | `ENGRAM_APPVIEW_DID` | `did:web:<appview host>` | |
 | `ENGRAM_EMBED_URL` | `http://localhost:11434/v1` | Any OpenAI-compatible endpoint; Ollama's by default |
 | `ENGRAM_EMBED_API_KEY` | | If the endpoint needs one |
 | `ENGRAM_EMBED_MODEL` | the space's | The local model name, if it differs |
 | `ENGRAM_EMBED_MODEL_DIGEST` | from Ollama | The local model's digest, for endpoints that aren't Ollama |
+| `ENGRAM_EMBED_PROVIDER` | `openai` | `hashing` embeds offline without meaning, for tests |
 
 `engram-mcp` refuses to write memories when the local model's digest isn't
 the one the space declares, so every vector in the space stays comparable.
 
-Example MCP client configuration:
+Example MCP client configuration with environment variables:
 
 ```json
 {

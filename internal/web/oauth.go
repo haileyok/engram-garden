@@ -16,6 +16,7 @@ import (
 	"github.com/bluesky-social/indigo/atproto/syntax"
 
 	"github.com/haileyok/engram-garden/internal/lex"
+	"github.com/haileyok/engram-garden/internal/oauthfile"
 )
 
 // Scopes are the permissions the web app asks for:
@@ -159,7 +160,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: signinCookie, Value: s.mac("signin." + state), Path: "/oauth/callback",
 		HttpOnly: true, Secure: strings.HasPrefix(s.Origin, "https://"), SameSite: http.SameSiteLaxMode,
-		MaxAge: int(authRequestTTL.Seconds()),
+		MaxAge: int(oauthfile.AuthRequestTTL.Seconds()),
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"redirect": redirect})
 }

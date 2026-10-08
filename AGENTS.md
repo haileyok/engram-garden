@@ -5,7 +5,14 @@ Guidance for working on Engram Garden.
 ## Layout
 
 - `cmd/engram-appview`: the indexer and search service, plus `import`.
-- `cmd/engram-mcp`: per-agent MCP server (stdio). Embeds memories and queries.
+- `cmd/engram`: the agent CLI (`init`, `login`, `remember`, `recall`, `list`,
+  `get`, `forget`, `status`). `cmd/engram-mcp`: per-agent MCP server
+  (stdio). Both are thin layers over `internal/agent`: the memory
+  operations, the settings file (`~/.config/engram/config.json`, ENGRAM_*
+  overriding) and signing in (OAuth loopback client, or password).
+- `internal/oauthfile`: OAuth sessions as files, for the web app and the CLI.
+- `flake.nix` packages the agent tools. When `go.mod` changes, update
+  `vendorHash`: build with a wrong one and use the hash Nix reports.
 - `cmd/engram-config`: the space authority declares the embedding model.
 - `internal/lex`: record formats: the space's config, the vectors memories
   carry (`f16le`), the query vector encoding, and the text that gets embedded.
@@ -34,7 +41,7 @@ Guidance for working on Engram Garden.
 - `internal/appview`: XRPC handlers, forwarding to a space's owner,
   notification receivers, `did:web` document, background sync and
   registration loop.
-- `internal/mcpserver`: MCP tools.
+- `internal/mcpserver`: the MCP tools, over `internal/agent`.
 - `cmd/engram-web`, `internal/web`: the web app's backend. OAuth sign-in
   (indigo's client; sessions in `FileStore`), then it acts for the user with
   `spaceclient`, like `engram-mcp`. The `Auth` interface lets tests sign in

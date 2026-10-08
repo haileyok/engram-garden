@@ -12,21 +12,22 @@ import (
 
 	"github.com/bluesky-social/indigo/atproto/atcrypto"
 	"github.com/bluesky-social/indigo/atproto/auth/oauth"
+	"github.com/haileyok/engram-garden/internal/oauthfile"
 )
 
 func TestOAuthClientMetadata(t *testing.T) {
 	t.Parallel()
-	if _, err := NewOAuth(OAuthConfig{PublicURL: "https://engram.test", Store: &FileStore{Dir: t.TempDir()}}); err == nil {
+	if _, err := NewOAuth(OAuthConfig{PublicURL: "https://engram.test", Store: &oauthfile.FileStore{Dir: t.TempDir()}}); err == nil {
 		t.Fatal("a public client without a key")
 	}
-	if _, err := NewOAuth(OAuthConfig{PublicURL: "http://engram.test", Store: &FileStore{Dir: t.TempDir()}}); err == nil {
+	if _, err := NewOAuth(OAuthConfig{PublicURL: "http://engram.test", Store: &oauthfile.FileStore{Dir: t.TempDir()}}); err == nil {
 		t.Fatal("plain http outside loopback")
 	}
 	key, err := atcrypto.GeneratePrivateKeyP256()
 	if err != nil {
 		t.Fatal(err)
 	}
-	o, err := NewOAuth(OAuthConfig{PublicURL: "https://engram.test", Key: key, Store: &FileStore{Dir: t.TempDir()}})
+	o, err := NewOAuth(OAuthConfig{PublicURL: "https://engram.test", Key: key, Store: &oauthfile.FileStore{Dir: t.TempDir()}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,7 @@ func TestOAuthClientMetadata(t *testing.T) {
 	}
 
 	// A loopback development client needs no key.
-	dev, err := NewOAuth(OAuthConfig{PublicURL: "http://127.0.0.1:8090", Store: &FileStore{Dir: t.TempDir()}})
+	dev, err := NewOAuth(OAuthConfig{PublicURL: "http://127.0.0.1:8090", Store: &oauthfile.FileStore{Dir: t.TempDir()}})
 	if err != nil || dev.App.Config.IsConfidential() || !strings.HasPrefix(dev.App.Config.ClientID, "http://localhost?") {
 		t.Fatalf("dev client: %v", err)
 	}
@@ -76,7 +77,7 @@ func TestOAuthClientMetadata(t *testing.T) {
 // else's sign-in doesn't sign this browser in.
 func TestCallbackNeedsTheBrowserThatStarted(t *testing.T) {
 	t.Parallel()
-	store := &FileStore{Dir: t.TempDir()}
+	store := &oauthfile.FileStore{Dir: t.TempDir()}
 	o, err := NewOAuth(OAuthConfig{PublicURL: "http://127.0.0.1:8090", Store: store})
 	if err != nil {
 		t.Fatal(err)
