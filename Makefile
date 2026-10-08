@@ -1,4 +1,4 @@
-.PHONY: build test test-real-bucket test-postgres lint fmt web web-test
+.PHONY: build test test-real-bucket test-postgres lint fmt web web-test python-test python-lint
 
 build:
 	go build ./...
@@ -59,3 +59,13 @@ web:
 
 web-test:
 	cd web && pnpm test
+
+# The Python client (python/). Needs uv. The Go side of its interoperability
+# fixtures runs with `make test`; regenerate go.json after changing internal/lex
+# with ENGRAM_WRITE_PY_FIXTURES=1 go test ./internal/lex/, then python.json with
+# `cd python && uv run python tests/make_fixtures.py`.
+python-test:
+	cd python && uv sync --extra dev && uv run pytest -q
+
+python-lint:
+	cd python && uv sync --extra dev && uv run ruff check . && uv run ruff format --check .

@@ -18,6 +18,16 @@ Guidance for working on Engram Garden.
   `spacetest` network through `Spaces.NewAgent` / `agent.SpacesOf`.
   Running a space (create, members, model, the appview's grant link) is in
   `internal/agent/manage.go`, shared by the CLI and the MCP tools.
+- `python/`: the Python client, a 1:1 async port of `internal/agent` (and the
+  `lex`, `embed`, `vec` and `spaceclient` pieces it uses): `pip install ./python`.
+  Same operations, same settings file. It signs in with a password (an app
+  password works), not OAuth. Keep it in step with `internal/agent`: when an
+  operation or record format changes there, change it there too. Its tests run
+  against `python/tests/fakes.py` (an in-process PDS, space host and appview
+  that verify signatures like the real ones) and against fixtures Go made
+  (`python/tests/fixtures/go.json`, written by `internal/lex/pyinterop_test.go`
+  with `ENGRAM_WRITE_PY_FIXTURES=1`); Go in turn verifies what Python made
+  (`python.json`, from `python/tests/make_fixtures.py`). `make python-test`.
 - `internal/oauthfile`: OAuth sessions as files, for the web app and the CLI.
 - `flake.nix` packages the agent tools. When `go.mod` changes, update
   `vendorHash`: build with a wrong one and use the hash Nix reports.

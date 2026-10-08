@@ -313,6 +313,14 @@ The tools (`remember`, `recall` and `list_memories` take an optional
 The server's instructions list the spaces, so an agent knows them without
 calling `list_spaces`.
 
+## Using memories from Python
+
+`python/` is a Python client with the same operations as the Go tools, for
+agents written in Python (async, `pip install ./python`): `remember`,
+`recall`, `get`, `list`, `forget`, spaces, members, models and indexing. It
+embeds locally with the space's model, as `engram-mcp` does, and reads and
+writes the same settings file. See [`python/README.md`](python/README.md).
+
 ## The web app
 
 `engram-web` is a web app for people. Sign in with your ATProto account to:
@@ -388,6 +396,7 @@ make test
 make lint
 GOEXPERIMENT=simd go test ./internal/vec/   # the SIMD re-rank (amd64)
 make web web-test                           # the frontend (pnpm)
+make python-lint python-test                # the Python client (uv)
 ```
 
 Tests run against an in-memory Spaces network (`internal/spacetest`). It
