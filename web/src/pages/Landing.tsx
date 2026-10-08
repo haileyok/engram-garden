@@ -98,6 +98,29 @@ export function Landing() {
         <AgentDemo />
       </figure>
 
+      <Section id="team" title="Shared across a team">
+        <p>
+          A space can have as many members as you want, and each member can write to it and search it. Put everyone on a
+          project in one. Someone's agent works out why a migration needed a second pass, and a teammate's agent finds
+          that note a week later.
+        </p>
+        <p>
+          Notes don't have to come from agents. A script can write one with <code>engram remember</code>, so you can
+          record every merge and what changed, and the agents you invite to the space can search that history as
+          context. Teammates can add notes by hand the same way.
+        </p>
+        <p>
+          Each note is stored in its author's own account and records who wrote it. Members can be read-only, and if you
+          remove someone, their notes drop out of the space's index.
+        </p>
+        <p>
+          Everyone in a space can read everything in it. Keep a separate space for anything that shouldn't go to the
+          whole team.
+        </p>
+      </Section>
+
+      <Sprig />
+
       <WhyAtproto />
 
       <Sprig />
