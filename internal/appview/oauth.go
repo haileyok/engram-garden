@@ -2,8 +2,6 @@ package appview
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +15,7 @@ import (
 	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 
-	"github.com/haileyok/engram-garden/internal/blob"
+	"github.com/haileyok/engram-garden/internal/control"
 )
 
 // OAuthClient is the appview's OAuth client: the Authorizer for real
@@ -180,36 +178,21 @@ func (s *Server) oauthDocs() (oauthDocServer, bool) {
 
 // ---- storage ----
 
-// BlobAuthStore keeps OAuth sessions and sign-ins in progress in object
-// storage, so every node sees them. Sessions are overwritten on each token
-// refresh.
-type BlobAuthStore struct{ Blob blob.Store }
+// AuthStore keeps OAuth sessions and sign-ins in progress in the
+// control-plane database, so every node sees them. Sessions are overwritten
+// on each token refresh.
+type AuthStore struct{ DB control.Store }
 
-var _ oauth.ClientAuthStore = BlobAuthStore{}
-
-func hashKey(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(h[:])
-}
-
-const sessionPrefix = "oauth/sessions/"
-
-func sessionKey(did syntax.DID, sessionID string) string {
-	return sessionPrefix + hashKey(did.String()) + "/" + hashKey(sessionID) + ".json"
-}
-
-const requestPrefix = "oauth/requests/"
-
-func requestKey(state string) string { return requestPrefix + hashKey(state) + ".json" }
+var _ oauth.ClientAuthStore = AuthStore{}
 
 // GetSession implements oauth.ClientAuthStore.
-func (b BlobAuthStore) GetSession(ctx context.Context, did syntax.DID, sessionID string) (*oauth.ClientSessionData, error) {
-	raw, err := blob.GetBytes(ctx, b.Blob, sessionKey(did, sessionID))
+func (a AuthStore) GetSession(ctx context.Context, did syntax.DID, sessionID string) (*oauth.ClientSessionData, error) {
+	row, err := a.DB.GetSession(ctx, did.String(), sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("loading OAuth session: %w", err)
 	}
 	var sess oauth.ClientSessionData
-	if err := json.Unmarshal(raw, &sess); err != nil {
+	if err := json.Unmarshal(row.Data, &sess); err != nil {
 		return nil, err
 	}
 	if sess.AccountDID != did || sess.SessionID != sessionID {
@@ -219,52 +202,49 @@ func (b BlobAuthStore) GetSession(ctx context.Context, did syntax.DID, sessionID
 }
 
 // SaveSession implements oauth.ClientAuthStore.
-func (b BlobAuthStore) SaveSession(ctx context.Context, sess oauth.ClientSessionData) error {
+func (a AuthStore) SaveSession(ctx context.Context, sess oauth.ClientSessionData) error {
 	raw, err := json.Marshal(sess)
 	if err != nil {
 		return err
 	}
-	return blob.PutBytes(ctx, b.Blob, sessionKey(sess.AccountDID, sess.SessionID), raw, false)
+	return a.DB.PutSession(ctx, control.Session{
+		DID: sess.AccountDID.String(), ID: sess.SessionID, Data: raw, Updated: time.Now().UTC(),
+	})
 }
 
 // DeleteSession implements oauth.ClientAuthStore.
-func (b BlobAuthStore) DeleteSession(ctx context.Context, did syntax.DID, sessionID string) error {
-	return b.Blob.Delete(ctx, sessionKey(did, sessionID))
-}
-
-type storedRequest struct {
-	Info    oauth.AuthRequestData `json:"info"`
-	Created time.Time             `json:"created"`
+func (a AuthStore) DeleteSession(ctx context.Context, did syntax.DID, sessionID string) error {
+	return a.DB.DeleteSession(ctx, did.String(), sessionID)
 }
 
 // GetAuthRequestInfo implements oauth.ClientAuthStore. Sign-ins older than
 // pendingTTL are gone.
-func (b BlobAuthStore) GetAuthRequestInfo(ctx context.Context, state string) (*oauth.AuthRequestData, error) {
-	raw, err := blob.GetBytes(ctx, b.Blob, requestKey(state))
+func (a AuthStore) GetAuthRequestInfo(ctx context.Context, state string) (*oauth.AuthRequestData, error) {
+	row, err := a.DB.GetRequest(ctx, state)
 	if err != nil {
 		return nil, fmt.Errorf("loading sign-in: %w", err)
 	}
-	var sr storedRequest
-	if err := json.Unmarshal(raw, &sr); err != nil {
+	var info oauth.AuthRequestData
+	if err := json.Unmarshal(row.Data, &info); err != nil {
 		return nil, err
 	}
-	if time.Since(sr.Created) > pendingTTL || sr.Info.State != state {
-		_ = b.Blob.Delete(ctx, requestKey(state))
+	if time.Since(row.Created) > pendingTTL || info.State != state {
+		_ = a.DB.DeleteRequest(ctx, state)
 		return nil, errors.New("sign-in expired")
 	}
-	return &sr.Info, nil
+	return &info, nil
 }
 
 // SaveAuthRequestInfo implements oauth.ClientAuthStore.
-func (b BlobAuthStore) SaveAuthRequestInfo(ctx context.Context, info oauth.AuthRequestData) error {
-	raw, err := json.Marshal(storedRequest{Info: info, Created: time.Now().UTC()})
+func (a AuthStore) SaveAuthRequestInfo(ctx context.Context, info oauth.AuthRequestData) error {
+	raw, err := json.Marshal(info)
 	if err != nil {
 		return err
 	}
-	return blob.PutBytes(ctx, b.Blob, requestKey(info.State), raw, false)
+	return a.DB.PutRequest(ctx, control.Request{State: info.State, Data: raw, Created: time.Now().UTC()})
 }
 
 // DeleteAuthRequestInfo implements oauth.ClientAuthStore.
-func (b BlobAuthStore) DeleteAuthRequestInfo(ctx context.Context, state string) error {
-	return b.Blob.Delete(ctx, requestKey(state))
+func (a AuthStore) DeleteAuthRequestInfo(ctx context.Context, state string) error {
+	return a.DB.DeleteRequest(ctx, state)
 }

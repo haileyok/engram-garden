@@ -14,6 +14,7 @@ import (
 	"github.com/haileyok/cocoon/space"
 
 	"github.com/haileyok/engram-garden/internal/blob"
+	"github.com/haileyok/engram-garden/internal/control/controltest"
 	"github.com/haileyok/engram-garden/internal/embed"
 	"github.com/haileyok/engram-garden/internal/indexer"
 	"github.com/haileyok/engram-garden/internal/lex"
@@ -63,7 +64,7 @@ func newNet(t *testing.T) (*spacetest.Net, *Grants, *fakeAuth, *spaceclient.Clie
 	n.Put(n.Authority, lex.ConfigCollection, lex.ConfigRkey, lex.Config{ModelInfo: model}.Record(time.Now()))
 	auth := newFakeAuth(n)
 	auth.sessions["seed"] = n.Authority.DID
-	grants := &Grants{Blob: blob.Dir{Root: t.TempDir()}, Auth: auth}
+	grants := &Grants{DB: controltest.New(t), Auth: auth}
 	if err := grants.Put(context.Background(), Grant{Space: n.Space, DID: n.Authority.DID, SessionID: "seed", GrantedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +387,7 @@ func TestNotificationsKeepTheIndexCurrent(t *testing.T) {
 func TestRunSyncsAndRegisters(t *testing.T) {
 	t.Parallel()
 	f := setup(t)
-	f.srv.Blob = blob.Dir{Root: t.TempDir()}
+	f.srv.DB = controltest.New(t)
 	f.net.Put(f.alice, indexer.Collection, "a1", memory("polled in"))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -404,9 +405,6 @@ func TestRunSyncsAndRegisters(t *testing.T) {
 	}
 	cancel()
 	<-done
-	if reg, err := routing.LoadRegistry(context.Background(), f.srv.Blob); err != nil || reg == nil || len(reg.Spaces) != 1 {
-		t.Fatalf("registry: %+v %v", reg, err)
-	}
 }
 
 func TestExportThenImportElsewhere(t *testing.T) {

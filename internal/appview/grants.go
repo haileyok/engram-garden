@@ -2,9 +2,6 @@ package appview
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,13 +11,11 @@ import (
 	"time"
 
 	"github.com/bluesky-social/indigo/atproto/atclient"
-	"github.com/bluesky-social/indigo/atproto/auth/oauth"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 
-	"github.com/haileyok/engram-garden/internal/blob"
+	"github.com/haileyok/engram-garden/internal/control"
 	"github.com/haileyok/engram-garden/internal/lex"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
-	"github.com/haileyok/engram-garden/internal/spacestore"
 )
 
 // The appview reads a space with its authority's OAuth grant: read-only
@@ -70,23 +65,12 @@ type Authorizer interface {
 }
 
 // Grant lets the appview read one space as its authority.
-type Grant struct {
-	Space     string    `json:"space"`
-	DID       string    `json:"did"`
-	SessionID string    `json:"sessionId"`
-	GrantedAt time.Time `json:"grantedAt"`
-}
+type Grant = control.Grant
 
-const grantPrefix = "grants/"
-
-func grantKey(spaceURI string) string {
-	return grantPrefix + spacestore.SpaceKey(spaceURI) + ".json"
-}
-
-// Grants keeps grants in object storage and mints delegation tokens with
-// them. It implements spaceclient.Delegator.
+// Grants keeps grants in the control-plane database and mints delegation
+// tokens with them. It implements spaceclient.Delegator.
 type Grants struct {
-	Blob blob.Store
+	DB   control.Store
 	Auth Authorizer
 
 	mu     sync.Mutex
@@ -98,30 +82,12 @@ var _ spaceclient.Delegator = (*Grants)(nil)
 
 // Get returns the space's grant, or nil if there is none.
 func (g *Grants) Get(ctx context.Context, spaceURI string) (*Grant, error) {
-	raw, err := blob.GetBytes(ctx, g.Blob, grantKey(spaceURI))
-	if errors.Is(err, blob.ErrNotFound) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var gr Grant
-	if err := json.Unmarshal(raw, &gr); err != nil {
-		return nil, fmt.Errorf("reading the grant for %s: %w", spaceURI, err)
-	}
-	if gr.Space != spaceURI {
-		return nil, fmt.Errorf("the grant stored for %s names %s", spaceURI, gr.Space)
-	}
-	return &gr, nil
+	return g.DB.GetGrant(ctx, spaceURI)
 }
 
 // Put saves a grant, replacing any earlier one.
 func (g *Grants) Put(ctx context.Context, gr Grant) error {
-	raw, err := json.Marshal(gr)
-	if err != nil {
-		return err
-	}
-	if err := blob.PutBytes(ctx, g.Blob, grantKey(gr.Space), raw, false); err != nil {
+	if err := g.DB.PutGrant(ctx, gr); err != nil {
 		return err
 	}
 	g.setLapsed(gr.Space, "")
@@ -130,7 +96,7 @@ func (g *Grants) Put(ctx context.Context, gr Grant) error {
 
 // Delete removes the space's grant.
 func (g *Grants) Delete(ctx context.Context, spaceURI string) error {
-	if err := g.Blob.Delete(ctx, grantKey(spaceURI)); err != nil {
+	if err := g.DB.DeleteGrant(ctx, spaceURI); err != nil {
 		return err
 	}
 	g.setLapsed(spaceURI, "")
@@ -183,7 +149,7 @@ func (g *Grants) DelegationToken(ctx context.Context, spaceURI string) (string, 
 	if err != nil {
 		// A missing session won't come back; other failures (storage,
 		// network) may be passing.
-		if errors.Is(err, blob.ErrNotFound) {
+		if errors.Is(err, control.ErrNotFound) {
 			g.setLapsed(spaceURI, "the grant's sign-in is gone")
 		}
 		return "", fmt.Errorf("resuming the grant for %s: %w", spaceURI, err)
@@ -245,28 +211,11 @@ func (g *Grants) Access(ctx context.Context, spaceURI string) (map[string]any, e
 // server.
 const pendingTTL = 10 * time.Minute
 
-const pendingPrefix = "oauth/pending/"
-
 // pending is a grant or stop waiting for its callback.
-type pending struct {
-	State   string    `json:"state"`
-	Space   string    `json:"space"`
-	Mode    string    `json:"mode"`
-	Return  string    `json:"return,omitempty"`
-	Created time.Time `json:"created"`
-}
-
-func pendingKey(state string) string {
-	h := sha256.Sum256([]byte(state))
-	return pendingPrefix + hex.EncodeToString(h[:]) + ".json"
-}
+type pending = control.Pending
 
 func (g *Grants) savePending(ctx context.Context, p pending) error {
-	raw, err := json.Marshal(p)
-	if err != nil {
-		return err
-	}
-	return blob.PutBytes(ctx, g.Blob, pendingKey(p.State), raw, false)
+	return g.DB.PutPending(ctx, p)
 }
 
 // Sweep clears what sign-ins leave behind, older than pendingTTL at now:
@@ -274,86 +223,53 @@ func (g *Grants) savePending(ctx context.Context, p pending) error {
 //     server; a callback deletes its own);
 //   - OAuth sessions no grant uses, such as one a token refresh on another
 //     node saved again after it was revoked. They're revoked, then deleted.
-func (g *Grants) Sweep(ctx context.Context, now time.Time) error {
-	for _, prefix := range []string{pendingPrefix, requestPrefix} {
-		objs, err := g.Blob.List(ctx, prefix)
-		if err != nil {
-			return err
-		}
-		for _, o := range objs {
-			if now.Sub(o.Modified) > pendingTTL {
-				if err := g.Blob.Delete(ctx, o.Key); err != nil {
-					return err
-				}
-			}
-		}
+//
+// It returns how many it cleared.
+func (g *Grants) Sweep(ctx context.Context, now time.Time) (int, error) {
+	n, err := g.DB.DeleteStale(ctx, now.Add(-pendingTTL))
+	if err != nil {
+		return n, err
 	}
-	return g.sweepSessions(ctx, now)
+	m, err := g.sweepSessions(ctx, now)
+	return n + m, err
 }
 
-func (g *Grants) sweepSessions(ctx context.Context, now time.Time) error {
-	sessions, err := g.Blob.List(ctx, sessionPrefix)
+func (g *Grants) sweepSessions(ctx context.Context, now time.Time) (int, error) {
+	sessions, err := g.DB.ListSessions(ctx)
 	if err != nil || len(sessions) == 0 {
-		return err
+		return 0, err
 	}
-	used := map[string]bool{}
-	grants, err := g.Blob.List(ctx, grantPrefix)
+	grants, err := g.DB.ListGrants(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	for _, o := range grants {
-		raw, err := blob.GetBytes(ctx, g.Blob, o.Key)
-		if errors.Is(err, blob.ErrNotFound) {
+	used := map[[2]string]bool{}
+	for _, gr := range grants {
+		used[[2]string{gr.DID, gr.SessionID}] = true
+	}
+	n := 0
+	for _, s := range sessions {
+		if used[[2]string{s.DID, s.ID}] || now.Sub(s.Updated) <= pendingTTL {
 			continue
 		}
-		if err != nil {
-			return err
+		_ = g.Revoke(ctx, modeGrant, syntax.DID(s.DID), s.ID)
+		if err := g.DB.DeleteSession(ctx, s.DID, s.ID); err != nil {
+			return n, err
 		}
-		var gr Grant
-		if err := json.Unmarshal(raw, &gr); err != nil {
-			return fmt.Errorf("reading %s: %w", o.Key, err)
-		}
-		used[sessionKey(syntax.DID(gr.DID), gr.SessionID)] = true
+		n++
 	}
-	for _, o := range sessions {
-		if used[o.Key] || now.Sub(o.Modified) <= pendingTTL {
-			continue
-		}
-		raw, err := blob.GetBytes(ctx, g.Blob, o.Key)
-		if errors.Is(err, blob.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		var sess oauth.ClientSessionData
-		if json.Unmarshal(raw, &sess) == nil && sess.SessionID != "" {
-			_ = g.Revoke(ctx, modeGrant, sess.AccountDID, sess.SessionID)
-		}
-		if err := g.Blob.Delete(ctx, o.Key); err != nil {
-			return err
-		}
-	}
-	return nil
+	return n, nil
 }
 
 // takePending returns and forgets a sign-in in progress, or nil if there
 // is none or it expired.
 func (g *Grants) takePending(ctx context.Context, state string) (*pending, error) {
-	key := pendingKey(state)
-	raw, err := blob.GetBytes(ctx, g.Blob, key)
-	if errors.Is(err, blob.ErrNotFound) {
-		return nil, nil
-	}
-	if err != nil {
+	p, err := g.DB.TakePending(ctx, state)
+	if err != nil || p == nil {
 		return nil, err
 	}
-	if err := g.Blob.Delete(ctx, key); err != nil {
-		return nil, err
-	}
-	var p pending
-	if err := json.Unmarshal(raw, &p); err != nil || p.State != state || time.Since(p.Created) > pendingTTL {
+	if time.Since(p.Created) > pendingTTL {
 		return nil, nil
 	}
-	return &p, nil
+	return p, nil
 }

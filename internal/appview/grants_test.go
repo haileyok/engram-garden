@@ -2,7 +2,6 @@ package appview
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,7 +17,8 @@ import (
 	"github.com/bluesky-social/indigo/atproto/auth/oauth"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 
-	"github.com/haileyok/engram-garden/internal/blob"
+	"github.com/haileyok/engram-garden/internal/control"
+	"github.com/haileyok/engram-garden/internal/control/controltest"
 	"github.com/haileyok/engram-garden/internal/indexer"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
 	"github.com/haileyok/engram-garden/internal/spacetest"
@@ -93,7 +93,7 @@ func (a *fakeAuth) Resume(_ context.Context, did syntax.DID, sid string) (*atcli
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.sessions[sid] != did.String() || a.revoked[sid] {
-		return nil, fmt.Errorf("loading OAuth session: %w", blob.ErrNotFound)
+		return nil, fmt.Errorf("loading OAuth session: %w", control.ErrNotFound)
 	}
 	c := a.net.Session(a.net.AccountByDID(did.String()))
 	if a.refused[sid] {
@@ -136,9 +136,9 @@ func grantFixture(t *testing.T, open bool) *fixture {
 	t.Helper()
 	f := setup(t)
 	f.srv.Spaces = nil
-	f.srv.Blob = blob.Dir{Root: t.TempDir()}
+	f.srv.DB = controltest.New(t)
 	f.srv.OpenRegistration = open
-	f.grants = &Grants{Blob: f.srv.Blob, Auth: f.auth}
+	f.grants = &Grants{DB: f.srv.DB, Auth: f.auth}
 	f.srv.Grants = f.grants
 	client, err := spaceclient.NewDelegated(f.grants, f.net.Dir, nil)
 	if err != nil {
@@ -250,9 +250,10 @@ func TestGrantIndexesSpace(t *testing.T) {
 		t.Fatalf("access: %v", a)
 	}
 
-	// A restarted appview finds the registration and the grant in storage.
-	grants := &Grants{Blob: f.srv.Blob, Auth: f.auth}
-	again := &Server{Store: f.srv.Store, Indexer: f.srv.Indexer, Dir: f.srv.Dir, ServiceDID: serviceDID, Blob: f.srv.Blob, Grants: grants}
+	// A restarted appview finds the registration and the grant in the
+	// database.
+	grants := &Grants{DB: f.srv.DB, Auth: f.auth}
+	again := &Server{Store: f.srv.Store, Indexer: f.srv.Indexer, Dir: f.srv.Dir, ServiceDID: serviceDID, DB: f.srv.DB, Grants: grants}
 	if err := again.LoadRegistrations(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -515,54 +516,72 @@ func TestGrantSyncWaitsForASlot(t *testing.T) {
 }
 
 // TestOtherNodeLearnsRegistration: a node that hasn't seen a registration
-// rereads storage when asked about a space it doesn't know.
+// rereads the database when asked about a space it doesn't know.
 func TestOtherNodeLearnsRegistration(t *testing.T) {
 	t.Parallel()
 	f := grantFixture(t, true)
 	f.flow(t, modeGrant, "")
 	f.srv.Jobs.Wait()
-	other := &Server{Store: f.srv.Store, Indexer: f.srv.Indexer, Dir: f.srv.Dir, ServiceDID: serviceDID, Blob: f.srv.Blob}
+	other := &Server{Store: f.srv.Store, Indexer: f.srv.Indexer, Dir: f.srv.Dir, ServiceDID: serviceDID, DB: f.srv.DB}
 	if !other.knows(context.Background(), f.net.Space) {
 		t.Fatal("other node didn't find the registration")
 	}
 }
 
 // TestSweepAbandonedSignIns: sign-ins nobody finished don't pile up in the
-// bucket.
+// database.
 func TestSweepAbandonedSignIns(t *testing.T) {
 	t.Parallel()
 	f := grantFixture(t, true)
 	ctx := context.Background()
 	f.start(t, browser(t), modeGrant, "") // abandoned at the authorization server
-	st := BlobAuthStore{f.srv.Blob}
+	st := AuthStore{f.srv.DB}
 	if err := st.SaveAuthRequestInfo(ctx, oauth.AuthRequestData{State: "abandoned"}); err != nil {
 		t.Fatal(err)
 	}
-	count := func() int {
-		n := 0
-		for _, prefix := range []string{pendingPrefix, requestPrefix} {
-			objs, err := f.srv.Blob.List(ctx, prefix)
-			if err != nil {
-				t.Fatal(err)
-			}
-			n += len(objs)
+	// Two records are waiting: the grant's pending record, and the request.
+	if n, err := f.grants.Sweep(ctx, time.Now()); err != nil || n != 0 {
+		t.Fatalf("swept %d fresh sign-ins, %v", n, err)
+	}
+	if n, err := f.grants.Sweep(ctx, time.Now().Add(pendingTTL+time.Minute)); err != nil || n != 2 {
+		t.Fatalf("swept %d abandoned sign-in records, %v; want the 2", n, err)
+	}
+	if _, err := f.srv.DB.GetRequest(ctx, "abandoned"); !errors.Is(err, control.ErrNotFound) {
+		t.Fatalf("abandoned sign-in left: %v", err)
+	}
+	if n, err := f.grants.Sweep(ctx, time.Now().Add(pendingTTL+time.Minute)); err != nil || n != 0 {
+		t.Fatalf("a second sweep cleared %d, %v", n, err)
+	}
+}
+
+// TestRunClearsAbandonedSignIns: the background loop (on the coordinator,
+// which a single node is) is what sweeps, so nothing else has to.
+func TestRunClearsAbandonedSignIns(t *testing.T) {
+	t.Parallel()
+	f := grantFixture(t, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := f.srv.DB.PutRequest(ctx, control.Request{State: "abandoned", Data: []byte(`{}`), Created: time.Now().Add(-pendingTTL - time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.srv.DB.PutRequest(ctx, control.Request{State: "recent", Data: []byte(`{}`), Created: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { f.srv.Run(ctx, time.Hour, false); close(done) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := f.srv.DB.GetRequest(ctx, "abandoned"); errors.Is(err, control.ErrNotFound) {
+			break
 		}
-		return n
+		if time.Now().After(deadline) {
+			t.Fatal("Run never cleared the abandoned sign-in")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if n := count(); n != 2 {
-		t.Fatalf("%d sign-in objects", n)
-	}
-	if err := f.grants.Sweep(ctx, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if n := count(); n != 2 {
-		t.Fatalf("swept fresh sign-ins: %d left", n)
-	}
-	if err := f.grants.Sweep(ctx, time.Now().Add(pendingTTL+time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if n := count(); n != 0 {
-		t.Fatalf("%d abandoned sign-in objects left", n)
+	cancel()
+	<-done
+	if _, err := f.srv.DB.GetRequest(context.Background(), "recent"); err != nil {
+		t.Fatalf("Run cleared a recent sign-in: %v", err)
 	}
 }
 
@@ -573,7 +592,7 @@ func TestSweepUnusedSessions(t *testing.T) {
 	t.Parallel()
 	f := grantFixture(t, true)
 	ctx := context.Background()
-	st := BlobAuthStore{f.srv.Blob}
+	st := AuthStore{f.srv.DB}
 	authority := syntax.DID(f.net.Authority.DID)
 	for _, sid := range []string{"live", "orphan"} {
 		f.auth.sessions[sid] = authority.String()
@@ -585,14 +604,14 @@ func TestSweepUnusedSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Recent sessions may belong to a grant still being made.
-	if err := f.grants.Sweep(ctx, time.Now()); err != nil {
-		t.Fatal(err)
+	if n, err := f.grants.Sweep(ctx, time.Now()); err != nil || n != 0 {
+		t.Fatalf("swept %d recent sessions, %v", n, err)
 	}
 	if _, err := st.GetSession(ctx, authority, "orphan"); err != nil || f.auth.isRevoked("orphan") {
 		t.Fatalf("swept a recent session: %v", err)
 	}
-	if err := f.grants.Sweep(ctx, time.Now().Add(pendingTTL+time.Minute)); err != nil {
-		t.Fatal(err)
+	if n, err := f.grants.Sweep(ctx, time.Now().Add(pendingTTL+time.Minute)); err != nil || n != 1 {
+		t.Fatalf("swept %d unused sessions, %v; want the orphan", n, err)
 	}
 	if _, err := st.GetSession(ctx, authority, "orphan"); err == nil || !f.auth.isRevoked("orphan") {
 		t.Fatalf("unused session left: %v revoked=%v", err, f.auth.isRevoked("orphan"))
@@ -607,12 +626,12 @@ func TestGrantObjects(t *testing.T) {
 	t.Parallel()
 	f := grantFixture(t, true)
 	f.flow(t, modeGrant, "")
-	raw, err := blob.GetBytes(context.Background(), f.srv.Blob, grantKey(f.net.Space))
-	if err != nil {
-		t.Fatal(err)
+	g, err := f.srv.DB.GetGrant(context.Background(), f.net.Space)
+	if err != nil || g == nil || g.Space != f.net.Space || g.DID != f.net.Authority.DID || g.SessionID == "" || g.GrantedAt.IsZero() {
+		t.Fatalf("grant: %+v %v", g, err)
 	}
-	var g Grant
-	if err := json.Unmarshal(raw, &g); err != nil || g.Space != f.net.Space || g.DID != f.net.Authority.DID || g.SessionID == "" {
-		t.Fatalf("grant object: %s %v", raw, err)
+	regs, err := f.srv.DB.Registrations(context.Background())
+	if err != nil || len(regs) != 1 || regs[0].Space != f.net.Space {
+		t.Fatalf("registrations: %+v %v", regs, err)
 	}
 }

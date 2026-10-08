@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -18,7 +17,7 @@ import (
 	"github.com/haileyok/cocoon/oauth/scopes"
 	"github.com/haileyok/cocoon/space"
 
-	"github.com/haileyok/engram-garden/internal/blob"
+	"github.com/haileyok/engram-garden/internal/control"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
 )
 
@@ -212,9 +211,10 @@ func (s *Server) completeStop(w http.ResponseWriter, r *http.Request, p *pending
 
 // register records the space as indexed.
 func (s *Server) register(ctx context.Context, spaceURI string) error {
-	if s.Blob != nil {
-		raw, _ := json.Marshal(registration{Space: spaceURI, RegisteredAt: time.Now().UTC()})
-		if err := blob.PutBytes(ctx, s.Blob, registrationKey(spaceURI), raw, true); err != nil && !errors.Is(err, blob.ErrExists) {
+	if s.DB != nil {
+		// Registering a space that's already registered is fine: it keeps
+		// its first time.
+		if _, err := s.DB.Register(ctx, control.Registration{Space: spaceURI, At: time.Now().UTC()}); err != nil {
 			return err
 		}
 	}

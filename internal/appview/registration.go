@@ -2,32 +2,14 @@ package appview
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
-
-	"github.com/haileyok/engram-garden/internal/blob"
-	"github.com/haileyok/engram-garden/internal/spacestore"
 )
 
-// registrationPrefix holds one object per registered space. Objects are
-// written once and never changed.
-const registrationPrefix = "registered-spaces/"
-
 // refreshEvery limits how often a request for an unknown space rereads the
-// registered spaces from storage.
+// registered spaces from the database.
 const refreshEvery = 10 * time.Second
-
-type registration struct {
-	Space        string    `json:"space"`
-	RegisteredAt time.Time `json:"registeredAt"`
-}
-
-func registrationKey(spaceURI string) string {
-	return registrationPrefix + spacestore.SpaceKey(spaceURI) + ".json"
-}
 
 // IndexedSpaces is every space this service indexes: the configured ones
 // and the registered ones.
@@ -64,33 +46,17 @@ func (s *Server) addRegistered(spaceURI string) {
 	s.registered[spaceURI] = true
 }
 
-// LoadRegistrations reads the registered spaces from storage.
+// LoadRegistrations reads the registered spaces from the database.
 func (s *Server) LoadRegistrations(ctx context.Context) error {
-	if s.Blob == nil {
+	if s.DB == nil {
 		return nil
 	}
-	objs, err := s.Blob.List(ctx, registrationPrefix)
+	regs, err := s.DB.Registrations(ctx)
 	if err != nil {
 		return err
 	}
-	for _, o := range objs {
-		if !strings.HasSuffix(o.Key, ".json") {
-			continue
-		}
-		raw, err := blob.GetBytes(ctx, s.Blob, o.Key)
-		if err != nil {
-			return err
-		}
-		var reg registration
-		if err := json.Unmarshal(raw, &reg); err != nil || reg.Space == "" {
-			s.log().Warn("skipping an unreadable space registration", "key", o.Key, "err", err)
-			continue
-		}
-		if registrationKey(reg.Space) != o.Key {
-			s.log().Warn("skipping a space registration stored under the wrong key", "key", o.Key, "space", reg.Space)
-			continue
-		}
-		s.addRegistered(reg.Space)
+	for _, r := range regs {
+		s.addRegistered(r.Space)
 	}
 	return nil
 }
@@ -102,7 +68,7 @@ func (s *Server) knows(ctx context.Context, spaceURI string) bool {
 	if s.indexes(spaceURI) {
 		return true
 	}
-	if s.Blob == nil {
+	if s.DB == nil {
 		return false
 	}
 	s.regMu.Lock()

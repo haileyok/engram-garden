@@ -23,7 +23,7 @@ import (
 	"github.com/bluesky-social/indigo/atproto/syntax"
 	"github.com/haileyok/cocoon/space"
 
-	"github.com/haileyok/engram-garden/internal/blob"
+	"github.com/haileyok/engram-garden/internal/control"
 	"github.com/haileyok/engram-garden/internal/indexer"
 	"github.com/haileyok/engram-garden/internal/lex"
 	"github.com/haileyok/engram-garden/internal/metrics"
@@ -63,8 +63,9 @@ type Server struct {
 	CookieKey []byte
 	// Ring decides which node owns each space. Nil means a single node.
 	Ring *routing.Ring
-	// Blob, when set, holds the registry of indexed spaces.
-	Blob blob.Store
+	// DB, when set, holds the registered spaces. Grants have their own
+	// handle to it, in Grants.
+	DB control.Store
 	// HTTP forwards requests to other nodes.
 	HTTP *http.Client
 
@@ -843,7 +844,7 @@ func (s *Server) handleDIDDoc(w http.ResponseWriter, r *http.Request) {
 // Run keeps the index current until ctx ends. For every space this node
 // owns, it syncs at start and on each poll tick, and renews notification
 // registrations when the service is publicly reachable. The coordinator
-// also keeps the registry of indexed spaces.
+// also clears abandoned sign-ins.
 func (s *Server) Run(ctx context.Context, poll time.Duration, register bool) {
 	renewAt := map[string]time.Time{}
 	tick := func() {
@@ -851,15 +852,12 @@ func (s *Server) Run(ctx context.Context, poll time.Duration, register bool) {
 			s.log().Warn("reading space registrations failed", "err", err)
 		}
 		spaces := s.allSpaces()
-		if s.Blob != nil {
-			if _, err := s.ring().WriteRegistry(ctx, s.Blob, spaces); err != nil {
-				s.log().Warn("writing the registry failed", "err", err)
-			}
-		}
-		// One node clears abandoned sign-ins: the registry's coordinator.
+		// One node clears abandoned sign-ins: the coordinator.
 		if s.Grants != nil && s.ring().IsCoordinator() {
-			if err := s.Grants.Sweep(ctx, time.Now()); err != nil {
+			if n, err := s.Grants.Sweep(ctx, time.Now()); err != nil {
 				s.log().Warn("clearing abandoned sign-ins failed", "err", err)
+			} else if n > 0 {
+				s.log().Info("cleared abandoned sign-ins", "count", n)
 			}
 		}
 		spacesIndexed.Set(float64(len(spaces)))

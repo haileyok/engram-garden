@@ -122,23 +122,40 @@ no place in the member list.
 
 ### Where grants are kept
 
-In the same bucket as the index:
+In a small Postgres database (`ENGRAM_DATABASE_URL`), not in the bucket with
+the index. The index can be rebuilt from the members' PDSes, so losing the
+bucket costs time. A grant can't be rebuilt: losing one means its authority
+has to grant again. The data is small, rewritten in place (an OAuth session
+changes on every token refresh), and wants atomic updates, which is what a
+bucket is bad at and a database is good at. `internal/control` defines the
+store, and `internal/control/migrations/` the tables:
 
-| Key | Contents | Written |
+| Table | Contents | Written |
 |---|---|---|
-| `grants/<space key>.json` | space, the authority's DID, OAuth session ID, when granted | on each grant; deleted on stop |
-| `oauth/sessions/<hash of DID>/<hash of session ID>.json` | indigo's OAuth session: tokens, DPoP key, auth server URLs | on grant and on every token refresh |
-| `oauth/requests/<hash of state>.json` | indigo's record of a sign-in in progress | at the start of a grant or stop; deleted at the callback; ignored after 10 minutes |
-| `oauth/pending/<hash of state>.json` | the space, grant or stop, and return URL of a sign-in in progress | same |
-| `registered-spaces/<space key>.json` | the space is indexed (unchanged, write-once) | on the first grant |
+| `grants` | space, the authority's DID, OAuth session ID, when granted | on each grant; deleted on stop |
+| `oauth_sessions` | indigo's OAuth session: tokens, DPoP key, auth server URLs | on grant and on every token refresh |
+| `oauth_requests` | indigo's record of a sign-in in progress | at the start of a grant or stop; deleted at the callback; ignored after 10 minutes |
+| `oauth_pending` | the space, grant or stop, and return URL of a sign-in in progress | same |
+| `registered_spaces` | the space is indexed (first registration time, never changed) | on the first grant |
 
-Grants and sessions are overwritten in place. The rule that objects are
-written once applies to segments, manifests and registrations, not to these.
+Sign-ins are keyed by a hash of the OAuth state, so a copy of the table
+isn't enough to finish someone else's sign-in. A callback takes its pending
+record with one `DELETE … RETURNING`, so if the same callback arrives twice,
+on any node, only one of them gets it. Registering a space already
+registered changes nothing.
+
+The coordinator node clears sign-ins nobody finished, and OAuth sessions no
+grant uses, once they're older than 10 minutes.
 
 A stolen OAuth session allows reading every memory space its grantor
-governs, until the grant is stopped or revoked. The bucket already holds the
-text of every indexed memory, so it needed protecting anyway; encrypting
-sessions at rest is a later improvement.
+governs, until the grant is stopped or revoked. The database credentials
+and its backups are therefore as sensitive as the bucket's, which holds the
+text of every indexed memory. Encrypting sessions at rest is a later
+improvement.
+
+Earlier versions kept all of this as objects in the bucket (`grants/`,
+`oauth/`, `registered-spaces/`). `engram-appview migrate-control` copies
+them into the database once; see the README.
 
 ### Using a grant
 
@@ -148,7 +165,7 @@ sessions at rest is a later improvement.
   `getDelegationToken`, as before;
 - the appview: look up the space's grant, resume its OAuth session, and call
   `getDelegationToken` on the authority's PDS. indigo refreshes the access
-  token when it expires and saves the new tokens through the bucket store.
+  token when it expires and saves the new tokens through the database.
 
 A credential lasts 10 minutes and is renewed 90 seconds before it expires, so
 each indexed space uses its grant about every 8½ minutes while its owner node
