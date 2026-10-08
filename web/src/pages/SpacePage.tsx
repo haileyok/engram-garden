@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, type SpaceStatus } from "../api";
 import { goToGrant, IndexingNotice, useService } from "../components/Indexing";
+import { ConnectAgent } from "../components/ConnectAgent";
 import { useSession } from "../App";
 import { useRouter } from "../router";
 import { Handle } from "../profiles";
@@ -11,7 +12,7 @@ import { StatusPanel } from "./StatusPanel";
 import { Manage } from "./Manage";
 import { rememberSpace } from "./Home";
 
-type Tab = "memories" | "status" | "manage";
+type Tab = "memories" | "status" | "manage" | "agents";
 
 export function SpacePage({ uri }: { uri: string }) {
   const session = useSession();
@@ -37,7 +38,7 @@ export function SpacePage({ uri }: { uri: string }) {
   if (!ref) return <p className="error">Not a space URI.</p>;
   const unindexed = statusError instanceof ApiError && statusError.code === "UnknownSpace";
 
-  const tabs: [Tab, string][] = [["memories", "Memories"], ["status", "Status"]];
+  const tabs: [Tab, string][] = [["memories", "Memories"], ["status", "Status"], ["agents", "Connect an agent"]];
   if (isAuthority) tabs.push(["manage", "Manage"]);
 
   return (
@@ -69,6 +70,9 @@ export function SpacePage({ uri }: { uri: string }) {
       {tab === "memories" && !unindexed && !statusError && <Memories uri={uri} onStatus={setStatus} />}
       {tab === "status" && status && <StatusPanel status={status} />}
       {tab === "manage" && isAuthority && <Manage uri={uri} status={status} onChanged={load} />}
+      {tab === "agents" && (
+        <ConnectAgent uri={uri} status={status} isAuthority={isAuthority} onManage={() => navigate(spacePath(uri) + "?tab=manage")} />
+      )}
     </>
   );
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { grantLink, memoryAuthor, parseSpaceUri, spacePath, validSpaceName } from "./uri";
+import { agentSetup, originOf } from "./connect";
 import { knownPrefixes, listLocalModels, normalizeDigest, normalizeModelName } from "./ollama";
 
 const space = "at://did:plc:abc123/space/garden.engram.space/team";
@@ -28,6 +29,15 @@ describe("space URIs", () => {
     expect(u.searchParams.get("space")).toBe(space);
     expect(u.searchParams.get("mode")).toBe("stop");
     expect(u.searchParams.get("return")).toBe("https://engram.test/space/x?tab=manage");
+  });
+  it("writes an agent's setup commands", () => {
+    const s = agentSetup(space, "https://api.engram.garden");
+    expect(s.init).toBe(`engram init --space ${space}`);
+    expect(s.initHeadless).toBe(`engram init --space ${space} --password`);
+    expect(JSON.parse(s.mcp)).toEqual({ mcpServers: { engram: { command: "engram-mcp" } } });
+    expect(agentSetup(space, "https://appview.example").init).toBe(`engram init --space ${space} --appview https://appview.example`);
+    expect(originOf("https://appview.example/oauth/grant")).toBe("https://appview.example");
+    expect(originOf("not a url")).toBeUndefined();
   });
   it("checks space names", () => {
     expect(validSpaceName("team-memory")).toBe(true);

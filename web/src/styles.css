@@ -148,3 +148,10 @@ details summary { cursor: pointer; color: var(--muted); }
 .step.failed { color: var(--danger); }
 .step.doing .step-mark { animation: pulse 1s infinite; }
 @keyframes pulse { 50% { opacity: 0.3; } }
+
+/* Connect an agent */
+.connect { padding-left: 1.2rem; display: grid; gap: 0.9rem; }
+.snippet { position: relative; margin: 0.4rem 0; }
+.snippet pre { margin: 0; padding: 0.6rem 3.5rem 0.6rem 0.75rem; background: var(--accent-soft); border-radius: var(--radius); overflow-x: auto; }
+.snippet pre code { word-break: normal; white-space: pre; }
+.snippet button { position: absolute; top: 0.35rem; right: 0.5rem; }
