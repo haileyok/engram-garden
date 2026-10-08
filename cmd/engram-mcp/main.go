@@ -3,7 +3,7 @@
 // with the model the space declares, through an OpenAI-compatible endpoint
 // (Ollama by default).
 //
-// It reads the settings `engram init` writes (~/.config/engram/config.json,
+// It reads the settings the engram CLI writes (~/.config/engram/config.json,
 // or $ENGRAM_CONFIG_DIR), and ENGRAM_* environment variables override them:
 // ENGRAM_SPACES, ENGRAM_SPACE, ENGRAM_IDENTIFIER / ENGRAM_PASSWORD, ENGRAM_APPVIEW_URL,
 // ENGRAM_APPVIEW_DID, ENGRAM_PDS_HOST and ENGRAM_EMBED_*.
@@ -30,8 +30,8 @@ import (
 const usage = `engram-mcp: Engram Garden memory tools (list_spaces, remember, recall,
 get_memory, list_memories, forget) for an MCP client, over stdio.
 
-Set it up once with the engram CLI (engram init --space <space URI>; add more
-spaces with engram use <space URI>), then configure your MCP client to run it:
+Set it up once with the engram CLI (engram login, then engram spaces add
+<space URI> or engram create <name>), then configure your MCP client to run it:
 
   {"mcpServers": {"engram": {"command": "engram-mcp"}}}
 
