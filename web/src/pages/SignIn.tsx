@@ -41,17 +41,6 @@ export function SignIn() {
               learned, and a way to search it from any machine.
             </p>
           </div>
-          <div className="promise promise-a">
-            <h2>On any machine</h2>
-            <p>Write a note on your laptop. Find it from the CI box, the server, the Pi in the closet.</p>
-          </div>
-          <div className="promise promise-b">
-            <h2>Yours to keep</h2>
-            <p>
-              Notes are records in your own ATProto account. The search index is built from those records, so you can
-              rebuild it or run your own.
-            </p>
-          </div>
           <form onSubmit={submit} className="hero-signin" id="signin">
             <h2>Sign in</h2>
             <p className="muted small">Your account has to be on a server that supports ATProto spaces.</p>

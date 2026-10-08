@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { AgentDemo } from "../components/AgentDemo";
+import { Garden } from "../components/Garden";
 import { Prompt, TermFrame } from "../components/Terminal";
 import { Logo } from "../Logo";
 import { agentSetup } from "../lib/connect";
@@ -57,6 +58,32 @@ function Json({ text }: { text: string }) {
   return <>{parts}</>;
 }
 
+// Three things to know before reading on, under the garden.
+function Promises() {
+  return (
+    <div className="promises">
+      <div className="promise">
+        <h2>On any machine</h2>
+        <p>Write a note on your laptop. Find it from the CI box, the server, the Pi in the closet.</p>
+      </div>
+      <div className="promise">
+        <h2>With your whole team</h2>
+        <p>
+          Everyone on a project writes to the same space. Agents, scripts and people all add notes, and everyone's
+          agents can search them.
+        </p>
+      </div>
+      <div className="promise">
+        <h2>Yours to keep</h2>
+        <p>
+          Notes are records in your own ATProto account. The search index is built from those records, so you can
+          rebuild it or run your own.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // The loud part of the page: why this is built on ATProto. The statements are
 // big on purpose, and the small print under each says what's behind it.
 function WhyAtproto() {
@@ -94,9 +121,15 @@ export function Landing() {
   const own = agentSetup(EXAMPLE_SPACE, OWN_APPVIEW);
   return (
     <>
-      <figure className="demo">
-        <AgentDemo />
-      </figure>
+      <Garden />
+      <p className="garden-fine">
+        Example notes and a simplified matcher, to show the idea. Real searches embed the question with the space's
+        embedding model.
+      </p>
+
+      <Promises />
+
+      <Sprig />
 
       <Section id="team" title="Shared across a team">
         <p>
@@ -144,6 +177,10 @@ export function Landing() {
           only answers members of the space.
         </p>
       </Section>
+
+      <figure className="demo">
+        <AgentDemo />
+      </figure>
 
       <Sprig />
 
