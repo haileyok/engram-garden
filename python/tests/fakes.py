@@ -292,8 +292,11 @@ class World:
             keys = sorted(recs)
             start = keys.index(q["cursor"]) + 1 if "cursor" in q else 0
             page = keys[start : start + limit]
+            # Like cocoon: list items name a record by collection and rkey, with no uri.
             out: dict[str, Any] = {
-                "records": [{"uri": f"{q['space']}/{q['repo']}/{q['collection']}/{k}", "value": recs[k]} for k in page]
+                "records": [
+                    {"collection": q["collection"], "rkey": k, "cid": "bafy-" + k, "value": recs[k]} for k in page
+                ]
             }
             if start + limit < len(keys):
                 out["cursor"] = page[-1]
