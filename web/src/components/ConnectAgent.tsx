@@ -1,27 +1,7 @@
-import { useState } from "react";
 import type { SpaceStatus } from "../api";
 import { agentSetup, originOf } from "../lib/connect";
 import { useService } from "./Indexing";
-
-function Snippet({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  const copy = () => {
-    navigator.clipboard?.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  };
-  return (
-    <div className="snippet">
-      <pre>
-        <code>{text}</code>
-      </pre>
-      <button type="button" className="link small" onClick={copy}>
-        {copied ? "copied" : "copy"}
-      </button>
-    </div>
-  );
-}
+import { Snippet } from "./Snippet";
 
 // ConnectAgent shows how an agent starts storing and recalling memories in
 // this space with the engram CLI or engram-mcp.

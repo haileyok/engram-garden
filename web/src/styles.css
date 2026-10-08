@@ -45,7 +45,6 @@ a { color: var(--accent); }
 }
 .brand { font-weight: 650; text-decoration: none; color: var(--ink); display: inline-flex; align-items: center; gap: 0.35rem; }
 .sprout { color: var(--accent); flex: none; }
-.signin h1 { display: flex; align-items: center; gap: 0.5rem; }
 .row input[type="checkbox"] { flex: none; min-width: 0; }
 .who { display: flex; gap: 0.75rem; align-items: center; color: var(--muted); font-size: 0.9rem; }
 
@@ -85,11 +84,6 @@ button.primary, .button.primary { background: var(--accent); border-color: var(-
 button.small { padding: 0.2rem 0.55rem; font-size: 0.85rem; }
 button.link { border: none; background: none; padding: 0; color: var(--accent); }
 button.link.danger { color: var(--danger); }
-
-.signin { max-width: 420px; margin: 12vh auto 0; padding: 0 1.25rem; }
-.signin h1 { font-size: 2rem; }
-.lede { color: var(--muted); }
-.signin form { display: grid; gap: 0.6rem; }
 
 .space-list { list-style: none; padding: 0; margin: 0 0 1rem; display: grid; gap: 0.5rem; }
 .space-list li { display: flex; align-items: center; gap: 0.5rem; }
