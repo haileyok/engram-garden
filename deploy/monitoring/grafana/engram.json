@@ -458,7 +458,7 @@
     {
       "type": "stat",
       "title": "Rejected notifications (1h)",
-      "description": "Authorities don't retry a rejected notification; the write waits for the next poll.",
+      "description": "Authorities don't retry a rejected notification; the write waits for the next poll. not_granted: the space's authority hasn't let the appview read it, so its writes are never searchable.",
       "id": 7,
       "datasource": {
         "type": "prometheus",
@@ -759,7 +759,7 @@
     {
       "type": "timeseries",
       "title": "Notifications by result",
-      "description": "accepted and deferred are good; anything else means an authority's notification was refused.",
+      "description": "accepted and deferred are good; anything else means a notification was refused, or (not_granted) arrived for a space the appview isn't allowed to read.",
       "id": 13,
       "datasource": {
         "type": "prometheus",

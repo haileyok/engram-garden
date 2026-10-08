@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/haileyok/cocoon/space"
+
 	"github.com/haileyok/engram-garden/internal/embed"
 	"github.com/haileyok/engram-garden/internal/lex"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
@@ -128,11 +130,72 @@ func spaceOfURI(uri string) (string, error) {
 
 // Remember stores a memory in a space (default: the default space).
 func (s *Spaces) Remember(ctx context.Context, in RememberIn) (RememberOut, error) {
-	a, _, err := s.Agent(in.Space)
+	a, e, err := s.Agent(in.Space)
 	if err != nil {
 		return RememberOut{}, err
 	}
-	return a.Remember(ctx, in)
+	// While the memory is embedded and stored, check the appview can read
+	// the space: if it can't, the memory is stored and never searchable.
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	state := make(chan string, 1)
+	go func() {
+		st, _ := a.Indexing(cctx, false)
+		state <- st
+	}()
+	out, err := a.Remember(ctx, in)
+	if err != nil {
+		return out, err
+	}
+	select {
+	case st := <-state:
+		if p := indexingProblem(a, e, st); p != "" {
+			out.Note = "Stored, but " + p
+		}
+	case <-time.After(indexingCheckWait):
+	}
+	return out, nil
+}
+
+// indexingCheckWait is how long after a memory is stored to wait for the
+// check that the appview can read its space.
+const indexingCheckWait = 2 * time.Second
+
+// indexingProblem says what's wrong when the appview can't read a space
+// (given its access state), or returns "" when nothing is. a is an agent of
+// the space.
+func indexingProblem(a *Agent, e SpaceEntry, state string) string {
+	if state == "" || state == "granted" {
+		return ""
+	}
+	why := "its authority hasn't let the appview index it"
+	if state == "lapsed" {
+		why = "the appview's access to it has stopped working"
+	}
+	todo := "Its authority must approve indexing: in the web app, or with `engram index --space " + e.Name + "`."
+	if ref, err := space.ParseRef(e.URI); err == nil {
+		if ref.Authority == a.Client.DID().String() {
+			todo = "This account governs it: run `engram index --space " + e.Name + "` (or use the index_space tool) and open the link it gives, signed in as this account."
+		} else {
+			todo = "Its authority, " + ref.Authority + ", must approve indexing: in the web app, or with `engram index --space " + e.Name + "`."
+		}
+	}
+	return fmt.Sprintf("the appview can't read this space (%s: %s), so what's stored in it can't be found by searching. %s", state, why, todo)
+}
+
+// emptyNote explains an empty search: it may be that the appview can't read
+// the space, rather than there being nothing in it.
+func emptyNote(ctx context.Context, a *Agent, e SpaceEntry) string {
+	ctx, cancel := context.WithTimeout(ctx, indexingCheckWait)
+	defer cancel()
+	st, err := a.Indexing(ctx, false)
+	if err != nil {
+		return ""
+	}
+	if p := indexingProblem(a, e, st); p != "" {
+		return "Nothing came back, and " + p
+	}
+	return ""
 }
 
 // Recall searches one space or, by default (or with AllSpaces), every space
@@ -145,6 +208,9 @@ func (s *Spaces) Recall(ctx context.Context, in RecallIn) (MemoriesOut, error) {
 			return MemoriesOut{}, err
 		}
 		out, err := a.Recall(ctx, in)
+		if err == nil && len(out.Memories) == 0 {
+			out.Note = strings.TrimSpace(out.Note + " " + emptyNote(ctx, a, e))
+		}
 		return label(out, e.Name), err
 	}
 	if strings.TrimSpace(in.Query) == "" {
@@ -158,6 +224,7 @@ func (s *Spaces) Recall(ctx context.Context, in RecallIn) (MemoriesOut, error) {
 		name string
 		out  MemoriesOut
 		err  error
+		note string // why an empty result may be wrong
 	}
 	results := make([]result, len(spaces))
 	var wg sync.WaitGroup
@@ -166,6 +233,9 @@ func (s *Spaces) Recall(ctx context.Context, in RecallIn) (MemoriesOut, error) {
 			a, _, err := s.Agent(e.URI)
 			if err == nil {
 				results[i].out, err = a.Recall(ctx, in)
+				if err == nil && len(results[i].out.Memories) == 0 {
+					results[i].note = emptyNote(ctx, a, e)
+				}
 			}
 			results[i].name, results[i].err = e.Name, err
 		})
@@ -183,6 +253,9 @@ func (s *Spaces) Recall(ctx context.Context, in RecallIn) (MemoriesOut, error) {
 		merged.Memories = append(merged.Memories, label(r.out, r.name).Memories...)
 		if r.out.Note != "" {
 			notes = append(notes, r.name+": "+r.out.Note)
+		}
+		if r.note != "" {
+			notes = append(notes, r.name+": "+r.note)
 		}
 	}
 	if len(failed) == len(results) {
@@ -273,6 +346,14 @@ type SpaceInfo struct {
 	NextModel      *lex.ModelInfo `json:"nextModel,omitempty"`
 	DocumentPrefix string         `json:"documentPrefix,omitempty"`
 	QueryPrefix    string         `json:"queryPrefix,omitempty"`
+	// Indexing is whether the appview may read the space, and so index what
+	// agents store in it: granted, missing (its authority never let the
+	// appview) or lapsed (it did, and that stopped working). Empty when the
+	// appview doesn't say.
+	Indexing string `json:"indexing,omitempty"`
+	// Warning explains what to do when the appview can't read the space:
+	// memories stored in it aren't searchable.
+	Warning string `json:"warning,omitempty"`
 	// LocalModel says whether this machine's embedding endpoint has the
 	// model: "ready", or what's wrong.
 	LocalModel string `json:"localModel,omitempty"`
@@ -324,6 +405,12 @@ func (s *Spaces) describe(ctx context.Context, e SpaceEntry) SpaceInfo {
 	if err != nil {
 		info.Error = err.Error()
 		return info
+	}
+	if st, err := a.Indexing(ctx, true); err == nil {
+		info.Indexing = st
+		if p := indexingProblem(a, e, st); p != "" {
+			info.Warning = strings.ToUpper(p[:1]) + p[1:]
+		}
 	}
 	cfg, err := a.Config(ctx, false)
 	if err != nil {

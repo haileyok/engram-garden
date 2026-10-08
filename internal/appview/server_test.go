@@ -280,6 +280,61 @@ func TestReaderAuth(t *testing.T) {
 	}
 }
 
+// TestNotificationForSpaceWithoutGrant: a space whose authority never let the
+// appview read it (or took that back) can't be synced, however many writes
+// are notified. They're counted apart from failed syncs, so a hoster can
+// alert on them, and indexing picks up the missed writes once access is
+// granted.
+func TestNotificationForSpaceWithoutGrant(t *testing.T) {
+	t.Parallel()
+	f := setup(t)
+	ctx := context.Background()
+	// The registration outlives the grant at the authority's server.
+	if _, err := f.srv.Indexer.Register(ctx, f.net.Space, f.srv.ServiceID()); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.srv.Indexer.SyncSpace(ctx, f.net.Space); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.grants.Delete(ctx, f.net.Space); err != nil {
+		t.Fatal(err)
+	}
+	notGranted := func() float64 {
+		return metricValue(t, "engram_notifications_total", map[string]string{"kind": "write", "result": "not_granted"})
+	}
+	before := notGranted()
+
+	f.net.Put(f.alice, indexer.Collection, "a1", memory("remember the milk"))
+	if got := f.net.DeliverWrite(f.alice, ""); len(got) != 1 || got[0] != 200 {
+		t.Fatalf("delivery statuses: %v", got)
+	}
+	f.srv.Jobs.Wait()
+	// Other tests share the metrics registry: at least.
+	if got := notGranted() - before; got < 1 {
+		t.Fatalf("a write for a space without a grant was counted %v times as not_granted", got)
+	}
+	if a := f.access(t); a["state"] != "missing" {
+		t.Fatalf("access without a grant: %v", a)
+	}
+	if status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", searchParams(f.net.Space, "milk")); status != 200 || len(memories(body)) != 0 {
+		t.Fatalf("a write was indexed without a grant: %d %v", status, body)
+	}
+
+	if err := f.grants.Put(ctx, Grant{Space: f.net.Space, DID: f.net.Authority.DID, SessionID: "seed", GrantedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	f.net.Put(f.alice, indexer.Collection, "a2", memory("remember the eggs"))
+	if got := f.net.DeliverWrite(f.alice, ""); len(got) != 1 || got[0] != 200 {
+		t.Fatalf("delivery statuses: %v", got)
+	}
+	f.srv.Jobs.Wait()
+	// The earlier write comes along with this one.
+	status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", searchParams(f.net.Space, "remember"))
+	if status != 200 || len(memories(body)) != 2 {
+		t.Fatalf("after the grant: %d %v", status, body)
+	}
+}
+
 func TestNotificationsKeepTheIndexCurrent(t *testing.T) {
 	t.Parallel()
 	f := setup(t)

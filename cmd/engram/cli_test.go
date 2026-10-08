@@ -34,6 +34,8 @@ type world struct {
 	net *spacetest.Net
 	av  *appview.Server
 	url string
+	// grants is the appview's grants, when it keeps them.
+	grants *appview.Grants
 	// signInErr makes the next opened session fail, as an expired one does.
 	signInErr error
 }
@@ -46,6 +48,27 @@ func newWorld(t *testing.T) *world {
 // newSpaceWorld is a world for a space with the given authority and key.
 // Agents in several spaces use one world per space.
 func newSpaceWorld(t *testing.T, authority, skey string) *world {
+	t.Helper()
+	return buildWorld(t, authority, skey, false)
+}
+
+// newGrantedWorld is a world whose appview keeps grants, with the authority
+// having granted access (w.grant). Tests take it away with w.grants.Delete.
+func newGrantedWorld(t *testing.T) *world {
+	t.Helper()
+	return buildWorld(t, "authority", "memory", true)
+}
+
+// grant records the authority's grant to the appview.
+func (w *world) grant(t *testing.T) {
+	t.Helper()
+	g := appview.Grant{Space: w.net.Space, DID: w.net.Authority.DID, SessionID: "session", GrantedAt: time.Now()}
+	if err := w.grants.Put(context.Background(), g); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func buildWorld(t *testing.T, authority, skey string, withGrants bool) *world {
 	t.Helper()
 	n := spacetest.NewSpace(t, authority, skey)
 	indexerAcct := n.NewAccount("did:plc:indexer")
@@ -65,11 +88,19 @@ func newSpaceWorld(t *testing.T, authority, skey string) *world {
 	t.Cleanup(func() { _ = st.Close(context.Background()) })
 	av := &appview.Server{Store: st, Dir: n.Dir, ServiceDID: serviceDID, Spaces: []string{n.Space},
 		Indexer: &indexer.Indexer{Store: st, Client: ic, Dir: n.Dir}}
+	var grants *appview.Grants
+	if withGrants {
+		grants = &appview.Grants{Blob: blob.Dir{Root: t.TempDir()}}
+		av.Grants = grants
+	}
 	hs := httptest.NewServer(av.Handler())
 	t.Cleanup(hs.Close)
 	n.RegisterService(serviceDID, appview.SyncerFragment, hs.URL)
 	n.Put(n.Authority, lex.ConfigCollection, lex.ConfigRkey, lex.Config{ModelInfo: model}.Record(time.Now()))
-	w := &world{net: n, av: av, url: hs.URL}
+	w := &world{net: n, av: av, url: hs.URL, grants: grants}
+	if withGrants {
+		w.grant(t)
+	}
 	if _, err := av.Indexer.Register(context.Background(), n.Space, av.ServiceID()); err != nil {
 		t.Fatal(err)
 	}
@@ -574,5 +605,46 @@ func TestSeveralSpaces(t *testing.T) {
 	s, err := agent.LoadSettings(a.path, nil)
 	if def, _ := s.Default(); err != nil || len(s.Spaces) != 1 || def.Name != "memory" {
 		t.Fatalf("after removing: %+v %v", s, err)
+	}
+}
+
+// TestSpaceTheAppviewCantRead: the CLI says, where it matters, that memories
+// stored in a space the appview isn't allowed to read won't be searchable,
+// and what to do about it; the warnings go once the authority approves.
+func TestSpaceTheAppviewCantRead(t *testing.T) {
+	t.Parallel()
+	w := newGrantedWorld(t)
+	a := w.agent(t)
+	a.mustRun("login", "--space", w.net.Space, "--handle", "alice.test")
+	if out := a.mustRun("spaces"); !strings.Contains(out, "indexing: the appview can read it") {
+		t.Fatalf("spaces with a grant: %s", out)
+	}
+	if out := a.mustRun("remember", "the deploy key rotates every friday"); strings.Contains(out, "can't read") {
+		t.Fatalf("remember with a grant: %s", out)
+	}
+
+	if err := w.grants.Delete(context.Background(), w.net.Space); err != nil {
+		t.Fatal(err)
+	}
+	out := a.mustRun("remember", "staging deploys need a vpn")
+	for _, want := range []string{"Remembered: at://", "Stored, but the appview can't read this space", "did:plc:authority", "engram index --space memory"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("remember lacks %q: %s", want, out)
+		}
+	}
+	if out := a.mustRun("spaces"); !strings.Contains(out, "indexing: The appview can't read this space") {
+		t.Fatalf("spaces without a grant: %s", out)
+	}
+	code, out, _ := a.run("status")
+	if code != 1 || !strings.Contains(out, "engram index --space memory") {
+		t.Fatalf("status without a grant: %d %s", code, out)
+	}
+
+	w.grant(t)
+	if out := a.mustRun("remember", "prod deploys need a vpn too"); strings.Contains(out, "can't read") {
+		t.Fatalf("remember after the grant: %s", out)
+	}
+	if code, out, _ := a.run("status"); code != 0 {
+		t.Fatalf("status after the grant: %d %s", code, out)
 	}
 }

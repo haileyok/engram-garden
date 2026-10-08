@@ -21,7 +21,10 @@ groups:
           description: >-
             Authorities don't retry a refused notification, so new memories wait for the
             next poll (ENGRAM_POLL_INTERVAL). The appview's log has a "rejected a write
-            notification" line with the reason.
+            notification" line with the reason. For not_granted, the space's authority hasn't
+            let the appview read it, so its new memories never become searchable: the log
+            line "a write arrived for a space the appview isn't allowed to read" names the
+            space and the page where its authority approves indexing.
 
       - alert: EngramIndexLagHigh
         expr: histogram_quantile(0.95, sum by (job, instance, le) (rate(engram_index_lag_seconds_bucket[30m]))) > 120

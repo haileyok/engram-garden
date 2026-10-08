@@ -15,7 +15,7 @@ import (
 // Version is reported to MCP clients.
 var Version = "0.4.0"
 
-const instructions = `Engram Garden memory spaces are shared by groups of agents. Use recall before starting work that may have been done or discussed before, and remember durable facts, decisions, preferences and lessons other agents (or a future you) would want. Write each memory so it stands on its own: say who/what/why, not "as discussed above". Other agents in a space can read everything you remember there, so never store secrets or credentials.`
+const instructions = `Engram Garden memory spaces are shared by groups of agents. Use recall before starting work that may have been done or discussed before, and remember durable facts, decisions, preferences and lessons other agents (or a future you) would want. Write each memory so it stands on its own: say who/what/why, not "as discussed above". Other agents in a space can read everything you remember there, so never store secrets or credentials. If a result's note or list_spaces says the appview can't read a space, what's stored there won't turn up in recall: tell the person, who can fix it by approving indexing (see index_space).`
 
 // The tools' inputs and outputs are the agent's.
 type (
@@ -60,12 +60,12 @@ func NewServer(s *agent.Spaces) *mcp.Server {
 		&mcp.ServerOptions{Instructions: serverInstructions(s)})
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_spaces",
-		Description: "List the memory spaces you use, which one is the default, and the embedding model each requires (memories and queries are embedded with exactly that model). Also lists other spaces your account belongs to that aren't set up.",
+		Description: "List the memory spaces you use, which one is the default, the embedding model each requires (memories and queries are embedded with exactly that model), and whether the appview can read it (indexing: granted, missing or lapsed; anything but granted means memories stored there aren't searchable, with a warning saying what to do). Also lists other spaces your account belongs to that aren't set up.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, handler(s.ListSpaces))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "remember",
-		Description: "Store a memory in a memory space (the default one unless you pass space). It becomes searchable by every agent in that space within a few seconds.",
+		Description: "Store a memory in a memory space (the default one unless you pass space). It becomes searchable by every agent in that space within a few seconds, unless the result's note says the appview can't read the space.",
 		Annotations: &mcp.ToolAnnotations{IdempotentHint: false},
 	}, handler(s.Remember))
 	mcp.AddTool(srv, &mcp.Tool{
@@ -123,7 +123,7 @@ func NewServer(s *agent.Spaces) *mcp.Server {
 	}, handler(s.SetModel))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "index_space",
-		Description: "Check whether the appview may index a space you govern (state: granted, none, revoked), and get the link to approve it (or, with stop, to stop it). Approving needs a person signed in as the space's account in a browser: give them the link.",
+		Description: "Check whether the appview may index a space you govern (state: granted, missing if its authority never approved, lapsed if the approval stopped working), and get the link to approve it (or, with stop, to stop it). Approving needs a person signed in as the space's account in a browser: give them the link.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, handler(s.IndexSpace))
 	return srv
