@@ -77,8 +77,30 @@ else
     who=$(curl -fsS "https://bsky.social/xrpc/com.atproto.identity.resolveHandle?handle=${who#@}" | jq -r .did)
   fi
   [[ $who == "$DID" ]] || die "$GOAT_USERNAME is $who, but the TXT record points at $DID"
-  goat account login
+  if ! out=$(goat account login 2>&1); then
+    if grep -qiE "auth.?factor|2fa" <<<"$out"; then
+      # The first try made the server email a code.
+      say "The server emailed you a sign-in code."
+      code=${ATP_AUTH_FACTOR_TOKEN:-}
+      [[ -n $code ]] || read -r -p "Code: " code || true
+      [[ -n $code ]] || die "no code given"
+      goat account login --auth-factor-token "$code" || die "sign-in failed with that code"
+    else
+      printf '%s\n' "$out" >&2
+      die "couldn't sign in"
+    fi
+  else
+    say "$out"
+  fi
 fi
+
+# After signing in, goat reuses the saved session. With the username and
+# password still in the environment, some of its commands sign in again from
+# scratch, without the code, so the commands below don't get them.
+goat_saved() {
+  env -u GOAT_USERNAME -u GOAT_PASSWORD -u ATP_USERNAME -u ATP_PASSWORD \
+    -u ATP_AUTH_USERNAME -u ATP_AUTH_PASSWORD -u ATP_AUTH_FACTOR_TOKEN goat "$@"
+}
 
 # 3. The record and query lexicons. goat can't read a space type yet, so that
 # one is written below as a plain record.
@@ -87,7 +109,7 @@ for f in "$LEXICONS"/*.json; do
   [[ $(basename "$f" .json) == "${SPACE_NSID##*.}" ]] || files+=("$f")
 done
 say "Publishing ${#files[@]} lexicons"
-run goat lex publish --update "${files[@]}"
+run goat_saved lex publish --update "${files[@]}"
 
 # 4. The space type declaration.
 say "Publishing $SPACE_NSID"
@@ -100,10 +122,10 @@ else
   tmp=$(mktemp)
   trap 'rm -f "$tmp"' EXIT
   printf '%s\n' "$record" >"$tmp"
-  if goat record get "$uri" >/dev/null 2>&1; then
-    goat record update --no-validate --rkey "$SPACE_NSID" "$tmp"
+  if goat_saved record get "$uri" >/dev/null 2>&1; then
+    goat_saved record update --no-validate --rkey "$SPACE_NSID" "$tmp"
   else
-    goat record create --no-validate --rkey "$SPACE_NSID" "$tmp"
+    goat_saved record create --no-validate --rkey "$SPACE_NSID" "$tmp"
   fi
 fi
 
@@ -112,7 +134,7 @@ if ((DRY_RUN)); then
   say "Would check that $uri can be read back"
 else
   say "Checking $uri"
-  got=$(goat record get "$uri")
+  got=$(goat_saved record get "$uri")
   [[ $(jq -r '.value.defs.main.type // .defs.main.type' <<<"$got") == space ]] || die "$uri didn't come back as a space type"
   say "ok: servers can now find $SPACE_NSID"
 fi
