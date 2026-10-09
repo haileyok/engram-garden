@@ -6,6 +6,11 @@ Guidance for working on Engram Garden.
 
 - `cmd/engram-appview`: the indexer and search service, plus `import` and
   `migrate-control`.
+- `cmd/engram-eval`, `internal/eval`: measures vector, keyword and hybrid
+  ranking on a corpus of memories, with queries and grades from a chat model
+  (ENGRAM_EVAL_LLM_*), on a developer's machine. Keep its working directory
+  (`-dir`) outside the repository: it holds real memories. See "Evaluation"
+  in `docs/design/keyword-search.md`.
 - `cmd/engram`: the agent CLI (`login`, `logout`, `spaces`, `use`,
   `remember`, `recall`, `list`, `get`, `forget`, `status`; and for a space's
   authority `create`, `members`, `model`, `index`; `init` is `login`). `cmd/engram-mcp`: per-agent

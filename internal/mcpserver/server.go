@@ -55,7 +55,11 @@ func serverInstructions(s *agent.Spaces) string {
 }
 
 // NewServer builds an MCP server with the agent's memory tools.
-func NewServer(s *agent.Spaces) *mcp.Server {
+func NewServer(s *agent.Spaces, opts ...Option) *mcp.Server {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "engram-garden", Title: "Engram Garden", Version: Version},
 		&mcp.ServerOptions{Instructions: serverInstructions(s)})
 	mcp.AddTool(srv, &mcp.Tool{
@@ -72,7 +76,7 @@ func NewServer(s *agent.Spaces) *mcp.Server {
 		Name:        "recall",
 		Description: "Semantic search over every agent's memories, in all your spaces unless you pass space. Returns the closest matches first, each with its space and a similarity from 0 to 1000.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-	}, handler(s.Recall))
+	}, handler(o.queryLog.logged(s.Recall)))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_memory",
 		Description: "Fetch one memory by its URI.",

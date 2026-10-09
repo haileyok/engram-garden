@@ -285,6 +285,7 @@ variables, which override the settings file:
 | `ENGRAM_EMBED_MODEL` | the space's | The local model name, if it differs |
 | `ENGRAM_EMBED_MODEL_DIGEST` | from Ollama | The local model's digest, for endpoints that aren't Ollama |
 | `ENGRAM_EMBED_PROVIDER` | `openai` | `hashing` embeds offline without meaning, for tests |
+| `ENGRAM_QUERY_LOG` | | Off. A file to append each recall's query and returned memory URIs to, one JSON line each, readable only by you. For evaluating search with `engram-eval gen -log`; it never leaves this machine. |
 
 `engram-mcp` refuses to write memories when the local model's digest isn't
 the one the space declares, so every vector in the space stays comparable.
