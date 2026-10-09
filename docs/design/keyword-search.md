@@ -779,9 +779,9 @@ first.
 ### Data
 
 - **Real spaces:** an agent's memory space (about 1,200 memories) and the
-  `coding-agents` space. Never committed. Any processing of their contents
-  by an LLM, for generating queries, judging or synthesizing data, runs on
-  a local model unless the owner explicitly agrees otherwise.
+  `coding-agents` space. Never committed. Their contents go only to an LLM
+  the spaces' owner has approved for generating queries, judging and
+  synthesizing data.
 - **A public benchmark with known judgments,** such as BEIR's SciFact and
   FiQA, as a check that the ranking holds on text we didn't tune for.
 - **A scale corpus** for performance and for ranking at scale: real
@@ -794,10 +794,12 @@ first.
 
 The evaluation runs on a developer's machine, not on the appview:
 `engram-eval` reads the spaces through the normal client, builds the
-index in memory, and uses a local model (Ollama) for generating queries and
-grading. Nothing it reads or produces leaves the machine, and its outputs
-(queries, judgments, reports) stay out of the repository except for
-aggregate numbers quoted in PRs.
+index in memory, embeds with the space's model, and calls an
+OpenAI-compatible chat endpoint, configured by environment variables, for
+generating queries and grading. Apart from those model calls, nothing it
+reads or produces leaves the machine. Its outputs (queries, judgments,
+reports) stay out of the repository except for aggregate numbers quoted in
+PRs.
 
 **Real recall queries** come from an opt-in local log in `engram-mcp`
 (`ENGRAM_QUERY_LOG=<path>`): each recall's query text, space and the
