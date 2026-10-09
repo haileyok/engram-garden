@@ -186,7 +186,8 @@ tfn(t,d) = tf · (k1 + 1) / (tf + k1 · (1 − b + b · dl / avgdl))  < k1 + 1
 s(t,d)  = idf(t) · tfn(t,d)
 ```
 
-with k1 = 1.2 and b = 0.75 to start. This is Lucene's BM25, whose IDF is
+with k1 = 1.2 and b = 0.4, as tuned by the evaluation (b = 0.75, the usual
+value, penalized long memories too much). This is Lucene's BM25, whose IDF is
 never negative. *dl* is always the decoded one-byte norm (see
 [Norms](#segment-format-version-2)), both when scoring and when computing
 bounds, so the two agree.
@@ -197,9 +198,9 @@ Each query token contributes the best of its alternatives, not their sum,
 so a token can't score twice for one occurrence:
 
 ```
-word token w:      c(w) = max( 1.0 · s(w), 0.5 · s(~w) )
+word token w:      c(w) = max( 1.0 · s(w), 1.0 · s(~w) )
 compound token x:  c(x) = max( 1.0 · s(x),
-                               0.4 · Σ over distinct parts p of max( s(p), 0.5 · s(~p) ) )
+                               0.3 · Σ over distinct parts p of max( s(p), 0.5 · s(~p) ) )
 opaque token o:    c(o) = s(o)
 score(d) = Σ over distinct query tokens of c
 ```
@@ -207,8 +208,12 @@ score(d) = Σ over distinct query tokens of c
 - Query tokens are compared after normalization, so `Space` and `space`
   are the same token and count once. A compound's parts are also distinct
   after normalization: `space_space` has one part, `space`.
-- The weights (1.0, 0.5, 0.4) are starting points for the evaluation to
-  tune.
+- The weights were tuned by the evaluation (they started at a stem weight
+  of 0.5 and a parts weight of 0.4). Weighting a stem as much as the exact
+  form fixed word-form queries ("migrating" for "migration"), which lost
+  to vector search at 0.5. An exact match still tends to win, because exact
+  terms are rarer than their stems and score a higher IDF. Results were
+  flat near these values.
 - This is a tree of max and sum over non-negative leaves, not a flat sum
   of term scores: a word whose exact form scores 1.0 and stem 0.8
   contributes 1.0, not 1.8. Every path that scores (the pruned walk, the
@@ -266,8 +271,8 @@ misbehavior in a members-only space.
 ### Fusion
 
 Two rankings over the same candidates: by cosine and by keyword score (for
-candidates with any matching term). They're combined with **reciprocal
-rank fusion** to start:
+candidates with any matching term). The simplest way to combine them is
+**reciprocal rank fusion**:
 
 ```
 fused(m) = 1 / (60 + vector_rank(m)) + 1 / (60 + keyword_rank(m))
@@ -282,8 +287,20 @@ Fusing doesn't guarantee hybrid beats either ranking alone; the
 
 A tuned convex combination of normalized scores usually beats rank fusion
 ([Bruch et al., 2023](https://arxiv.org/abs/2210.11934)) and needs few
-labeled queries to tune. The evaluation compares both; the default ships
-whichever wins, and the response names the fusion used.
+labeled queries to tune. The evaluation compared both, and the convex
+combination won, so it's the default:
+
+```
+fused(m) = 0.5 · (cos(m) − min cos) / (max cos − min cos)
+         + 0.5 · keyword(m) / max keyword
+```
+
+with the minimum and maximum taken over the candidates. A candidate whose
+score on one side is unknown (see below) contributes nothing on that side.
+On an agent's 1,443 memories it scored 0.637 nDCG@10 on the tuning set,
+against 0.596 for rank fusion, and 0.5 was the best weight in every one of
+the top-scoring settings. Rank fusion stays available, and the
+response names the fusion used.
 
 ### When parts run late
 
@@ -616,7 +633,7 @@ scaled integers, like the existing `similarity` (cosine × 1000):
 
 ```json
 "match": {
-  "fusion": "rrf",
+  "fusion": "convex",
   "vector": { "rank": 4, "similarity": 712 },
   "keyword": {
     "rank": 1,
@@ -908,7 +925,6 @@ On the held-out set:
 
 ## Open questions
 
-- Rank fusion or a tuned combination: decided by the evaluation.
 - Whether to drop the exact-form terms for words whose stem equals the word
   (most short words), answering those from the stem's postings. On real
   memories that's 28% of postings. The cost is ranking: the exact form of
