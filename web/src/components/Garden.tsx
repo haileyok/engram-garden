@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import { AUTHORS, CENTER_OF, CLUSTERS, NOTES, SUGGESTIONS, neighbors, search, type Hit } from "../lib/garden";
+import { AUTHORS, CENTER_OF, CLUSTERS, NOTES, SUGGESTIONS, neighbors, recall, search, type Hit } from "../lib/garden";
+import { Prompt } from "./Terminal";
 
 // The landing page's centerpiece: a garden of example notes. Each note is a
 // sprout, colored by who wrote it. Ask a question and a ripple spreads out from
@@ -111,9 +112,9 @@ function draw(ctx: CanvasRenderingContext2D, live: Live, t: number) {
 
   // Night ground, with the light coming up from the soil.
   const bg = ctx.createLinearGradient(0, 0, 0, h);
-  bg.addColorStop(0, "#0a120d");
-  bg.addColorStop(0.62, "#0f1f16");
-  bg.addColorStop(1, "#183321");
+  bg.addColorStop(0, "#282c34");
+  bg.addColorStop(0.6, "#252c30");
+  bg.addColorStop(1, "#1f3128");
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, w, h);
   const horizon = ctx.createRadialGradient(w / 2, h + 40, 10, w / 2, h + 40, w * 0.7);
@@ -520,6 +521,7 @@ export function Garden() {
   };
   const markHover = (id: number | null) => {
     if (live.current) live.current.hover = id;
+    setTip(id);
     redraw.current();
   };
 
@@ -527,93 +529,115 @@ export function Garden() {
   const tipAt = tip !== null && lv ? { x: Math.min(Math.max(lv.px[tip], 130), size.w - 130), y: lv.py[tip] } : null;
 
   return (
-    <section className="garden" ref={wrapRef} aria-labelledby="garden-h">
-      <div className="garden-main">
-        <div className="garden-head">
-          <h2 id="garden-h" className="sr-only">
-            Try a search on some example notes
-          </h2>
-          <p className="garden-kicker">Try it on an example team's notes</p>
-          <form
-            className="garden-ask"
-            onSubmit={(e) => {
-              e.preventDefault();
-              submit(text);
-            }}
-          >
-            <label htmlFor="garden-q" className="sr-only">
-              Ask a question about the example notes
-            </label>
-            <input
-              id="garden-q"
-              ref={inputRef}
-              value={text}
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="how do we ship a change?"
-              onFocus={stopAuto}
-              onChange={(e) => {
-                stopAuto();
-                setText(e.target.value);
+    <section className="term garden" ref={wrapRef} aria-labelledby="garden-h">
+      <div className="term-bar">
+        <span className="term-dots" aria-hidden>
+          <i />
+          <i />
+          <i />
+        </span>
+        <span className="term-title">scout@laptop</span>
+        <span className="term-end" />
+      </div>
+      <h2 id="garden-h" className="sr-only">
+        Try a search on some example notes
+      </h2>
+      <div className="garden-body">
+        <div className="garden-main">
+          <div className="garden-head">
+            <form
+              className="garden-ask"
+              onSubmit={(e) => {
+                e.preventDefault();
+                submit(text);
               }}
-            />
-            <button type="submit">Ask</button>
-          </form>
-          <div className="garden-chips">
-            {SUGGESTIONS.map((s) => (
-              <button type="button" key={s} onClick={() => submit(s)} className={s === asked ? "on" : ""}>
-                {s}
-              </button>
-            ))}
+            >
+              <label htmlFor="garden-q" className="sr-only">
+                Ask a question about the example notes
+              </label>
+              <span aria-hidden>
+                <Prompt cwd="~/api" />
+              </span>
+              <span className="cmd" aria-hidden>
+                engram recall{" "}
+              </span>
+              <span aria-hidden>"</span>
+              <input
+                id="garden-q"
+                ref={inputRef}
+                value={text}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="how do we ship a change?"
+                onFocus={stopAuto}
+                onChange={(e) => {
+                  stopAuto();
+                  setText(e.target.value);
+                }}
+              />
+              <span aria-hidden>"</span>
+              <button type="submit">run &#8629;</button>
+            </form>
+            <div className="garden-chips">
+              {SUGGESTIONS.map((s) => (
+                <button type="button" key={s} onClick={() => submit(s)} className={s === asked ? "on" : ""}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="garden-field" ref={fieldRef}>
+            <canvas ref={canvasRef} aria-hidden onPointerMove={onMove} onPointerLeave={onLeave} />
+            {tipAt && tip !== null && (
+              <div className="garden-tip" style={{ left: tipAt.x, top: tipAt.y }} aria-hidden>
+                <b style={{ color: AUTHORS[NOTES[tip].author].color }}>{AUTHORS[NOTES[tip].author].name}</b>
+                <i>{AUTHORS[NOTES[tip].author].kind}</i>
+                <span>{NOTES[tip].text}</span>
+              </div>
+            )}
           </div>
         </div>
 
-        <div className="garden-field" ref={fieldRef}>
-          <canvas ref={canvasRef} aria-hidden onPointerMove={onMove} onPointerLeave={onLeave} />
-          {tipAt && tip !== null && (
-            <div className="garden-tip" style={{ left: tipAt.x, top: tipAt.y }} aria-hidden>
-              <b style={{ color: AUTHORS[NOTES[tip].author].color }}>{AUTHORS[NOTES[tip].author].name}</b>
-              <i>{AUTHORS[NOTES[tip].author].kind}</i>
-              <span>{NOTES[tip].text}</span>
-            </div>
-          )}
-        </div>
-      </div>
-
-      <aside className="garden-side" aria-live="polite">
-        <h3>Closest notes</h3>
-        {asked && <p className="garden-q">&ldquo;{asked}&rdquo;</p>}
-        {hits.length > 0 ? (
-          <ol>
+        <aside className="garden-side" aria-live="polite" aria-label="Command output">
+          <div className="garden-out">
+            {asked ? (
+              <div>
+                <Prompt cwd="~/api" />
+                <span className="t-fg">{`engram recall "${asked}"`}</span>
+              </div>
+            ) : (
+              <div className="t-dim"># pick a question, or type your own</div>
+            )}
+            {asked && hits.length === 0 && <div>No memories found.</div>}
             {hits.map((h) => {
               const n = NOTES[h.id];
               const a = AUTHORS[n.author];
+              const r = recall(n, h.score);
               return (
-                <li
+                <div
                   key={h.id}
+                  className="garden-hit"
                   onPointerEnter={() => markHover(h.id)}
                   onPointerLeave={() => markHover(null)}
                   style={{ "--c": a.color } as CSSProperties}
                 >
-                  <span className="garden-who">
-                    <i /> {a.name} <small>{a.kind}</small>
-                  </span>
-                  <span className="garden-text">{n.text}</span>
-                  <span className="garden-bar" aria-hidden>
-                    <span style={{ width: `${Math.round(h.score * 100)}%` }} />
-                  </span>
-                </li>
+                  <div>
+                    <span className="t-dim">{`[${r.similarity}] ${r.when}  `}</span>
+                    <span className="did" title={`${a.name}, ${a.kind}`}>
+                      {r.did}
+                    </span>
+                    <span className="t-dim">{`  in ${r.space}`}</span>
+                  </div>
+                  <div className="t-dim">{`tags: ${r.tags.join(", ")}`}</div>
+                  <div className="t-fg">{r.text}</div>
+                  <div className="t-dim">{r.uri}</div>
+                </div>
               );
             })}
-          </ol>
-        ) : (
-          <p className="garden-empty">
-            {asked
-              ? "No notes in this example match that. Try one of the questions above."
-              : "Pick a question or type your own."}
-          </p>
-        )}
-      </aside>
+          </div>
+        </aside>
+      </div>
     </section>
   );
 }

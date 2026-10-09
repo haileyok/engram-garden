@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AUTHORS, CLUSTERS, NOTES, SUGGESTIONS, keysOf, neighbors, search, stem } from "./garden";
+import { AUTHORS, CLUSTERS, NOTES, SUGGESTIONS, keysOf, neighbors, recall, search, stem } from "./garden";
 
 describe("garden example data", () => {
   it("has valid authors and clusters, and positions inside the unit square", () => {
@@ -109,6 +109,33 @@ describe("search", () => {
   it("only searches the notes it is given", () => {
     const planted = NOTES.filter((n) => !n.late);
     for (const h of search("deploy", planted)) expect(planted.some((n) => n.id === h.id)).toBe(true);
+  });
+});
+
+describe("recall output", () => {
+  it("has the shape `engram recall` prints", () => {
+    for (const n of NOTES) {
+      const r = recall(n, 1);
+      expect(r.did).toMatch(/^did:plc:[a-z2-7]{24}$/);
+      expect(r.when).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+      expect(r.uri).toMatch(/^at:\/\/did:plc:….*\/garden\.engram\.memory\/3m[a-z2-7]{11}$/);
+      expect(r.similarity).toBeGreaterThanOrEqual(0);
+      expect(r.similarity).toBeLessThanOrEqual(1000);
+      expect(r.tags[0]).toBe(CLUSTERS[n.cluster]);
+    }
+  });
+
+  it("gives every author their own DID, and the same one each time", () => {
+    expect(new Set(AUTHORS.map((a) => a.did)).size).toBe(AUTHORS.length);
+    expect(recall(NOTES[3], 0.7)).toEqual(recall(NOTES[3], 0.7));
+  });
+
+  it("ranks a better match with a higher similarity", () => {
+    expect(recall(NOTES[0], 1).similarity).toBeGreaterThan(recall(NOTES[0], 0.6).similarity);
+  });
+
+  it("gives each note its own record key", () => {
+    expect(new Set(NOTES.map((n) => recall(n, 1).uri)).size).toBe(NOTES.length);
   });
 });
 

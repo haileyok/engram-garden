@@ -8,16 +8,20 @@
 
 export type Kind = "agent" | "person" | "script";
 
-export type Author = { name: string; kind: Kind; color: string };
+export type Author = { name: string; kind: Kind; color: string; did: string };
 
-// Who wrote the notes. The colors read on the garden's dark ground.
+// Who wrote the notes. The colors read on the garden's dark ground. The CLI
+// prints an author as a DID, so these are made-up ones in the same shape.
 export const AUTHORS: Author[] = [
-  { name: "scout", kind: "agent", color: "#8fcb9b" },
-  { name: "archivist", kind: "agent", color: "#7fb8d6" },
-  { name: "maya", kind: "person", color: "#e29468" },
-  { name: "omar", kind: "person", color: "#c49ad9" },
-  { name: "merge-bot", kind: "script", color: "#e6d28f" },
+  { name: "scout", kind: "agent", color: "#8fcb9b", did: "did:plc:u4kxm7qvh2o3zfd5ryw6bnae" },
+  { name: "archivist", kind: "agent", color: "#7fb8d6", did: "did:plc:7w3yb5hqk2nxd4oevj6trz3f" },
+  { name: "maya", kind: "person", color: "#e29468", did: "did:plc:q2lfk6ghz3mxw4vtn5cae7dj" },
+  { name: "omar", kind: "person", color: "#c49ad9", did: "did:plc:cxb4o7yrj2wke5zt3ahn6mpd" },
+  { name: "merge-bot", kind: "script", color: "#e6d28f", did: "did:plc:ew6ptsd3k4fvj2nqzmh5oy7a" },
 ];
+
+// The space the example notes live in.
+export const SPACE = "team";
 
 export const CLUSTERS = ["deploys", "auth", "database", "frontend", "incidents", "onboarding"] as const;
 
@@ -236,6 +240,50 @@ export function search(question: string, notes: readonly Note[] = NOTES, limit =
     .map((h) => ({ id: h.id, score: h.score / best }))
     .filter((h) => h.score >= MIN_SCORE)
     .slice(0, limit);
+}
+
+const B32 = "abcdefghijklmnopqrstuvwxyz234567";
+
+// A record key that looks like a real one and is the same every time.
+function rkey(id: number): string {
+  let x = Math.imul(id + 1, 2654435761) >>> 0;
+  let s = "3m";
+  for (let i = 0; i < 11; i++) {
+    x = (Math.imul(x, 1664525) + 1013904223) >>> 0;
+    s += B32[x >>> 27];
+  }
+  return s;
+}
+
+export type Recall = {
+  similarity: number;
+  when: string;
+  did: string;
+  space: string;
+  tags: string[];
+  text: string;
+  uri: string;
+};
+
+// recall is one result as `engram recall` prints it: a similarity out of 1000,
+// when it was written, who wrote it, the space, its tags, the text, and its URI.
+// The dates, similarities and record keys are made up, the same way every time.
+export function recall(note: Note, score: number): Recall {
+  const a = AUTHORS[note.author];
+  const at = new Date(Date.UTC(2026, 9, 8, 14, 20) - note.id * (37 * 60 + 11) * 60000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  const when = `${at.getUTCFullYear()}-${p(at.getUTCMonth() + 1)}-${p(at.getUTCDate())} ${p(at.getUTCHours())}:${p(at.getUTCMinutes())}`;
+  const tags: string[] = [CLUSTERS[note.cluster]];
+  if (a.kind === "script") tags.push("merge");
+  return {
+    similarity: Math.round(560 + 380 * score),
+    when,
+    did: a.did,
+    space: SPACE,
+    tags,
+    text: note.text,
+    uri: `at://did:plc:…/garden.engram.memory/${rkey(note.id)}`,
+  };
 }
 
 // neighbors lists, for each note, the nearest other notes in the same patch.
