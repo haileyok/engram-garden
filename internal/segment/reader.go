@@ -74,10 +74,11 @@ type Reader struct {
 
 // Open reads and checks a segment's header.
 func Open(ctx context.Context, rr RangeReader) (*Reader, error) {
-	if rr.Size() < int64(HeaderSize+footerSize) {
+	if rr.Size() < int64(headerSize(1)+footerSize(1)) {
 		return nil, fmt.Errorf("%w: file too short", ErrFormat)
 	}
-	b, err := rr.ReadRange(ctx, 0, HeaderSize)
+	// One read covers the header of any version.
+	b, err := rr.ReadRange(ctx, 0, min(int64(maxHeaderSize), rr.Size()))
 	if err != nil {
 		return nil, err
 	}
@@ -90,6 +91,20 @@ func Open(ctx context.Context, rr RangeReader) (*Reader, error) {
 
 func (r *Reader) Count() int { return int(r.h.count) }
 func (r *Reader) Dims() int  { return int(r.h.dims) }
+
+// Version is the file's format version.
+func (r *Reader) Version() int { return int(r.h.version) }
+
+// HasKeyword reports whether the segment has a keyword index (version 2).
+func (r *Reader) HasKeyword() bool { return r.h.version >= 2 }
+
+// Analyzer is the text analyzer version the keyword index was built with,
+// or 0 without one.
+func (r *Reader) Analyzer() int { return int(r.h.analyzer) }
+
+// TotalLength is the sum of every memory's length in source tokens, for
+// space-wide BM25 statistics. It's 0 without a keyword index.
+func (r *Reader) TotalLength() uint64 { return r.h.totalLength }
 
 func (r *Reader) section(ctx context.Context, s int) ([]byte, error) {
 	sec := r.h.sections[s]
@@ -106,20 +121,26 @@ func (r *Reader) section(ctx context.Context, s int) ([]byte, error) {
 // Verify reads the whole file and checks every section's checksum and the
 // footer.
 func (r *Reader) Verify(ctx context.Context) error {
-	for s := range numSections {
+	for s := range sectionsIn(r.h.version) {
 		if _, err := r.section(ctx, s); err != nil {
 			return err
 		}
 	}
-	f, err := r.rr.ReadRange(ctx, r.rr.Size()-int64(footerSize), int64(footerSize))
+	fs, hs := footerSize(r.h.version), headerSize(r.h.version)
+	f, err := r.rr.ReadRange(ctx, r.rr.Size()-int64(fs), int64(fs))
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(f[:HeaderSize], r.h.marshal()) || string(f[HeaderSize:]) != endMagic {
+	if !bytes.Equal(f[:hs], r.h.marshal()) || string(f[hs:]) != endMagic {
 		return fmt.Errorf("%w: footer does not match header", ErrFormat)
 	}
-	_, err = r.LoadIndex(ctx)
-	return err
+	if _, err = r.LoadIndex(ctx); err != nil {
+		return err
+	}
+	if r.HasKeyword() {
+		return r.verifyKeyword(ctx)
+	}
+	return nil
 }
 
 // Meta is one memory's metadata.

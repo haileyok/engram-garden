@@ -29,6 +29,25 @@ func fixtureDocs(seed uint64, n, dims int) []Doc {
 	return makeDocs(rand.New(rand.NewPCG(seed, 0)), n, dims)
 }
 
+// Without Keyword, Write must still produce version 1 byte for byte, so a
+// release that only reads version 2 writes files older nodes can open.
+func TestWritesVersion1Unchanged(t *testing.T) {
+	t.Parallel()
+	for _, f := range v1Fixtures {
+		want, err := os.ReadFile(filepath.Join("testdata", f.name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, info, err := Bytes(fixtureDocs(f.seed, f.n, f.dims), WriteOptions{Dims: f.dims, ClusterThreshold: f.cluster, BlockSize: 2048})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Version != 1 || !bytes.Equal(got, want) {
+			t.Errorf("%s: version %d, %d bytes; the version 1 output changed", f.name, info.Version, len(got))
+		}
+	}
+}
+
 func TestReadsVersion1Fixtures(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
