@@ -21,8 +21,78 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 1000,
-          "description": "Search results only: cosine similarity to the query, scaled to 0-1000."
+          "description": "Search results only: cosine similarity to the query, scaled to 0-1000. Absent from keyword-only results."
+        },
+        "match": {
+          "type": "ref",
+          "ref": "#matchView",
+          "description": "Hybrid and keyword search results only: why the memory matched."
         }
+      }
+    },
+    "matchView": {
+      "type": "object",
+      "description": "Why a search result matched.",
+      "properties": {
+        "fusion": {
+          "type": "string",
+          "knownValues": ["convex", "rrf"],
+          "description": "Hybrid results: how the vector and keyword scores were combined."
+        },
+        "vector": { "type": "ref", "ref": "#vectorMatch" },
+        "keyword": { "type": "ref", "ref": "#keywordMatch", "description": "Present when any query term occurs in the memory." },
+        "snippet": { "type": "ref", "ref": "#snippetView" }
+      }
+    },
+    "vectorMatch": {
+      "type": "object",
+      "required": ["rank", "similarity"],
+      "properties": {
+        "rank": { "type": "integer", "minimum": 1, "description": "The result's rank by similarity among the results." },
+        "similarity": { "type": "integer", "minimum": 0, "maximum": 1000, "description": "Cosine similarity, scaled to 0-1000." }
+      }
+    },
+    "keywordMatch": {
+      "type": "object",
+      "required": ["rank", "score", "terms"],
+      "properties": {
+        "rank": { "type": "integer", "minimum": 1, "description": "The result's rank by keyword score among the results." },
+        "score": { "type": "integer", "minimum": 0, "description": "The BM25 keyword score × 100." },
+        "terms": {
+          "type": "array",
+          "items": { "type": "ref", "ref": "#termMatch" },
+          "description": "The query terms the memory contains: per query word, its exact form if present, else its stem, else an identifier's parts."
+        }
+      }
+    },
+    "termMatch": {
+      "type": "object",
+      "required": ["term", "kind", "field"],
+      "properties": {
+        "term": { "type": "string", "description": "The normalized term; stems start with ~." },
+        "kind": { "type": "string", "knownValues": ["exact", "stem", "part"] },
+        "field": { "type": "string", "knownValues": ["text", "tags", "source"] }
+      }
+    },
+    "snippetView": {
+      "type": "object",
+      "required": ["field", "text", "highlights"],
+      "properties": {
+        "field": { "type": "string", "knownValues": ["text", "tags", "source"] },
+        "text": { "type": "string", "description": "Up to about 200 characters of the field around the matches, with … where cut." },
+        "highlights": {
+          "type": "array",
+          "items": { "type": "ref", "ref": "#byteSlice" }
+        }
+      }
+    },
+    "byteSlice": {
+      "type": "object",
+      "description": "A UTF-8 byte range in a snippet's text, like a rich-text facet's index.",
+      "required": ["byteStart", "byteEnd"],
+      "properties": {
+        "byteStart": { "type": "integer", "minimum": 0 },
+        "byteEnd": { "type": "integer", "minimum": 0 }
       }
     },
     "model": {

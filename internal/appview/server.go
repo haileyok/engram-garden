@@ -291,6 +291,8 @@ func storeErr(err error) error {
 		return errf(http.StatusBadRequest, "ModelMismatch", "%v", err)
 	case errors.Is(err, spacestore.ErrNoModel):
 		return errf(http.StatusBadRequest, "NoModel", "%v", err)
+	case errors.Is(err, spacestore.ErrKeywordIndexBuilding):
+		return errf(http.StatusServiceUnavailable, "KeywordIndexBuilding", "%v; search with a vector meanwhile", err)
 	case errors.Is(err, spacestore.ErrRetryable):
 		return errf(http.StatusServiceUnavailable, "IndexLoading", "%v", err)
 	case errors.Is(err, spacestore.ErrRateLimited):
@@ -394,6 +396,8 @@ type memoryView struct {
 	CreatedAt  string   `json:"createdAt"`
 	IndexedAt  string   `json:"indexedAt"`
 	Similarity *int     `json:"similarity,omitempty"`
+	// Match explains a hybrid or keyword search result.
+	Match *matchView `json:"match,omitempty"`
 }
 
 func view(spaceURI string, m spacestore.Hit, withSimilarity bool) memoryView {
@@ -468,18 +472,49 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, err)
 		return
 	}
+	// mode: hybrid (the default with text and a vector), vector, or
+	// keyword. An explicit mode never falls back.
+	mode := q.Get("mode")
+	text := q.Get("q")
+	hasText := strings.TrimSpace(text) != ""
+	switch mode {
+	case "", "hybrid", "vector", "keyword":
+	default:
+		s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "mode must be hybrid, vector or keyword"))
+		return
+	}
+	if (mode == "keyword" || mode == "hybrid") && !hasText {
+		s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "mode %s needs q", mode))
+		return
+	}
 	var (
 		vector []float32
 		model  lex.ModelInfo
+		// embedErr is why a text-only search couldn't be embedded, kept in
+		// case keyword search can't run either.
+		embedErr    error
+		keywordOnly = mode == "keyword"
 	)
-	if q.Get("vector") == "" && q.Get("q") != "" && s.TextSearch != nil {
+	switch {
+	case keywordOnly:
+	case q.Get("vector") == "" && hasText:
 		// No vector: embed the text with the space's model, if this
-		// service runs it.
-		if vector, model, err = s.embedQuery(r.Context(), spaceURI, q.Get("q")); err != nil {
-			s.writeErr(w, err)
-			return
+		// service runs it; otherwise fall back to keyword search.
+		if s.TextSearch == nil {
+			embedErr = errf(http.StatusBadRequest, "InvalidRequest", "vector, model and modelDigest are required: embed the query with the space's model")
+		} else if vector, model, err = s.embedQuery(r.Context(), spaceURI, text); err != nil {
+			embedErr = err
 		}
-	} else {
+		if embedErr != nil {
+			var xe *xrpcError
+			fallback := mode == "" && (!errors.As(embedErr, &xe) || xe.name == "InvalidRequest" && s.TextSearch == nil || xe.name == "ModelNotHosted" || xe.name == "TextSearchNotAllowed")
+			if !fallback {
+				s.writeErr(w, embedErr)
+				return
+			}
+			keywordOnly = true
+		}
+	default:
 		if q.Get("vector") == "" || q.Get("model") == "" || q.Get("modelDigest") == "" {
 			s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "vector, model and modelDigest are required: embed the query with the space's model"))
 			return
@@ -490,18 +525,37 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		model = lex.ModelInfo{Model: q.Get("model"), ModelDigest: q.Get("modelDigest"), Dims: len(vector)}
 	}
-	// The text makes the search hybrid once the space's segments all have
-	// a keyword index (ENGRAM_KEYWORD_SEARCH); until then the store ignores it.
-	res, err := s.Store.Search(r.Context(), spaceURI, spacestore.SearchQuery{Vector: vector, Model: model, Limit: limit, Filter: f, Text: q.Get("q")})
+	sq := spacestore.SearchQuery{Vector: vector, Model: model, Limit: limit, Filter: f, KeywordOnly: keywordOnly}
+	if mode != "vector" {
+		// The text makes the search hybrid once the space's segments all
+		// have a keyword index (ENGRAM_KEYWORD_SEARCH); until then the store
+		// ignores it.
+		sq.Text = text
+	}
+	res, err := s.Store.Search(r.Context(), spaceURI, sq)
 	if err != nil {
+		if embedErr != nil && (errors.Is(err, spacestore.ErrKeywordIndexBuilding) || errors.Is(err, spacestore.ErrNoModel)) {
+			// Neither embedding nor keyword search can serve this space.
+			err = embedErr
+		}
 		s.writeErr(w, err)
 		return
 	}
+	ran := "vector"
+	switch {
+	case res.KeywordOnly:
+		ran = "keyword"
+	case res.Hybrid:
+		ran = "hybrid"
+	}
 	out := make([]memoryView, len(res.Hits))
 	for i, m := range res.Hits {
-		out[i] = view(spaceURI, m, true)
+		out[i] = view(spaceURI, m, m.HasSimilarity)
 	}
-	body := map[string]any{"memories": out}
+	if ran != "vector" {
+		explain(out, res.Hits, text, ran)
+	}
+	body := map[string]any{"memories": out, "mode": ran}
 	if res.Approximate {
 		body["approximate"] = true
 	}

@@ -30,6 +30,9 @@ var (
 	ErrSpaceDeleted = errors.New("space was deleted")
 	// ErrNoModel reports a space whose authority hasn't declared a model.
 	ErrNoModel = errors.New("the space has not declared an embedding model")
+	// ErrKeywordIndexBuilding answers a keyword-only search of a space whose
+	// segments don't all have a keyword index yet.
+	ErrKeywordIndexBuilding = errors.New("the space's keyword index is still being built")
 	// ErrOverLimit reports changes held back by a per-space limit.
 	ErrOverLimit = errors.New("space is over a limit; some memories were not indexed")
 	// ErrRateLimited reports too many searches for one space.
@@ -70,8 +73,10 @@ type Hit struct {
 	Tags      []string
 	CreatedAt time.Time
 	IndexedAt time.Time
-	// Similarity is the cosine similarity to the query, for search results.
-	Similarity float64
+	// Similarity is the cosine similarity to the query, for search results
+	// that had a vector (HasSimilarity).
+	Similarity    float64
+	HasSimilarity bool
 	// Keyword is the BM25 keyword score, for hybrid search results (0 when
 	// no query term occurs).
 	Keyword float64

@@ -204,6 +204,8 @@ func (s *Space) addKeyword(ctx context.Context, pq *text.Query, f Filter, segs [
 		c := cand{seg: h.key.seg, row: h.key.row, buf: h.key.buf, id: keyID(h.key), kw: h.score, hasKW: true}
 		bl := vec.BitBytes(dims)
 		switch {
+		case qbits == nil:
+			// Keyword-only search: no vector side.
 		case c.buf != nil:
 			c.dist = vec.Hamming(qbits, c.buf.bits[0])
 		case c.seg.bits != nil:

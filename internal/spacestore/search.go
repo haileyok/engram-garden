@@ -25,6 +25,10 @@ type SearchQuery struct {
 	// index, keyword candidates join the vector ones and the two scores
 	// are fused; otherwise it's ignored.
 	Text string
+	// KeywordOnly ranks by Text's keyword score alone, with no vector or
+	// model. It needs every segment to have a keyword index
+	// (ErrKeywordIndexBuilding otherwise).
+	KeywordOnly bool
 }
 
 // SearchResult is a search's answer.
@@ -35,6 +39,9 @@ type SearchResult struct {
 	Approximate bool
 	// Hybrid is set when keyword scores took part in the ranking.
 	Hybrid bool
+	// KeywordOnly is set for a keyword-only search: hits have no
+	// similarity.
+	KeywordOnly bool
 }
 
 type cand struct {
@@ -161,7 +168,7 @@ func (s *Space) search(ctx context.Context, q SearchQuery, start time.Time) (*Se
 		s.mu.RUnlock()
 		return nil, ErrNoModel
 	}
-	if sl.model != q.Model {
+	if sl.model != q.Model && !q.KeywordOnly {
 		s.mu.RUnlock()
 		return nil, &ModelMismatchError{Want: sl.model, Got: q.Model}
 	}
@@ -188,6 +195,33 @@ func (s *Space) search(ctx context.Context, q SearchQuery, start time.Time) (*Se
 	}
 	s.mu.RUnlock()
 
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	if q.KeywordOnly {
+		if !hybrid {
+			if pq = text.ParseQuery(q.Text); len(pq.Groups) == 0 {
+				return &SearchResult{Hits: []Hit{}}, nil
+			}
+			return nil, ErrKeywordIndexBuilding
+		}
+		cands, err := s.addKeyword(hardCtx, &pq, q.Filter, segs, bufKW, pending, published, nil, 0, nil, limit)
+		if err != nil {
+			if hardCtx.Err() != nil {
+				return nil, ErrRetryable
+			}
+			return nil, err
+		}
+		sort.Slice(cands, func(a, b int) bool {
+			if cands[a].kw != cands[b].kw {
+				return cands[a].kw > cands[b].kw
+			}
+			return cands[a].id < cands[b].id
+		})
+		return s.results(hardCtx, cands[:min(limit, len(cands))], false, true, true)
+	}
+
 	dims := sl.model.Dims
 	if len(q.Vector) != dims {
 		return nil, &ModelMismatchError{Want: sl.model, Got: ModelInfo{Model: q.Model.Model, ModelDigest: q.Model.ModelDigest, Dims: len(q.Vector)}}
@@ -198,10 +232,6 @@ func (s *Space) search(ctx context.Context, q SearchQuery, start time.Time) (*Se
 	}
 	qbits := vec.AppendBits(nil, query)
 	bl := vec.BitBytes(dims)
-	limit := q.Limit
-	if limit <= 0 {
-		limit = 10
-	}
 	ncand := max(opt.Candidates, limit)
 
 	// 1. Scan every segment's 1-bit vectors and the buffer. Partial scans
@@ -336,19 +366,24 @@ func (s *Space) search(ctx context.Context, q SearchQuery, start time.Time) (*Se
 		cands = cands[:limit]
 	}
 
-	// 3. Fetch the results' documents.
+	return s.results(hardCtx, cands, approximate, hybrid, false)
+}
+
+// results fetches the documents of ranked candidates and builds hits.
+// keywordOnly results have no vector score.
+func (s *Space) results(ctx context.Context, cands []cand, approximate, hybrid, keywordOnly bool) (*SearchResult, error) {
 	refs := make([]docRef, len(cands))
 	for i, c := range cands {
 		refs[i] = docRef{seg: c.seg, row: c.row, buf: c.buf}
 	}
-	bodies, err := fetchDocs(hardCtx, refs)
+	bodies, err := fetchDocs(ctx, refs)
 	if err != nil {
-		if hardCtx.Err() != nil {
+		if ctx.Err() != nil {
 			return nil, ErrRetryable
 		}
 		return nil, err
 	}
-	out := &SearchResult{Approximate: approximate, Hybrid: hybrid, Hits: make([]Hit, len(cands))}
+	out := &SearchResult{Approximate: approximate, Hybrid: hybrid && !keywordOnly, KeywordOnly: keywordOnly, Hits: make([]Hit, len(cands))}
 	for i, c := range cands {
 		var h Hit
 		if c.buf != nil {
@@ -359,7 +394,9 @@ func (s *Space) search(ctx context.Context, q SearchQuery, start time.Time) (*Se
 			h = Hit{Author: m.Author, Rkey: m.Rkey, Tags: m.Tags, CreatedAt: m.CreatedAt}
 		}
 		h.Text, h.Source, h.CID, h.IndexedAt = bodies[i].Text, bodies[i].Source, bodies[i].CID, bodies[i].IndexedAt
-		h.Similarity = max(-1, min(1, c.sim))
+		if !keywordOnly {
+			h.Similarity, h.HasSimilarity = max(-1, min(1, c.sim)), true
+		}
 		h.Keyword = c.kw
 		out.Hits[i] = h
 	}
