@@ -676,5 +676,5 @@ appview while someone is watching a space.
   for memory-length and query-length text, to confirm client-side embedding
   stays unnoticeable.
 - Text search alongside vector search, for exact names and identifiers.
-  Probably a small per-segment inverted index, designed after the first
-  version.
+  Proposed in [keyword-search.md](keyword-search.md): a per-segment inverted
+  index and hybrid ranking.
