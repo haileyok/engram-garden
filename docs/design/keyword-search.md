@@ -307,6 +307,7 @@ non-match.
 | 1-bit distances for some keyword-only candidates (case 3) | `vectorPartial` |
 | Keyword scores for some vector-only candidates | `keywordPartial` |
 | Postings walk (budget or deadline) | `keywordBudget` |
+| Query over the size limit, some tokens dropped (not a timeout) | `queryTruncated` |
 
 Any of these sets `approximate`, and the reasons are listed in a new
 `approximateReasons` field. Several can apply at once; tests cover each
