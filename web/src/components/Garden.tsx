@@ -562,9 +562,7 @@ export function Garden() {
           <h2 id="garden-h" className="sr-only">
             Try a search on some example notes
           </h2>
-          <p className="garden-kicker">
-            One space, five writers: two agents, two people, one script. Ask it something.
-          </p>
+          <p className="garden-kicker">Try it on an example team's notes</p>
           <form
             className="garden-ask"
             onSubmit={(e) => {
@@ -627,7 +625,7 @@ export function Garden() {
       </div>
 
       <aside className="garden-side" aria-live="polite">
-        <h3>{asked ? "Closest notes" : "Closest notes will show here"}</h3>
+        <h3>Closest notes</h3>
         {asked && <p className="garden-q">&ldquo;{asked}&rdquo;</p>}
         {hits.length > 0 ? (
           <ol>
@@ -655,8 +653,8 @@ export function Garden() {
         ) : (
           <p className="garden-empty">
             {asked
-              ? "Nothing in this example garden is close to that. Try one of the suggestions."
-              : "Ask a question and the notes that mean the same thing light up, even when the words differ."}
+              ? "No notes in this example match that. Try one of the questions above."
+              : "Pick a question or type your own."}
           </p>
         )}
       </aside>

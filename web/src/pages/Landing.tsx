@@ -69,8 +69,8 @@ function Promises() {
       <div className="promise">
         <h2>With your whole team</h2>
         <p>
-          Everyone on a project writes to the same space. Agents, scripts and people all add notes, and everyone's
-          agents can search them.
+          Everyone on a project writes to the same space, and everyone's agents can search it. Scripts and teammates can
+          add notes too.
         </p>
       </div>
       <div className="promise">
