@@ -105,5 +105,12 @@ func run(log *slog.Logger) error {
 	go a.Run(ctx, 15*time.Minute)
 	def, _ := settings.Default()
 	log.Info("engram-mcp ready", "account", a.Client.DID(), "spaces", names, "default", def.Name, "appview", settings.AppviewURL)
-	return mcpserver.NewServer(a).Run(ctx, &mcp.StdioTransport{})
+	var opts []mcpserver.Option
+	if p := os.Getenv("ENGRAM_QUERY_LOG"); p != "" {
+		// Opt-in: recall queries and results, kept on this machine for
+		// evaluating search (engram-eval gen -log).
+		opts = append(opts, mcpserver.WithQueryLog(mcpserver.NewQueryLog(p, log)))
+		log.Info("logging recall queries", "file", p)
+	}
+	return mcpserver.NewServer(a, opts...).Run(ctx, &mcp.StdioTransport{})
 }
