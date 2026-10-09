@@ -20,11 +20,22 @@ const START_APPVIEW = [
   ].join("\n"),
 ];
 
-function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+function Section({
+  id,
+  title,
+  lede,
+  children,
+}: {
+  id: string;
+  title: string;
+  lede?: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <section className="sec" aria-labelledby={id}>
       <h2 id={id}>{title}</h2>
-      <div className="sec-body">{children}</div>
+      {lede && <p className="sec-lede">{lede}</p>}
+      {children}
     </section>
   );
 }
@@ -55,6 +66,24 @@ function Json({ text }: { text: string }) {
   }
   parts.push(text.slice(last));
   return <>{parts}</>;
+}
+
+// Numbered steps. A step's terminal sits beside its text. The numbers come from
+// a CSS counter, so steps can be added or moved without renumbering.
+function Steps({ children }: { children: ReactNode }) {
+  return <ol className="steps">{children}</ol>;
+}
+
+function Step({ title, children, aside }: { title: string; children?: ReactNode; aside?: ReactNode }) {
+  return (
+    <li className="step">
+      <div className="step-text">
+        <h3>{title}</h3>
+        {children && <p>{children}</p>}
+      </div>
+      {aside && <div className="step-aside">{aside}</div>}
+    </li>
+  );
 }
 
 // Three things to know before reading on, under the garden.
@@ -101,115 +130,197 @@ export function Landing() {
       <Sprig />
 
       <Section id="team" title="Shared across a team">
-        <p>
-          Notes don't have to come from agents. A script can write one with <code>engram remember</code>, so you can
-          record every merge, and the agents in the space can search that history.
-        </p>
-        <p>
-          Everyone in a space can read everything in it, and members can be read-only. Keep a separate space for anything
-          that shouldn't go to the whole team.
-        </p>
+        <div className="cards">
+          <div className="card">
+            <h3>Scripts can write too</h3>
+            <p>
+              A script can save a note with <code>engram remember</code>, so you can record every merge. The agents in
+              the space can search that history.
+            </p>
+          </div>
+          <div className="card">
+            <h3>Everyone reads everything</h3>
+            <p>
+              Everyone in a space can read all of it, though members can be read-only. Keep a separate space for
+              anything that shouldn't go to the whole team.
+            </p>
+          </div>
+        </div>
       </Section>
 
       <Sprig />
 
-      <Section id="how" title="How it works">
-        <p>
-          A memory space is a private ATProto space. Its owner chooses the member accounts, and each agent works as one
-          of them.
-        </p>
-        <p>
-          When an agent saves a note, it turns the text into a vector with the embedding model the space declares. The
-          embedding runs on the agent's own machine, through Ollama by default. The text and the vector go into a
-          record in the agent's account.
-        </p>
-        <p>
-          A search service called the appview indexes those records once the space's owner grants it read-only access.
-          Nothing goes into the index until it has been checked against the author's signed commit.
-        </p>
-        <p>
-          To search, an agent embeds its question the same way and asks the appview for the closest notes. The appview
-          only answers members of the space.
-        </p>
+      <Section
+        id="how"
+        title="How it works"
+        lede="A memory space is a private ATProto space. Its owner chooses the member accounts, and each agent works as one of them."
+      >
+        <ol className="flow">
+          <li>
+            <h3>Save</h3>
+            <p>
+              The agent embeds the note with the model the space declares, on its own machine through Ollama by default.
+              The text and vector are stored as a record in its account.
+            </p>
+          </li>
+          <li>
+            <h3>Index</h3>
+            <p>
+              Once the space's owner grants it read-only access, the appview indexes those records. Each change is
+              checked against the author's signed commit first.
+            </p>
+          </li>
+          <li>
+            <h3>Search</h3>
+            <p>
+              An agent embeds its question the same way and asks the appview for the closest notes. Only members of the
+              space get an answer.
+            </p>
+          </li>
+        </ol>
       </Section>
 
       <Sprig />
 
       <Section id="setup" title="Set up an agent">
-        <p>
-          Sign in above, create a space, and let the appview index it. You approve read-only access on your account's
-          own sign-in page. Then, on the machine the agent runs on (it needs Nix and Ollama):
+        <Steps>
+          <Step title="Create a space">
+            Sign in above, create a space, and let the appview index it. You approve its read-only access on your
+            account's own sign-in page.
+          </Step>
+          <Step
+            title="Install on the agent's machine"
+            aside={
+              <TermFrame title="agent host" copy={`${setup.install}\n${setup.init}`}>
+                <div className="t-line">
+                  <Prompt cwd="~" />
+                  {setup.install}
+                </div>
+                <div className="t-line">
+                  <Prompt cwd="~" />
+                  {setup.init}
+                </div>
+              </TermFrame>
+            }
+          >
+            It needs Nix and Ollama.
+          </Step>
+          <Step
+            title="Give it the tools"
+            aside={
+              <TermFrame title="mcp.json" copy={setup.mcp}>
+                <Json text={setup.mcp} />
+              </TermFrame>
+            }
+          >
+            The agent can use your account or have one of its own, which you add to the space as a member who can write.
+            Add the MCP server to its client's config.
+          </Step>
+        </Steps>
+        <p className="sec-note">
+          Each space's page has a Connect an agent tab with these commands filled in for that space.
         </p>
-        <TermFrame title="agent host" copy={`${setup.install}\n${setup.init}`}>
-          <div className="t-line">
-            <Prompt cwd="~" />
-            {setup.install}
-          </div>
-          <div className="t-line">
-            <Prompt cwd="~" />
-            {setup.init}
-          </div>
-        </TermFrame>
-        <p>
-          The agent can use your account or have its own, which you add to the space as a member who can write. To give
-          it the tools, add the MCP server to its client's config:
-        </p>
-        <TermFrame title="mcp.json" copy={setup.mcp}>
-          <Json text={setup.mcp} />
-        </TermFrame>
-        <p className="muted">Each space's page has a Connect an agent tab with these commands filled in for that space.</p>
       </Section>
 
       <Sprig />
 
-      <Section id="trust" title="What the appview can see">
-        <p>
-          Memories are records in ATProto accounts that you or your agents control. The index the appview keeps can be
-          rebuilt from them.
-        </p>
-        <p>
-          The appview can read every memory in a space you let it index. Its access is read-only, you grant it once, and
-          you can withdraw it from the space's page. Don't store secrets in a memory space.
-        </p>
-        <p>
-          Everything it indexes is first checked against its author's signed commit, and only members can search.
-        </p>
+      <Section
+        id="trust"
+        title="What the appview can see"
+        lede="Memories are records in ATProto accounts that you or your agents control. The index the appview keeps can be rebuilt from them."
+      >
+        <div className="ledger">
+          <div className="ledger-col yes">
+            <h3>It can</h3>
+            <ul>
+              <li>Read every memory in a space you let it index.</li>
+              <li>Answer searches from the members of that space.</li>
+            </ul>
+          </div>
+          <div className="ledger-col no">
+            <h3>It can't</h3>
+            <ul>
+              <li>Write to your account or to the space. Its access is read-only.</li>
+              <li>Index a change that fails the author's signed-commit check.</li>
+              <li>Answer anyone who isn't a member.</li>
+            </ul>
+          </div>
+        </div>
+        <p className="callout">Don't store secrets in a memory space.</p>
+        <p className="sec-note">You grant access once, and you can withdraw it from the space's page.</p>
       </Section>
 
       <Sprig />
 
-      <Section id="selfhost" title="Run your own appview">
-        <p>
-          The appview is a Go program in this repo. Point it at a local directory and it runs without a database. It
-          forgets its grants whenever it restarts, which is fine for a trial. For something that lasts, give it an
-          S3-compatible bucket and a Postgres.
-        </p>
-        <TermFrame title="your server" copy={START_APPVIEW.join("\n")}>
-          {START_APPVIEW.map((cmd) => (
-            <div className="t-line" key={cmd}>
-              <Prompt cwd="~" />
-              {cmd}
-            </div>
-          ))}
-        </TermFrame>
-        <p>Then point an agent at it:</p>
-        <TermFrame title="agent host" copy={own.init}>
-          <div className="t-line">
-            <Prompt cwd="~" />
-            {own.init}
+      <Section
+        id="selfhost"
+        title="Run your own appview"
+        lede={
+          <>
+            The appview is a Go program in this repo. Every setting is in the{" "}
+            <a href={`${REPO}#running-the-appview`}>README</a>.
+          </>
+        }
+      >
+        <Steps>
+          <Step
+            title="Start it"
+            aside={
+              <TermFrame title="your server" copy={START_APPVIEW.join("\n")}>
+                {START_APPVIEW.map((cmd) => (
+                  <div className="t-line" key={cmd}>
+                    <Prompt cwd="~" />
+                    {cmd}
+                  </div>
+                ))}
+              </TermFrame>
+            }
+          />
+          <Step
+            title="Point an agent at it"
+            aside={
+              <TermFrame title="agent host" copy={own.init}>
+                <div className="t-line">
+                  <Prompt cwd="~" />
+                  {own.init}
+                </div>
+              </TermFrame>
+            }
+          >
+            Add <code>--appview</code> with your address when the agent signs in.
+          </Step>
+        </Steps>
+
+        <dl className="facts">
+          <div>
+            <dt>Indexing a space</dt>
+            <dd>
+              A space's owner grants your appview access the same way they would ours, on their own account's sign-in
+              page.
+            </dd>
           </div>
-        </TermFrame>
-        <p>
-          A space's owner lets your appview index it the same way they would ours, on their own account's sign-in page.
-          Moving a space later doesn't move your notes, since they live in the members' accounts. The new appview
-          rebuilds the index from those records, or you can export the old index and load it with{" "}
-          <code>engram-appview import</code>.
-        </p>
-        <p>
-          For a deployment other people will use, give it a public HTTPS address so account servers can tell it when a
-          note is written. On localhost it polls every five minutes instead. Every setting is in the{" "}
-          <a href={`${REPO}#running-the-appview`}>README</a>.
-        </p>
+          <div>
+            <dt>Storage</dt>
+            <dd>
+              A local directory is enough for a trial. With no database it forgets its grants whenever it restarts. For
+              something that lasts, give it an S3-compatible bucket and a Postgres.
+            </dd>
+          </div>
+          <div>
+            <dt>Public address</dt>
+            <dd>
+              Give it a public HTTPS address so account servers can tell it when a note is written. On localhost it
+              polls every five minutes instead.
+            </dd>
+          </div>
+          <div>
+            <dt>Moving a space</dt>
+            <dd>
+              Your notes live in the members' accounts, so they stay put. The new appview rebuilds the index from those
+              records, or you can export the old index and load it with <code>engram-appview import</code>.
+            </dd>
+          </div>
+        </dl>
       </Section>
 
       <footer className="landing-foot">

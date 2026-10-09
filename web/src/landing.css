@@ -162,12 +162,65 @@
 /* Sections: a narrow reading column with the heading in the margin */
 .sprig { display: flex; align-items: center; gap: 1rem; color: var(--accent); }
 .sprig::before, .sprig::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-.sec { display: grid; grid-template-columns: 12rem minmax(0, 41rem); gap: 0.75rem 3rem; padding: 2.75rem 0; }
-.sec h2 { font: 600 1.5rem / 1.25 var(--serif); letter-spacing: -0.01em; margin: 0; }
-.sec-body > p { margin: 0; }
-.sec-body > * + * { margin-top: 1rem; }
-.sec-body > .term, .sec-body > .term + * { margin-top: 1.25rem; }
-.sec-body > .muted { color: var(--muted); }
+.sec { padding: 2.25rem 0; }
+.sec h2 { margin: 0; font: 600 clamp(1.7rem, 3vw, 2.1rem) / 1.15 var(--serif); letter-spacing: -0.02em; }
+.sec h3 { margin: 0; font: 600 1.15rem / 1.3 var(--serif); letter-spacing: -0.01em; }
+.sec :where(p) { margin: 0; }
+.sec-lede { max-width: 42rem; margin-top: 0.7rem; font-size: 1.1rem; line-height: 1.55; color: var(--muted); }
+.sec h2 + :not(.sec-lede), .sec-lede + * { margin-top: 1.75rem; }
+.sec-note { max-width: 42rem; margin-top: 1.25rem; font-size: 0.95rem; color: var(--muted); }
+
+/* Two cards side by side. */
+.cards, .ledger { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.25rem; }
+.card, .ledger-col, .flow li {
+  padding: 1.3rem 1.5rem 1.4rem; background: var(--card); border: 1px solid var(--line); border-radius: 4px 22px 4px 22px;
+}
+.card p { margin-top: 0.5rem; color: var(--muted); }
+
+/* Three numbered stages. */
+.flow { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.25rem; counter-reset: flow; }
+.flow li { position: relative; counter-increment: flow; padding-top: 3rem; }
+.flow li::before {
+  content: counter(flow, decimal-leading-zero); position: absolute; top: 1.15rem; left: 1.5rem;
+  font: 600 0.8rem var(--mono); letter-spacing: 0.1em; color: var(--accent);
+}
+.flow p { margin-top: 0.5rem; font-size: 0.98rem; line-height: 1.55; color: var(--muted); }
+
+/* Numbered steps, with the step's terminal beside its text. */
+.steps { list-style: none; margin: 0; padding: 0; counter-reset: step; }
+.step {
+  position: relative; counter-increment: step; display: grid; grid-template-columns: minmax(0, 19rem) minmax(0, 1fr);
+  gap: 1rem 2.5rem; padding: 1.15rem 0 1.25rem 3.4rem; border-top: 1px solid var(--line);
+}
+.step:last-child { border-bottom: 1px solid var(--line); }
+.step::before {
+  content: counter(step); position: absolute; left: 0; top: 1.1rem; width: 2.1rem; height: 2.1rem;
+  display: grid; place-items: center; border-radius: 50%; background: var(--accent); color: var(--accent-ink);
+  font: 600 0.95rem var(--mono);
+}
+.step-text:only-child { grid-column: 1 / -1; max-width: 40rem; }
+.step-text p { margin-top: 0.4rem; color: var(--muted); }
+.step-aside { min-width: 0; }
+
+/* What it can and can't do. */
+.ledger-col { border-top: 3px solid var(--accent); }
+.ledger-col.no { border-top-color: var(--bloom); }
+.ledger ul { list-style: none; margin: 0.8rem 0 0; padding: 0; display: grid; gap: 0.6rem; }
+.ledger li { position: relative; padding-left: 1.6rem; }
+.ledger li::before { position: absolute; left: 0; font-weight: 700; }
+.ledger .yes li::before { content: "\2713"; color: var(--accent); }
+.ledger .no li::before { content: "\2715"; color: var(--bloom); }
+.callout {
+  margin-top: 1.5rem; padding: 1rem 1.4rem; font: 600 1.25rem / 1.3 var(--serif); border-left: 4px solid var(--bloom);
+  background: color-mix(in srgb, var(--bloom) 12%, var(--bg)); border-radius: 2px 14px 14px 2px;
+}
+
+/* Terms and what they mean. */
+.facts { margin: 1.75rem 0 0; }
+.facts > div { display: grid; grid-template-columns: 11rem minmax(0, 1fr); gap: 0.25rem 2rem; padding: 0.8rem 0; border-top: 1px solid var(--line); }
+.facts > div:last-child { border-bottom: 1px solid var(--line); }
+.facts dt { padding-top: 0.2rem; font: 600 0.78rem var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); }
+.facts dd { max-width: 44rem; margin: 0; }
 
 .landing-foot {
   display: flex; flex-wrap: wrap; gap: 0.5rem 1.6rem; padding-top: 1.5rem; border-top: 1px solid var(--line);
@@ -190,7 +243,10 @@
   .hero-copy, .hero-signin { grid-column: 1; grid-row: auto; }
   .hero-signin { max-width: 32rem; margin-top: 0.5rem; }
   .promises { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; }
-  .sec { grid-template-columns: minmax(0, 1fr); padding: 2.25rem 0; }
+  .sec { padding: 2.25rem 0; }
+  .cards, .ledger, .flow { grid-template-columns: minmax(0, 1fr); }
+  .step { grid-template-columns: minmax(0, 1fr); padding-left: 3rem; }
+  .facts > div { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 560px) {
   .garden-head { padding: 0.8rem 0.9rem 0.7rem; }
