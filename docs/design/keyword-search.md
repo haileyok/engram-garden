@@ -639,10 +639,13 @@ The response also gains `approximateReasons` (see
 ### Clients
 
 - **Searching one space** (`Agent.Recall`, and `Spaces.Recall` with one
-  space): keep the server's order. Today both `Spaces.Recall`
-  implementations (Go `internal/agent/spaces.go`, Python
-  `python/src/engram_garden/spaces.py`) re-sort by `similarity`, which
-  would throw away the hybrid ranking even for a single space.
+  space): keep the server's order. Today three places re-sort by
+  `similarity`, which would throw away the hybrid ranking even for a single
+  space: both `Spaces.Recall` implementations (Go
+  `internal/agent/spaces.go`, Python `python/src/engram_garden/spaces.py`)
+  and the Claude connector's recall (`internal/web/connector_tools.go`).
+  The connector treats a missing similarity as lowest, so keyword-fallback
+  results from several spaces would come out in space order.
 - **Searching several spaces:** if every space answered in vector mode,
   sort by `similarity` as today. Otherwise merge by reciprocal rank fusion
   of each memory's position in its space's results. Raw BM25 scores from
@@ -651,6 +654,10 @@ The response also gains `approximateReasons` (see
 - `engram-mcp`'s recall tool shows the matched terms under each memory
   (`matched: engram_space_uri (exact), space`) and the snippet when a
   memory is long.
+- **Notes about approximate results** come from `approximateReasons`.
+  Today the Go client and the connector say "the index was still loading"
+  whenever `approximate` is set, which would be wrong for a keyword budget
+  or a truncated query.
 - The Go and Python clients expose `mode`, `match`, `approximateReasons` and
   `keywordCoverage`. End-to-end tests cover default recall through
   `engram-mcp` and the Python client, for one space and several.
