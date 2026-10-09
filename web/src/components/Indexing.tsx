@@ -40,7 +40,7 @@ export function IndexingCard({ uri, access }: { uri: string; access?: Access }) 
   };
 
   return (
-    <section className="card">
+    <section className="panel">
       <h2>Indexing</h2>
       {service === undefined ? (
         <p className="muted">Loading…</p>

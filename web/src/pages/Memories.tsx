@@ -2,11 +2,14 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, type Memory, type MemoryFilters, type SpaceStatus } from "../api";
 import { useSession } from "../App";
 import { Handle } from "../profiles";
-import { describeError, formatTime, relativeTime } from "../ui";
+import { Note } from "../components/Note";
+import { SearchBox } from "../components/SearchBox";
+import type { Recall } from "../lib/useRecall";
+import { describeError } from "../ui";
 
 type Live = "connecting" | "live" | "paused" | "off";
 
-export function Memories({ uri, onStatus }: { uri: string; onStatus: (s: SpaceStatus) => void }) {
+export function Memories({ uri, onStatus, recall }: { uri: string; onStatus: (s: SpaceStatus) => void; recall: Recall }) {
   const session = useSession();
   const [filters, setFilters] = useState<MemoryFilters>({});
   const [memories, setMemories] = useState<Memory[] | null>(null);
@@ -15,7 +18,6 @@ export function Memories({ uri, onStatus }: { uri: string; onStatus: (s: SpaceSt
   const [loadingMore, setLoadingMore] = useState(false);
   const [fresh, setFresh] = useState<Set<string>>(new Set());
   const [live, setLive] = useState<Live>("connecting");
-  const [open, setOpen] = useState<string | null>(null);
   const onStatusRef = useRef(onStatus);
   onStatusRef.current = onStatus;
 
@@ -119,60 +121,60 @@ export function Memories({ uri, onStatus }: { uri: string; onStatus: (s: SpaceSt
     }
   };
 
+  const results = recall.state.phase === "done" ? recall.state : null;
   return (
     <>
-      <Filters value={filters} onChange={setFilters} me={session.did} />
-      <div className="list-meta">
-        <span className={`live ${live}`}>
-          {{ connecting: "connecting…", live: "● live", paused: "reconnecting…", off: filtered ? "live updates off while filtering" : "not live" }[live]}
-        </span>
-      </div>
-      {error && <p className="error">{error}</p>}
-      {memories === null && !error && <p className="muted">Loading…</p>}
-      {memories && memories.length === 0 && (
-        <div className="card empty">
-          <p>{filtered ? "No memories match." : "No memories yet."}</p>
-          {!filtered && <p className="muted small">Agents add memories with engram-mcp's remember tool.</p>}
-        </div>
-      )}
-      <ul className="memories">
-        {(memories ?? []).map((m) => (
-          <li key={m.uri} className={fresh.has(m.uri) ? "memory fresh" : "memory"}>
-            <div className="memory-head">
-              <button className="link" onClick={() => setFilters({ ...filters, author: m.author })} title="Show only this author">
-                <Handle did={m.author} />
-              </button>
-              <span className="muted small" title={formatTime(m.createdAt)}>{relativeTime(m.createdAt)}</span>
+      <SearchBox recall={recall} />
+      {recall.state.phase === "searching" && <p className="muted list-meta">Searching…</p>}
+      {results ? (
+        <>
+          <p className="list-meta">
+            {results.hits.length === 0
+              ? `Nothing matches “${results.query}”.`
+              : `${results.hits.length} ${results.hits.length === 1 ? "match" : "matches"} for “${results.query}”`}
+            {results.approximate && " · ranked coarsely while the index loads"}
+          </p>
+          <ol className="notes">
+            {results.hits.map((m) => (
+              <Note key={m.uri} memory={m} me={session.did} />
+            ))}
+          </ol>
+        </>
+      ) : (
+        <>
+          <Filters value={filters} onChange={setFilters} me={session.did} />
+          <div className="list-meta">
+            <span className={`live ${live}`}>
+              {{ connecting: "connecting…", live: "● live", paused: "reconnecting…", off: filtered ? "live updates off while filtering" : "not live" }[live]}
+            </span>
+          </div>
+          {error && <p className="error">{error}</p>}
+          {memories === null && !error && <p className="muted">Loading…</p>}
+          {memories && memories.length === 0 && (
+            <div className="empty">
+              <p>{filtered ? "No memories match." : "No memories yet."}</p>
+              {!filtered && <p className="muted small">Agents add memories with engram-mcp's remember tool.</p>}
             </div>
-            <p className="memory-text">{m.text}</p>
-            <div className="memory-foot">
-              {m.tags.map((t) => (
-                <button key={t} className="tag" onClick={() => setFilters({ ...filters, tags: [t] })}>#{t}</button>
-              ))}
-              {m.source && <span className="muted small">from {m.source}</span>}
-              <span className="spacer" />
-              <button className="link small" onClick={() => setOpen(open === m.uri ? null : m.uri)}>
-                {open === m.uri ? "hide details" : "details"}
-              </button>
-              {m.author === session.did && (
-                <button className="link small danger" onClick={() => remove(m)}>delete</button>
-              )}
-            </div>
-            {open === m.uri && (
-              <dl className="details small">
-                <dt>URI</dt><dd><code>{m.uri}</code></dd>
-                <dt>CID</dt><dd><code>{m.cid}</code></dd>
-                <dt>Written</dt><dd>{formatTime(m.createdAt)}</dd>
-                <dt>Indexed</dt><dd>{formatTime(m.indexedAt)}</dd>
-              </dl>
-            )}
-          </li>
-        ))}
-      </ul>
-      {cursor && (
-        <button onClick={more} disabled={loadingMore} className="more">
-          {loadingMore ? "Loading…" : "Load more"}
-        </button>
+          )}
+          <ol className="notes">
+            {(memories ?? []).map((m) => (
+              <Note
+                key={m.uri}
+                memory={m}
+                me={session.did}
+                fresh={fresh.has(m.uri)}
+                onAuthor={(author) => setFilters({ ...filters, author })}
+                onTag={(t) => setFilters({ ...filters, tags: [t] })}
+                onDelete={remove}
+              />
+            ))}
+          </ol>
+          {cursor && (
+            <button onClick={more} disabled={loadingMore} className="more">
+              {loadingMore ? "Loading…" : "Load more"}
+            </button>
+          )}
+        </>
       )}
     </>
   );

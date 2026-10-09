@@ -60,7 +60,7 @@ function Members({ uri, onChanged }: { uri: string; onChanged: () => void }) {
   };
 
   return (
-    <section className="card">
+    <section className="panel">
       <h2>Members</h2>
       <p className="muted small">
         Members can read every memory in the space; writers can add their own. Give each agent its own account.
@@ -118,13 +118,13 @@ function ModelConfig({ uri, status, onChanged }: { uri: string; status: SpaceSta
     }
   };
 
-  if (config === undefined && !error) return <section className="card"><p className="muted">Loading…</p></section>;
+  if (config === undefined && !error) return <section className="panel"><p className="muted">Loading…</p></section>;
 
   const coverage =
     status?.building && status.memories > 0 ? Math.round(((status.buildingMemories ?? 0) / status.memories) * 100) : null;
 
   return (
-    <section className="card">
+    <section className="panel">
       <h2>Embedding model</h2>
       {error && <p className="error">{error}</p>}
       {config ? (

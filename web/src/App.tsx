@@ -7,6 +7,7 @@ import { NewSpace } from "./pages/NewSpace";
 import { SpacePage } from "./pages/SpacePage";
 import { spaceUri } from "./lib/uri";
 import { Logo } from "./Logo";
+import "./app.css";
 
 const SessionContext = createContext<Session | null>(null);
 
@@ -37,8 +38,8 @@ export function App() {
     return () => window.removeEventListener("engram:signed-out", onExpired);
   }, []);
 
-  if (error) return <div className="page"><p className="error">{error}</p></div>;
-  if (session === undefined) return <div className="page"><p className="muted">Loading…</p></div>;
+  if (error) return <div className="app"><main className="app-main"><p className="error">{error}</p></main></div>;
+  if (session === undefined) return <div className="app"><main className="app-main"><p className="muted">Loading…</p></main></div>;
   if (session === null) return <SignIn />;
 
   const signOut = async () => {
@@ -49,18 +50,20 @@ export function App() {
 
   return (
     <SessionContext.Provider value={session}>
-      <header className="topbar">
-        <Link to="/" className="brand">
-          <Logo /> Engram Garden
-        </Link>
-        <div className="who">
-          <span title={session.did}>{session.handle ? `@${session.handle}` : session.did}</span>
-          <button className="link" onClick={signOut}>Sign out</button>
-        </div>
-      </header>
-      <main className="page">
-        <Routes />
-      </main>
+      <div className="app">
+        <header className="app-top">
+          <Link to="/" className="wordmark">
+            <Logo size={22} /> Engram Garden
+          </Link>
+          <div className="who">
+            <span title={session.did}>{session.handle ? `@${session.handle}` : session.did}</span>
+            <button className="link" onClick={signOut}>Sign out</button>
+          </div>
+        </header>
+        <main className="app-main">
+          <Routes />
+        </main>
+      </div>
     </SessionContext.Provider>
   );
 }

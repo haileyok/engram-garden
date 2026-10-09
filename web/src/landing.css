@@ -1,7 +1,7 @@
-/* The page visitors see before they sign in. The garden colors and type are
-   set on .landing-wrap and don't reach the rest of the app. */
+/* The garden's colors and type, shared by the page visitors see before they
+   sign in (.landing-wrap) and the signed-in app (.app). */
 
-.landing-wrap {
+.landing-wrap, .app {
   --bg: #f5f1e6;
   --card: #fbf8ef;
   --ink: #22281f;
@@ -24,7 +24,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  .landing-wrap {
+  .landing-wrap, .app {
     --bg: #111612;
     --card: #192019;
     --ink: #e6eadf;
@@ -38,7 +38,7 @@
   }
 }
 
-.landing-wrap ::selection { background: color-mix(in srgb, var(--bloom) 30%, transparent); }
+.landing-wrap ::selection, .app ::selection { background: color-mix(in srgb, var(--bloom) 30%, transparent); }
 .landing { max-width: 1040px; margin: 0 auto; padding: 0 1.5rem 3.5rem; font-size: 1.0625rem; line-height: 1.65; }
 .landing a { color: var(--accent); text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
 .landing a:hover { color: var(--bloom); }
@@ -171,10 +171,10 @@
 
 /* Two cards side by side. */
 .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.25rem; }
-.card, .flow li {
+.landing .card, .flow li {
   padding: 1.3rem 1.5rem 1.4rem; background: var(--card); border: 1px solid var(--line); border-radius: 4px 22px 4px 22px;
 }
-.card p { margin-top: 0.5rem; color: var(--muted); }
+.landing .card p { margin-top: 0.5rem; color: var(--muted); }
 
 /* Three numbered stages. */
 .flow { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.25rem; counter-reset: flow; }

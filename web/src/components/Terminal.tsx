@@ -41,3 +41,22 @@ export function TermFrame({
     </figure>
   );
 }
+
+// Colors the keys and strings of JSON for display in a terminal window.
+export function Json({ text }: { text: string }) {
+  const parts: ReactNode[] = [];
+  const re = /("(?:[^"\\]|\\.)*")(\s*:)?/g;
+  let last = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    parts.push(text.slice(last, m.index));
+    parts.push(
+      <span key={m.index} className={m[2] ? "t-key" : "t-str"}>
+        {m[1]}
+      </span>,
+    );
+    if (m[2]) parts.push(m[2]);
+    last = m.index + m[0].length;
+  }
+  parts.push(text.slice(last));
+  return <>{parts}</>;
+}

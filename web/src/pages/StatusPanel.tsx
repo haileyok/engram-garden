@@ -13,7 +13,7 @@ export function StatusPanel({ status }: { status: SpaceStatus }) {
   const declared = status.config;
   return (
     <div className="stack">
-      <section className="card">
+      <section className="panel">
         <h2>Index</h2>
         <dl className="details">
           <dt>Memories</dt>
@@ -50,7 +50,7 @@ export function StatusPanel({ status }: { status: SpaceStatus }) {
         </dl>
       </section>
       {status.skipped.length > 0 && (
-        <section className="card">
+        <section className="panel">
           <h2>Memories not indexed</h2>
           <p className="muted small">
             These authors wrote memories whose vectors don't come from the space's model, so search can't use

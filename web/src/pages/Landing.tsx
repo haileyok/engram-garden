@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Garden } from "../components/Garden";
-import { Prompt, TermFrame } from "../components/Terminal";
+import { Step, Steps } from "../components/Steps";
+import { Json, Prompt, TermFrame } from "../components/Terminal";
 import { Logo } from "../Logo";
 import { agentSetup } from "../lib/connect";
 
@@ -46,43 +47,6 @@ function Sprig() {
     <div className="sprig" aria-hidden>
       <Logo size={16} />
     </div>
-  );
-}
-
-// Colors the keys and strings of JSON for display in a terminal window.
-function Json({ text }: { text: string }) {
-  const parts: ReactNode[] = [];
-  const re = /("(?:[^"\\]|\\.)*")(\s*:)?/g;
-  let last = 0;
-  for (let m = re.exec(text); m; m = re.exec(text)) {
-    parts.push(text.slice(last, m.index));
-    parts.push(
-      <span key={m.index} className={m[2] ? "t-key" : "t-str"}>
-        {m[1]}
-      </span>,
-    );
-    if (m[2]) parts.push(m[2]);
-    last = m.index + m[0].length;
-  }
-  parts.push(text.slice(last));
-  return <>{parts}</>;
-}
-
-// Numbered steps. A step's terminal sits beside its text. The numbers come from
-// a CSS counter, so steps can be added or moved without renumbering.
-function Steps({ children }: { children: ReactNode }) {
-  return <ol className="steps">{children}</ol>;
-}
-
-function Step({ title, children, aside }: { title: string; children?: ReactNode; aside?: ReactNode }) {
-  return (
-    <li className="step">
-      <div className="step-text">
-        <h3>{title}</h3>
-        {children && <p>{children}</p>}
-      </div>
-      {aside && <div className="step-aside">{aside}</div>}
-    </li>
   );
 }
 

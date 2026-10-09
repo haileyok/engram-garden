@@ -66,7 +66,7 @@ export function NewSpace() {
     <>
       <h1>New memory space</h1>
       <form onSubmit={run} className="stack">
-        <section className="card">
+        <section className="panel">
           <label htmlFor="name">Name</label>
           <input id="name" value={name} onChange={(e) => setName(e.target.value)} disabled={!!steps} />
           <p className="muted small">
@@ -75,7 +75,7 @@ export function NewSpace() {
           </p>
           {!nameOk && name && <p className="error">Use letters, digits and . _ ~ : - only.</p>}
         </section>
-        <section className="card">
+        <section className="panel">
           <h2>Embedding model</h2>
           <p className="muted small">
             Every agent embeds its memories with this exact model, on its own machine. Agents running{" "}
@@ -90,11 +90,11 @@ export function NewSpace() {
         )}
       </form>
       {steps && (
-        <section className="card">
-          <ol className="steps">
+        <section className="panel">
+          <ol className="progress">
             {steps.map((s) => (
-              <li key={s.label} className={`step ${s.state}`}>
-                <span className="step-mark" aria-hidden>
+              <li key={s.label} className={`progress-step ${s.state}`}>
+                <span className="progress-mark" aria-hidden>
                   {{ todo: "○", doing: "◌", done: "✓", failed: "✕", skipped: "–" }[s.state]}
                 </span>
                 {s.label}

@@ -3,6 +3,7 @@ import { api, type SpaceSummary } from "../api";
 import { Link, useRouter } from "../router";
 import { Handle } from "../profiles";
 import { parseSpaceUri, SPACE_TYPE, spacePath } from "../lib/uri";
+import { Step, Steps } from "../components/Steps";
 import { describeError } from "../ui";
 
 const RECENT_KEY = "engram:recent-spaces";
@@ -51,48 +52,39 @@ export function Home() {
     navigate(spacePath(ref.uri));
   };
 
+  const empty = spaces && spaces.length === 0 && others.length === 0;
   return (
     <>
-      <div className="title-row">
+      <div className="page-head">
         <h1>Your memory spaces</h1>
         <Link to="/new" className="button primary">New space</Link>
       </div>
       {error && <p className="error">{error}</p>}
       {spaces === null && !error && <p className="muted">Loading…</p>}
-      {spaces && spaces.length === 0 && others.length === 0 && (
-        <div className="card">
-          <h2>Set up your first memory space</h2>
-          <p className="muted">
-            A memory space is where your agents write down what they learn and search for it later.
-          </p>
-          <ol className="connect">
-            <li>
-              <strong>Create a space.</strong> Pick a name and the embedding model its agents will use.
-            </li>
-            <li>
-              <strong>Let the appview index it.</strong> You approve read-only access once, on your account's own sign-in
-              page. Until you do, memories in the space can't be searched.
-            </li>
-            <li>
-              <strong>Add your agents</strong> as members, under the space's <strong>Manage</strong> tab. An agent can use
-              your account or have its own.
-            </li>
-            <li>
-              <strong>Connect an agent.</strong> The space's <strong>Connect an agent</strong> tab has the commands to copy.
-            </li>
-          </ol>
+      {empty && (
+        <section className="sec first-run" aria-labelledby="first-run">
+          <h2 id="first-run">Set up your first memory space</h2>
+          <Steps>
+            <Step title="Create a space">Pick a name and the embedding model its agents will use.</Step>
+            <Step title="Let the appview index it">
+              You approve read-only access once. Until you do, memories in the space can't be searched.
+            </Step>
+            <Step title="Add your agents">
+              As members, under the space's Manage tab. Each agent can have its own account.
+            </Step>
+            <Step title="Connect an agent">The space's Connect an agent tab has the commands to copy.</Step>
+          </Steps>
           <p>
             <Link to="/new" className="button primary">Create your first space</Link>
           </p>
-          <p className="muted small">Someone added you to theirs? Open it by its URI below.</p>
-        </div>
+        </section>
       )}
-      <ul className="space-list">
+      <ul className="spaces">
         {(spaces ?? []).map((s) => (
           <li key={s.uri}>
-            <Link to={spacePath(s.uri)} className="space-item">
+            <Link to={spacePath(s.uri)} className="space-row">
               <span className="space-name">{s.name}</span>
-              <span className="muted">{s.isAuthority ? "yours" : <>run by <Handle did={s.authority} /></>}</span>
+              <span className="space-by">{s.isAuthority ? "yours" : <>run by <Handle did={s.authority} /></>}</span>
             </Link>
           </li>
         ))}
@@ -100,9 +92,9 @@ export function Home() {
           const ref = parseSpaceUri(u)!;
           return (
             <li key={u}>
-              <Link to={spacePath(u)} className="space-item">
+              <Link to={spacePath(u)} className="space-row">
                 <span className="space-name">{ref.name}</span>
-                <span className="muted">opened before · run by <Handle did={ref.authority} /></span>
+                <span className="space-by">opened before · run by <Handle did={ref.authority} /></span>
               </Link>
               <button
                 className="link small"
@@ -117,8 +109,8 @@ export function Home() {
           );
         })}
       </ul>
-      <form onSubmit={submit} className="card open-space">
-        <label htmlFor="open">Open a space by URI</label>
+      <form onSubmit={submit} className="open-form">
+        <label htmlFor="open">{empty ? "Someone added you to theirs? Open it by its address" : "Open a space by its address"}</label>
         <div className="row">
           <input
             id="open"

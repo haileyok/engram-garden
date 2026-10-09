@@ -2,6 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, type SpaceStatus } from "../api";
 import { goToGrant, IndexingNotice, useService } from "../components/Indexing";
 import { ConnectAgent } from "../components/ConnectAgent";
+import { CopyButton } from "../components/CopyButton";
+import { GraphView } from "../components/GraphView";
+import { useRecall } from "../lib/useRecall";
 import { useSession } from "../App";
 import { useRouter } from "../router";
 import { Handle } from "../profiles";
@@ -12,7 +15,7 @@ import { StatusPanel } from "./StatusPanel";
 import { Manage } from "./Manage";
 import { rememberSpace } from "./Home";
 
-type Tab = "memories" | "status" | "manage" | "agents";
+type Tab = "memories" | "graph" | "status" | "manage" | "agents";
 
 export function SpacePage({ uri }: { uri: string }) {
   const session = useSession();
@@ -22,6 +25,7 @@ export function SpacePage({ uri }: { uri: string }) {
   const tab = (loc.query.get("tab") as Tab) || "memories";
   const [status, setStatus] = useState<SpaceStatus | null>(null);
   const [statusError, setStatusError] = useState<ApiError | Error | null>(null);
+  const recall = useRecall(uri, status);
 
   const load = useCallback(() => {
     api.status(uri).then(
@@ -38,20 +42,20 @@ export function SpacePage({ uri }: { uri: string }) {
   if (!ref) return <p className="error">Not a space URI.</p>;
   const unindexed = statusError instanceof ApiError && statusError.code === "UnknownSpace";
 
-  const tabs: [Tab, string][] = [["memories", "Memories"], ["status", "Status"], ["agents", "Connect an agent"]];
+  const tabs: [Tab, string][] = [["memories", "Memories"], ["graph", "Graph"], ["status", "Status"], ["agents", "Connect an agent"]];
   if (isAuthority) tabs.push(["manage", "Manage"]);
 
   return (
     <>
-      <div className="space-head">
+      <header className="space-head">
         <h1>{ref.name}</h1>
-        <p className="muted small">
-          {isAuthority ? "Your space" : <>Run by <Handle did={ref.authority} /></>} ·{" "}
-          <button type="button" className="link uri" title="Copy the space's URI" onClick={() => navigator.clipboard?.writeText(uri)}>
-            <code>{uri}</code>
-          </button>
+        <p className="space-meta">
+          {isAuthority ? "Yours" : <>Run by <Handle did={ref.authority} /></>}
+          <span aria-hidden>·</span>
+          <code className="uri" title="The space's address">{uri}</code>
+          <CopyButton text={uri} />
         </p>
-      </div>
+      </header>
       <GrantOutcome />
       {unindexed ? (
         <NotIndexed uri={uri} isAuthority={isAuthority} />
@@ -62,12 +66,13 @@ export function SpacePage({ uri }: { uri: string }) {
       )}
       <nav className="tabs">
         {tabs.map(([t, label]) => (
-          <button key={t} className={t === tab ? "tab active" : "tab"} onClick={() => navigate(spacePath(uri) + (t === "memories" ? "" : `?tab=${t}`))}>
+          <button key={t} className={t === tab ? "tab active" : "tab"} aria-current={t === tab ? "page" : undefined} onClick={() => navigate(spacePath(uri) + (t === "memories" ? "" : `?tab=${t}`))}>
             {label}
           </button>
         ))}
       </nav>
-      {tab === "memories" && !unindexed && !statusError && <Memories uri={uri} onStatus={setStatus} />}
+      {tab === "memories" && !unindexed && !statusError && <Memories uri={uri} onStatus={setStatus} recall={recall} />}
+      {tab === "graph" && !unindexed && !statusError && <GraphView uri={uri} total={status?.memories} recall={recall} />}
       {tab === "status" && status && <StatusPanel status={status} />}
       {tab === "manage" && isAuthority && <Manage uri={uri} status={status} onChanged={load} />}
       {tab === "agents" && (
@@ -92,7 +97,7 @@ function GrantOutcome() {
 function NotIndexed({ uri, isAuthority }: { uri: string; isAuthority: boolean }) {
   const service = useService();
   return (
-    <div className="card notice">
+    <div className="notice">
       <h2>Not indexed yet</h2>
       {service?.registration === "closed" ? (
         <p>This appview indexes only the spaces its operator adds. Ask them to add this one.</p>

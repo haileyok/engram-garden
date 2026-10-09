@@ -10,6 +10,25 @@ export type Memory = {
   source?: string;
   createdAt: string;
   indexedAt: string;
+  // Only in search results: how close the memory is to the query, 0 to 1000.
+  similarity?: number;
+};
+
+// A link between two memories of a graph, by their positions in `nodes`.
+export type GraphEdge = { a: number; b: number; similarity: number };
+
+// A space's newest memories, and which of them mean similar things.
+export type MemoryGraph = { nodes: Memory[]; edges: GraphEdge[] };
+
+export type SearchRequest = {
+  space: string;
+  vector: number[];
+  model: string;
+  modelDigest: string;
+  limit?: number;
+  author?: string;
+  tags?: string[];
+  since?: string;
 };
 
 export type ModelInfo = { model: string; modelDigest: string; dims: number };
@@ -118,6 +137,19 @@ export const api = {
     ),
   memory: (space: string, uri: string) =>
     call<{ memory: Memory }>("GET", "/api/memory" + qs({ space, uri })),
+  graph: (space: string, o: { limit?: number; neighbors?: number; minSimilarity?: number } = {}) =>
+    call<MemoryGraph>(
+      "GET",
+      "/api/graph" +
+        qs({
+          space,
+          limit: o.limit?.toString(),
+          neighbors: o.neighbors?.toString(),
+          minSimilarity: o.minSimilarity?.toString(),
+        }),
+    ),
+  search: (req: SearchRequest) =>
+    call<{ memories: Memory[]; approximate?: boolean }>("POST", "/api/search", req),
   deleteMemory: (space: string, uri: string) =>
     call<{ deleted: string }>("POST", "/api/memories/delete", { space, uri }),
 
