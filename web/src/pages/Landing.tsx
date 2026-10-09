@@ -217,9 +217,6 @@ export function Landing() {
             Add the MCP server to its client's config.
           </Step>
         </Steps>
-        <p className="sec-note">
-          Each space's page has a Connect an agent tab with these commands filled in for that space.
-        </p>
       </Section>
 
       <Sprig />
