@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/haileyok/engram-garden/internal/eval"
 	"github.com/haileyok/engram-garden/internal/text"
@@ -199,6 +200,58 @@ func TestHybridCompletesVectorOnlyScores(t *testing.T) {
 	}
 	if !res.Hybrid || len(res.Hits) == 0 || res.Hits[0].Rkey != "x" || res.Hits[0].Keyword <= 0 {
 		t.Fatalf("hits %+v", res.Hits)
+	}
+}
+
+// Turning on KeywordWrite rewrites a space's version 1 segments, after
+// which its searches become hybrid; the rewrite keeps every memory and
+// drops deleted ones.
+func TestRewriteAddsKeywordIndex(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFixture(t)
+	old := f.node()
+	configure(t, old, SpaceConfig{ModelInfo: modelA})
+	for i, batch := range [][]Memory{
+		{mem("did:plc:alice", "a1", "engram_space_uri lives in memory_config"), mem("did:plc:alice", "a2", "deploys go through argo")},
+		{mem("did:plc:alice", "a3", "ModelMismatch after a model change"), mem("did:plc:alice", "a4", "this one gets deleted")},
+	} {
+		if err := old.ApplyRepoChanges(ctx, testSpace, "did:plc:alice", pos(fmt.Sprint("r", i)), batch, nil, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := old.Flush(ctx, testSpace); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := old.ApplyRepoChanges(ctx, testSpace, "did:plc:alice", pos("r9"), nil, []string{"a4"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Flush(ctx, testSpace); err != nil {
+		t.Fatal(err)
+	}
+	if len(uncovered(segsOf(t, old))) != 2 {
+		t.Fatal("expected two version 1 segments")
+	}
+
+	n := f.node(func(o *Options) { o.KeywordWrite = true; o.RewriteInterval = time.Nanosecond })
+	q := SearchQuery{Vector: embedFor(modelA, "engram_space_uri"), Model: modelA, Limit: 5, Text: "engram_space_uri"}
+	if res, err := n.Search(ctx, testSpace, q); err != nil || res.Hybrid {
+		t.Fatalf("before the rewrite: hybrid %v, err %v", res.Hybrid, err)
+	}
+	if err := n.Flush(ctx, testSpace); err != nil { // runs maintenance
+		t.Fatal(err)
+	}
+	segs := segsOf(t, n)
+	if len(uncovered(segs)) != 0 || len(segs) != 1 || segs[0].info.Format != 2 || segs[0].info.Count != 3 {
+		t.Fatalf("after the rewrite: %d segments, %d uncovered, first %+v", len(segs), len(uncovered(segs)), segs[0].info)
+	}
+	res, err := n.Search(ctx, testSpace, q)
+	if err != nil || !res.Hybrid || len(res.Hits) != 3 || res.Hits[0].Rkey != "a1" || res.Hits[0].Keyword <= 0 {
+		t.Fatalf("after the rewrite: %+v %v", res, err)
+	}
+	// A fresh node loads the rewritten space.
+	if res, err := f.node().Search(ctx, testSpace, q); err != nil || !res.Hybrid || len(res.Hits) != 3 {
+		t.Fatalf("reloaded: %+v %v", res, err)
 	}
 }
 

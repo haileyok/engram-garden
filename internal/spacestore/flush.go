@@ -369,10 +369,35 @@ func (s *Space) maintainLocked(ctx context.Context) error {
 	s.mu.RUnlock()
 	if due {
 		start := time.Now()
-		err := s.mergeLocked(ctx)
+		err := s.mergeLocked(ctx, false)
 		observeMaintenance("merge", start, err)
 		if err != nil {
 			return fmt.Errorf("merging: %w", err)
+		}
+	}
+	// Rewrite segments without a current keyword index, independently of
+	// the merge triggers (a space with few segments and no deletions would
+	// never merge), at most once per RewriteInterval.
+	s.mu.RLock()
+	rewrite := opt.KeywordWrite && !s.readOnly && !s.spaceGone && s.n.now().Sub(s.lastRewrite) >= opt.RewriteInterval
+	if rewrite {
+		rewrite = false
+		for _, sl := range s.slots {
+			if sl != nil && len(uncovered(sl.segs)) > 0 {
+				rewrite = true
+			}
+		}
+	}
+	s.mu.RUnlock()
+	if rewrite {
+		start := time.Now()
+		err := s.mergeLocked(ctx, true)
+		observeMaintenance("rewrite", start, err)
+		s.mu.Lock()
+		s.lastRewrite = s.n.now()
+		s.mu.Unlock()
+		if err != nil {
+			return fmt.Errorf("rewriting segments with a keyword index: %w", err)
 		}
 	}
 	if gcDue {
@@ -387,6 +412,18 @@ func (s *Space) maintainLocked(ctx context.Context) error {
 }
 
 // mergeInputs picks the segments of one slot to merge, or nil.
+// uncovered lists the segments without a keyword index from the current
+// analyzer, which a rewrite replaces.
+func uncovered(segs []*seg) []*seg {
+	var out []*seg
+	for _, sg := range segs {
+		if sg.kw == nil || sg.kw.Analyzer != text.Version {
+			out = append(out, sg)
+		}
+	}
+	return out
+}
+
 func (s *Space) mergeInputs(segs []*seg, deleted *roaring.Bitmap) []*seg {
 	opt := s.n.opt
 	total, dead := 0, 0
@@ -418,7 +455,7 @@ func (s *Space) mergeInputs(segs []*seg, deleted *roaring.Bitmap) []*seg {
 	return segs
 }
 
-func (s *Space) mergeLocked(ctx context.Context) error {
+func (s *Space) mergeLocked(ctx context.Context, rewrite bool) error {
 	s.mu.RLock()
 	published := s.deleted
 	var plans [2][]*seg
@@ -429,7 +466,11 @@ func (s *Space) mergeLocked(ctx context.Context) error {
 		}
 		m := sl.model
 		models[i] = &m
-		plans[i] = s.mergeInputs(sl.segs, published)
+		if rewrite {
+			plans[i] = uncovered(sl.segs)
+		} else {
+			plans[i] = s.mergeInputs(sl.segs, published)
+		}
 	}
 	s.mu.RUnlock()
 

@@ -193,6 +193,9 @@ type Space struct {
 
 	// flushMu serializes flushes and merges.
 	flushMu sync.Mutex
+	// lastRewrite is when segments were last rewritten to add a keyword
+	// index (in memory only: a restart may rewrite a little sooner).
+	lastRewrite time.Time
 
 	mu    sync.RWMutex
 	man   *Manifest // the published manifest

@@ -65,7 +65,10 @@ type Options struct {
 	// index (format version 2). Nodes read both versions either way; turn
 	// this on only once every node runs a release that reads version 2.
 	KeywordWrite bool
-	Limits       Limits
+	// RewriteInterval is how often a space may rewrite segments that lack a
+	// current keyword index (with KeywordWrite; default 10 minutes).
+	RewriteInterval time.Duration
+	Limits          Limits
 	// PerSpaceMetrics adds gauges labeled with each loaded space's URI.
 	// Leave it off where spaces are many.
 	PerSpaceMetrics bool
@@ -95,6 +98,7 @@ func (o *Options) defaults() {
 	def(&o.ClusterThreshold, 250_000)
 	defD(&o.FlushAge, time.Hour)
 	defD(&o.MergeInterval, 24*time.Hour)
+	defD(&o.RewriteInterval, 10*time.Minute)
 	defD(&o.MinRetention, 90*24*time.Hour)
 	defD(&o.Deadline, 3*time.Second)
 	defD(&o.HardLimit, 10*time.Second)

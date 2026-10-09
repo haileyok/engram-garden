@@ -490,7 +490,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		model = lex.ModelInfo{Model: q.Get("model"), ModelDigest: q.Get("modelDigest"), Dims: len(vector)}
 	}
-	res, err := s.Store.Search(r.Context(), spaceURI, spacestore.SearchQuery{Vector: vector, Model: model, Limit: limit, Filter: f})
+	// The text makes the search hybrid once the space's segments all have
+	// a keyword index (ENGRAM_KEYWORD_SEARCH); until then the store ignores it.
+	res, err := s.Store.Search(r.Context(), spaceURI, spacestore.SearchQuery{Vector: vector, Model: model, Limit: limit, Filter: f, Text: q.Get("q")})
 	if err != nil {
 		s.writeErr(w, err)
 		return
