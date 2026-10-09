@@ -137,6 +137,7 @@ func setup(t *testing.T, spaces ...string) *fixture {
 	}
 	t.Cleanup(func() { _ = st.Close(context.Background()) })
 	f.av = &appview.Server{
+		TextSearch:       &appview.QueryEmbedder{Provider: embed.HashingProvider{}},
 		Store:            st,
 		Indexer:          &indexer.Indexer{Store: st, Client: client, Dir: n.Dir},
 		Dir:              n.Dir,
@@ -153,7 +154,12 @@ func setup(t *testing.T, spaces ...string) *fixture {
 	f.av.PublicURL = avs.URL
 	auth.callback = avs.URL + "/oauth/callback"
 
+	connector, err := NewConnector("")
+	if err != nil {
+		t.Fatal(err)
+	}
 	f.web = &Server{
+		Connector:  connector,
 		Auth:       netAuth{n},
 		Dir:        n.Dir,
 		AppviewURL: avs.URL,

@@ -142,28 +142,37 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, e)
 		return
 	}
-	id := strings.TrimPrefix(strings.TrimSpace(in.Handle), "@")
-	if _, err := syntax.ParseAtIdentifier(id); err != nil && !strings.HasPrefix(id, "https://") {
-		writeErr(w, apiErr(http.StatusBadRequest, "InvalidHandle", "enter a handle like alice.bsky.social"))
+	redirect, e := s.beginSignIn(w, r, in.Handle)
+	if e != nil {
+		writeErr(w, e)
 		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"redirect": redirect})
+}
+
+// beginSignIn starts signing in a handle and returns the URL of its
+// authorization server. It sets the cookie that ties the sign-in to this
+// browser.
+func (s *Server) beginSignIn(w http.ResponseWriter, r *http.Request, handle string) (string, *Error) {
+	id := strings.TrimPrefix(strings.TrimSpace(handle), "@")
+	if _, err := syntax.ParseAtIdentifier(id); err != nil && !strings.HasPrefix(id, "https://") {
+		return "", apiErr(http.StatusBadRequest, "InvalidHandle", "enter a handle like alice.bsky.social")
 	}
 	var state string
 	redirect, err := s.OAuth.App.StartAuthFlow(context.WithValue(r.Context(), stateKey{}, &state), id)
 	if err != nil {
 		s.log().Info("couldn't start sign-in", "handle", id, "err", err)
-		writeErr(w, apiErr(http.StatusBadRequest, "SignInFailed", "couldn't start signing in as %s", id))
-		return
+		return "", apiErr(http.StatusBadRequest, "SignInFailed", "couldn't start signing in as %s", id)
 	}
 	if state == "" {
-		writeErr(w, apiErr(http.StatusInternalServerError, "SignInFailed", "sign-in wasn't recorded"))
-		return
+		return "", apiErr(http.StatusInternalServerError, "SignInFailed", "sign-in wasn't recorded")
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: signinCookie, Value: s.mac("signin." + state), Path: "/oauth/callback",
 		HttpOnly: true, Secure: strings.HasPrefix(s.Origin, "https://"), SameSite: http.SameSiteLaxMode,
 		MaxAge: int(oauthfile.AuthRequestTTL.Seconds()),
 	})
-	writeJSON(w, http.StatusOK, map[string]string{"redirect": redirect})
+	return redirect, nil
 }
 
 // signInErrorMessage says why a sign-in failed, for the sign-in page, and
@@ -224,7 +233,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		signIns.WithLabelValues("ok").Inc()
 	}
 	http.SetCookie(w, s.sessionCookie(sess.AccountDID, sess.SessionID))
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, s.returnTo(w, r), http.StatusSeeOther)
 }
 
 // startedHere checks the callback's state belongs to a sign-in this browser
