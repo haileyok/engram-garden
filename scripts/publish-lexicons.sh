@@ -44,9 +44,13 @@ for tool in goat jq curl; do
 done
 
 # 1. The TXT record names the account that will publish.
+# It asks the domain's own nameserver, so a "not found" cached by the
+# resolver on this machine can't hold it up.
 txt_records() {
   if command -v dig >/dev/null; then
-    dig +short TXT "_lexicon.$DOMAIN"
+    local ns
+    ns=$(dig +short NS "$DOMAIN" | head -1)
+    dig +short TXT "_lexicon.$DOMAIN" ${ns:+@"$ns"}
   else
     curl -fsS "https://dns.google/resolve?name=_lexicon.$DOMAIN&type=TXT" | jq -r '.Answer[]?.data'
   fi
@@ -57,7 +61,7 @@ if ! txt_records | tr -d '"' | grep -qx "did=$DID"; then
   if ((DRY_RUN)); then
     say "  (dry run: carrying on)"
   else
-    die "add a TXT record named _lexicon.$DOMAIN with the value did=$DID, wait for it to spread, and run this again"
+    die "the nameserver for $DOMAIN has no TXT record _lexicon.$DOMAIN. In the DNS dashboard for $DOMAIN add a TXT record with Name _lexicon (the zone's name is added for you) and Content did=$DID, then run this again"
   fi
 else
   say "  ok: did=$DID"
