@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "query",
-      "description": "Vector search over a space's memories. The caller embeds its query with the space's model and query prefix and sends vector, model and modelDigest. A service that runs the space's model may instead embed q itself when no vector is sent. A service that doesn't embed queries answers InvalidRequest, and one that doesn't run the space's model answers ModelNotHosted. Requires a space credential for the space, presented with an HTTP message signature whose audience is this service's DID.",
+      "description": "Search over a space's memories, by meaning and exact words. The caller embeds its query with the space's model and query prefix and sends vector, model and modelDigest, plus q: once the space has a keyword index, the results rank by both (hybrid). A service that runs the space's model may instead embed q itself when no vector is sent; one that can't (it doesn't embed queries, doesn't run the space's model, or doesn't embed for the space's authority) searches by keyword alone instead, unless mode asks otherwise. The response's mode says what ran. Requires a space credential for the space, presented with an HTTP message signature whose audience is this service's DID.",
       "parameters": {
         "type": "params",
         "required": ["space"],
@@ -20,7 +20,12 @@
           "q": {
             "type": "string",
             "maxLength": 4000,
-            "description": "The query's text. Sent with a vector, it isn't used for ranking. Sent alone, a service that embeds queries (at most 1000 characters) embeds it with the space's model and query prefix."
+            "description": "The query's text. With a vector, it makes the search hybrid once the space has a keyword index. Sent alone, a service that embeds queries (at most 1000 characters) embeds it with the space's model and query prefix; otherwise the search is by keyword alone."
+          },
+          "mode": {
+            "type": "string",
+            "knownValues": ["hybrid", "vector", "keyword"],
+            "description": "hybrid (the default with q and a vector) ranks by meaning and exact words; vector ignores q for ranking; keyword ranks by q's words alone, needs no vector, and answers KeywordIndexBuilding until the space has a keyword index. An explicit mode never falls back."
           },
           "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 },
           "author": { "type": "string", "format": "did", "description": "Only memories written by this DID." },
@@ -46,6 +51,11 @@
             "approximate": {
               "type": "boolean",
               "description": "Set when the index couldn't re-rank in time, so results are ranked by a coarser comparison and may be less precise."
+            },
+            "mode": {
+              "type": "string",
+              "knownValues": ["hybrid", "vector", "keyword"],
+              "description": "What ran: hybrid, vector (no q, mode vector, or a space whose keyword index is still being built), or keyword (mode keyword, or a fallback when q couldn't be embedded)."
             }
           }
         }
@@ -54,8 +64,9 @@
         { "name": "UnknownSpace", "description": "This service does not index the space." },
         { "name": "NoModel", "description": "The space's authority hasn't declared an embedding model." },
         { "name": "ModelMismatch", "description": "The query's model isn't the space's model. Re-read the space's config." },
-        { "name": "ModelNotHosted", "description": "q was sent without a vector, and this service doesn't run the space's model. Embed the query with the space's model and send the vector." },
-        { "name": "TextSearchNotAllowed", "description": "This service doesn't embed queries for this space's authority." },
+        { "name": "ModelNotHosted", "description": "q was sent without a vector, this service doesn't run the space's model, and keyword search couldn't run instead (mode hybrid, or the space has no keyword index yet). Embed the query with the space's model and send the vector." },
+        { "name": "TextSearchNotAllowed", "description": "This service doesn't embed queries for this space's authority, and keyword search couldn't run instead (mode hybrid, or the space has no keyword index yet)." },
+        { "name": "KeywordIndexBuilding", "description": "mode keyword, and the space's keyword index is still being built. Search with a vector meanwhile." },
         { "name": "EmbedderBusy", "description": "Too many queries are being embedded. Retry shortly." },
         { "name": "IndexLoading", "description": "The space's index is loading. Retry shortly." },
         { "name": "RateLimitExceeded", "description": "Too many searches for this space." }

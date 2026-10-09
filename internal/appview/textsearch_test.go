@@ -17,6 +17,37 @@ func textQuery(spaceURI, q string) url.Values {
 	return url.Values{"space": {spaceURI}, "q": {q}}
 }
 
+// checkKeywordFallback checks a keyword search's answer for "deploy": the
+// mode it ran, no similarity, and a match naming the term with a
+// highlighted snippet.
+func checkKeywordFallback(t *testing.T, status int, body map[string]any) {
+	t.Helper()
+	ms, _ := body["memories"].([]any)
+	if status != 200 || body["mode"] != "keyword" || len(ms) == 0 {
+		t.Fatalf("keyword fallback: %d %v", status, body)
+	}
+	m := ms[0].(map[string]any)
+	match, _ := m["match"].(map[string]any)
+	kw, _ := match["keyword"].(map[string]any)
+	sn, _ := match["snippet"].(map[string]any)
+	if _, ok := m["similarity"]; ok || match["vector"] != nil || kw == nil || sn == nil {
+		t.Fatalf("keyword fallback memory: %v", m)
+	}
+	terms, _ := kw["terms"].([]any)
+	if len(terms) == 0 || terms[0].(map[string]any)["term"] != "deploy" {
+		t.Fatalf("matched terms: %v", kw)
+	}
+	hl, _ := sn["highlights"].([]any)
+	txt, _ := sn["text"].(string)
+	if len(hl) == 0 {
+		t.Fatalf("no highlights: %v", sn)
+	}
+	h := hl[0].(map[string]any)
+	if s, e := int(h["byteStart"].(float64)), int(h["byteEnd"].(float64)); txt[s:e] != "deploy" && txt[s:e] != "deploys" {
+		t.Fatalf("highlight %d-%d is %q in %q", s, e, txt[s:e], txt)
+	}
+}
+
 func textSearchFixture(t *testing.T, te *QueryEmbedder) *fixture {
 	t.Helper()
 	f := setup(t)
@@ -104,9 +135,23 @@ func (mismatched) For(_ context.Context, m lex.ModelInfo) (embed.Embedder, error
 func TestTextSearchModelNotHosted(t *testing.T) {
 	t.Parallel()
 	f := textSearchFixture(t, &QueryEmbedder{Provider: mismatched{}})
+	// Without a mode, a search the service can't embed falls back to
+	// keyword search, and says so.
 	status, body := f.get(t, f.alice, serviceDID, "garden.engram.searchMemories", textQuery(f.net.Space, "deploy"))
-	if status != 400 || body["error"] != "ModelNotHosted" {
-		t.Fatalf("model the service doesn't have: %d %v", status, body)
+	checkKeywordFallback(t, status, body)
+	for _, bad := range []url.Values{
+		{"space": {f.net.Space}, "q": {"deploy"}, "mode": {"fuzzy"}},
+		{"space": {f.net.Space}, "mode": {"keyword"}},
+	} {
+		if status, body := f.get(t, f.alice, serviceDID, "garden.engram.searchMemories", bad); status != 400 || body["error"] != "InvalidRequest" {
+			t.Fatalf("%v: %d %v", bad, status, body)
+		}
+	}
+	// An explicit mode never falls back.
+	p := textQuery(f.net.Space, "deploy")
+	p.Set("mode", "hybrid")
+	if status, body := f.get(t, f.alice, serviceDID, "garden.engram.searchMemories", p); status != 400 || body["error"] != "ModelNotHosted" {
+		t.Fatalf("model the service doesn't have, mode hybrid: %d %v", status, body)
 	}
 	// A caller with its own vector doesn't need the service's model.
 	if status, body := f.get(t, f.alice, serviceDID, "garden.engram.searchMemories", searchParams(f.net.Space, "deploy")); status != 200 {
@@ -136,8 +181,11 @@ func TestTextSearchAuthorityAllowlist(t *testing.T) {
 	t.Parallel()
 	f := textSearchFixture(t, &QueryEmbedder{Provider: embed.HashingProvider{}, Authorities: []string{"did:plc:someoneelse"}})
 	status, body := f.get(t, f.alice, serviceDID, "garden.engram.searchMemories", textQuery(f.net.Space, "deploy"))
-	if status != 403 || body["error"] != "TextSearchNotAllowed" {
-		t.Fatalf("authority not on the list: %d %v", status, body)
+	checkKeywordFallback(t, status, body)
+	p := textQuery(f.net.Space, "deploy")
+	p.Set("mode", "hybrid")
+	if status, body := f.get(t, f.alice, serviceDID, "garden.engram.searchMemories", p); status != 403 || body["error"] != "TextSearchNotAllowed" {
+		t.Fatalf("authority not on the list, mode hybrid: %d %v", status, body)
 	}
 	f.srv.TextSearch.Authorities = []string{f.net.Authority.DID}
 	if status, body := f.get(t, f.alice, serviceDID, "garden.engram.searchMemories", textQuery(f.net.Space, "deploy")); status != 200 {
