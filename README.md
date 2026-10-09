@@ -51,7 +51,9 @@ and `recall` tools.
   manifest in object storage (a local directory, or an S3-compatible bucket
   such as Wasabi). One appview node owns each space and keeps its hot parts
   in RAM and on local disk. Idle spaces cost only their storage. See
-  [`docs/design/storage.md`](docs/design/storage.md).
+  [`docs/design/storage.md`](docs/design/storage.md). Keyword and hybrid
+  search are proposed in
+  [`docs/design/keyword-search.md`](docs/design/keyword-search.md).
 - **Control-plane state.** What can't be rebuilt from the members' PDSes
   (which authorities granted the appview access, their OAuth sessions, the
   spaces registered) lives in a small Postgres database, shared by every
