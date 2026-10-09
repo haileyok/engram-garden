@@ -17,6 +17,10 @@ type Memory struct {
 	requests map[string]Request
 	pending  map[string]Pending
 	regs     map[string]Registration
+
+	mcpClients map[string]MCPClient
+	mcpGrants  map[string]MCPGrant
+	mcpCodes   map[string]MCPCode
 }
 
 var _ Store = (*Memory)(nil)
@@ -24,11 +28,14 @@ var _ Store = (*Memory)(nil)
 // NewMemory returns an empty Memory.
 func NewMemory() *Memory {
 	return &Memory{
-		grants:   map[string]Grant{},
-		sessions: map[[2]string]Session{},
-		requests: map[string]Request{},
-		pending:  map[string]Pending{},
-		regs:     map[string]Registration{},
+		grants:     map[string]Grant{},
+		sessions:   map[[2]string]Session{},
+		requests:   map[string]Request{},
+		pending:    map[string]Pending{},
+		regs:       map[string]Registration{},
+		mcpClients: map[string]MCPClient{},
+		mcpGrants:  map[string]MCPGrant{},
+		mcpCodes:   map[string]MCPCode{},
 	}
 }
 

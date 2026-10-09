@@ -73,7 +73,7 @@ Guidance for working on Engram Garden.
   JSON. `connector*.go` is the remote MCP connector for claude.ai
   (`ENGRAM_WEB_MCP`): the web app is an OAuth authorization server for MCP
   clients (metadata, dynamic registration, consent page, PKCE token
-  endpoint; apps and grants in `connectors.json`) and serves read-only
+  endpoint; apps, grants and pending codes in `control.Store`) and serves read-only
   tools at `/mcp`. A grant acts through the web app session it was approved
   in, so signing out ends it. Keep its tools read-only unless the web app's
   OAuth scopes grow a write permission.

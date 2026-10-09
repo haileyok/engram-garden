@@ -1,6 +1,9 @@
 // Package control keeps the appview's control-plane state: which
 // authorities granted it access to their spaces, the OAuth sessions those
-// grants use, sign-ins in progress, and which spaces are registered.
+// grants use, sign-ins in progress, and which spaces are registered. It
+// also keeps what the web app's connector for apps like claude.ai needs:
+// the apps that registered, the accounts' approvals of them, and approvals
+// waiting to be traded for tokens.
 //
 // This is small, mutable, and can't be rebuilt from the members' PDSes
 // (losing a grant means its authority has to grant again), so it lives in a
@@ -62,6 +65,42 @@ type Registration struct {
 	At    time.Time
 }
 
+// MCPClient is an app that registered itself to connect to the web app
+// over MCP, such as claude.ai.
+type MCPClient struct {
+	ID           string
+	Name         string
+	RedirectURIs []string
+	Created      time.Time
+}
+
+// MCPGrant is one account's approval of one app. It names the web app
+// session the app acts through, and holds the hash of the app's current
+// refresh token and of the one before it: a refresh token is traded once,
+// so seeing the previous one again means someone kept a copy.
+type MCPGrant struct {
+	ID              string
+	DID             string
+	SessionID       string
+	ClientID        string
+	Created         time.Time
+	LastUsed        time.Time
+	RefreshHash     string
+	PrevRefreshHash string
+}
+
+// MCPCode is an approval waiting for its app to trade it for tokens. Hash
+// is the hash of the code, which is a bearer secret.
+type MCPCode struct {
+	Hash        string
+	ClientID    string
+	RedirectURI string
+	Challenge   string
+	DID         string
+	SessionID   string
+	Expires     time.Time
+}
+
 // Store is the appview's control-plane state. Methods are safe for
 // concurrent use, from several nodes at once for a database.
 type Store interface {
@@ -111,4 +150,40 @@ type Store interface {
 	Register(ctx context.Context, r Registration) (bool, error)
 	// Registrations returns every registered space.
 	Registrations(ctx context.Context) ([]Registration, error)
+
+	// PutMCPClient saves an app. When max apps are already saved, the
+	// oldest one that no account has approved is dropped to make room; it
+	// reports false, saving nothing, when every app is in use.
+	PutMCPClient(ctx context.Context, c MCPClient, max int) (bool, error)
+	// GetMCPClient returns the app, or nil if there is none.
+	GetMCPClient(ctx context.Context, id string) (*MCPClient, error)
+
+	// PutMCPGrant saves an approval. An account keeps at most maxPerDID:
+	// past that, its least recently used ones are dropped.
+	PutMCPGrant(ctx context.Context, g MCPGrant, maxPerDID int) error
+	// GetMCPGrant returns the approval, or nil if there is none.
+	GetMCPGrant(ctx context.Context, id string) (*MCPGrant, error)
+	// ListMCPGrants returns an account's approvals, newest first.
+	ListMCPGrants(ctx context.Context, did string) ([]MCPGrant, error)
+	// TouchMCPGrant records that an approval was used. A missing one is
+	// not an error.
+	TouchMCPGrant(ctx context.Context, id string, at time.Time) error
+	// DeleteMCPGrant removes an approval the account holds, and reports
+	// whether it did.
+	DeleteMCPGrant(ctx context.Context, id, did string) (bool, error)
+	// RotateMCPRefresh trades the refresh token with hash oldHash for one
+	// with newHash, for the app clientID, and returns the approval. Of
+	// several callers with the same token, one gets it. It returns
+	// ErrNotFound for a token that isn't current. A token that was the
+	// previous one has been traded already, so it ends the approval.
+	RotateMCPRefresh(ctx context.Context, oldHash, clientID, newHash string, at time.Time) (*MCPGrant, error)
+
+	// PutMCPCode saves an approval waiting for its tokens. Codes that
+	// expired by now are dropped first, and it reports false, saving
+	// nothing, when max others are still waiting.
+	PutMCPCode(ctx context.Context, c MCPCode, now time.Time, max int) (bool, error)
+	// TakeMCPCode returns the code and removes it, or returns nil if there
+	// is none or it expired by now. Of several callers asking for the same
+	// code at once, exactly one gets it.
+	TakeMCPCode(ctx context.Context, hash string, now time.Time) (*MCPCode, error)
 }
