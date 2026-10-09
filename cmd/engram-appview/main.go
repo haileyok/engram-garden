@@ -76,6 +76,11 @@ func main() {
 //	ENGRAM_LIMIT_MEMORIES, ENGRAM_LIMIT_BYTES, ENGRAM_LIMIT_SEARCHES_PER_SECOND,
 //	ENGRAM_LIMIT_WRITES_PER_DAY   per-space limits (default unlimited)
 //	ENGRAM_METRICS_PER_SPACE  add gauges labeled by space URI (default false)
+//	ENGRAM_KEYWORD_SEARCH  true to write segments with a keyword index and
+//	                       rewrite older ones, which turns on hybrid search
+//	                       for each space once all its segments have one.
+//	                       Turn on only once every node reads them
+//	                       (default false)
 func openStore(ctx context.Context, log *slog.Logger, ring *routing.Ring) (*spacestore.Node, error) {
 	bs, err := config.Blob()
 	if err != nil {
@@ -95,6 +100,14 @@ func openStore(ctx context.Context, log *slog.Logger, ring *routing.Ring) (*spac
 		perSpace = true
 	default:
 		return nil, fmt.Errorf("ENGRAM_METRICS_PER_SPACE must be true or false, not %q", v)
+	}
+	keyword := false
+	switch v := config.Get("ENGRAM_KEYWORD_SEARCH", ""); v {
+	case "", "0", "false":
+	case "1", "true":
+		keyword = true
+	default:
+		return nil, fmt.Errorf("ENGRAM_KEYWORD_SEARCH must be true or false, not %q", v)
 	}
 	ints := map[string]int64{}
 	for _, k := range []string{"ENGRAM_CACHE_BYTES", "ENGRAM_RAM_BYTES", "ENGRAM_LIMIT_MEMORIES", "ENGRAM_LIMIT_BYTES", "ENGRAM_LIMIT_WRITES_PER_DAY"} {
@@ -118,6 +131,7 @@ func openStore(ctx context.Context, log *slog.Logger, ring *routing.Ring) (*spac
 			SearchesPerSecond: sps, WritesPerDay: int(ints["ENGRAM_LIMIT_WRITES_PER_DAY"]),
 		},
 		PerSpaceMetrics: perSpace,
+		KeywordWrite:    keyword,
 		Log:             log,
 	})
 	return n, err
