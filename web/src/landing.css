@@ -85,7 +85,7 @@
 .garden-ask { display: flex; align-items: baseline; font: 0.8125rem / 1.6 var(--mono); white-space: pre; }
 .garden .garden-ask input {
   flex: 0 1 auto; min-width: 2ch; font: inherit; color: var(--t-fg); background: transparent;
-  border: 0; border-radius: 0; padding: 0; caret-color: var(--t-fg); caret-shape: block;
+  border: 0; border-radius: 0; padding: 0; caret-color: var(--t-fg);
 }
 .garden .garden-ask input::placeholder { color: var(--t-dim); }
 .garden .garden-ask input:focus-visible { outline: 1px dotted var(--t-green); outline-offset: 4px; }

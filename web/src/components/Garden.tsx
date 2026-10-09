@@ -572,9 +572,10 @@ export function Garden() {
                 autoComplete="off"
                 spellCheck={false}
                 placeholder={PLACEHOLDER}
-                // As wide as the text (plus a cell for the cursor), so the quote that
-                // closes it follows the text the way it would in a terminal.
-                style={{ width: `${(text ? text.length : PLACEHOLDER.length) + 1}ch` }}
+                // As wide as the text, so the quote that closes it sits right against
+                // it, the way an auto-closed quote does in a terminal. The extra 2px is
+                // room for the cursor; without it a full-width field scrolls.
+                style={{ width: `calc(${text ? text.length : PLACEHOLDER.length}ch + 2px)` }}
                 onFocus={stopAuto}
                 onChange={(e) => {
                   stopAuto();
