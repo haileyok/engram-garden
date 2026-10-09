@@ -151,6 +151,36 @@ type Store interface {
 	// Registrations returns every registered space.
 	Registrations(ctx context.Context) ([]Registration, error)
 
+	// The web app's own OAuth sessions and sign-ins in progress. They're
+	// kept apart from the appview's above, which the appview's sweep
+	// deletes unless a grant uses them.
+
+	// GetWebSession returns the session, or ErrNotFound.
+	GetWebSession(ctx context.Context, did, id string) (*Session, error)
+	// PutWebSession saves a session, replacing any earlier one with the
+	// same DID and ID.
+	PutWebSession(ctx context.Context, s Session) error
+	// ImportWebSession saves a session only if there isn't one with the
+	// same DID and ID, and reports whether it did. For copying sessions in
+	// from files: a refresh token is used once, so a session the database
+	// already has is newer than any copy.
+	ImportWebSession(ctx context.Context, s Session) (bool, error)
+	// DeleteWebSession removes a session. Deleting a missing one is not an
+	// error.
+	DeleteWebSession(ctx context.Context, did, id string) error
+	// GetWebRequest returns the sign-in's record, or ErrNotFound.
+	GetWebRequest(ctx context.Context, state string) (*Request, error)
+	// PutWebRequest saves a sign-in's record, replacing any with the same
+	// state.
+	PutWebRequest(ctx context.Context, r Request) error
+	// DeleteWebRequest removes a sign-in's record. Deleting a missing one
+	// is not an error.
+	DeleteWebRequest(ctx context.Context, state string) error
+	// DeleteStaleWeb removes sign-ins created before requestsBefore and
+	// sessions not saved since sessionsBefore, and returns how many it
+	// removed.
+	DeleteStaleWeb(ctx context.Context, requestsBefore, sessionsBefore time.Time) (int, error)
+
 	// PutMCPClient saves an app. When max apps are already saved, the
 	// oldest one that no account has approved is dropped to make room; it
 	// reports false, saving nothing, when every app is in use.

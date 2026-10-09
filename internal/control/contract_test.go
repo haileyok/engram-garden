@@ -361,6 +361,7 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 	})
 
 	testMCP(t, newStore)
+	testWeb(t, newStore)
 }
 
 func TestMemory(t *testing.T) {

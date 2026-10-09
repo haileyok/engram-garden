@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/bluesky-social/indigo/atproto/atcrypto"
+	"github.com/bluesky-social/indigo/atproto/auth/oauth"
 	"github.com/bluesky-social/indigo/util/ssrf"
 
 	"github.com/haileyok/engram-garden/internal/config"
@@ -91,8 +92,48 @@ func run(log *slog.Logger) error {
 		outbound.Transport = ssrf.PublicOnlyTransport()
 	}
 
+	// The control-plane database (the one the appview uses), when there is
+	// one, keeps the OAuth sessions and the connector's state. Without
+	// one (development), sessions are files in the data directory.
+	var db control.Store
+	if url := config.Get("ENGRAM_DATABASE_URL", ""); url != "" {
+		pg, err := control.OpenPostgres(ctx, url)
+		if err != nil {
+			return fmt.Errorf("ENGRAM_DATABASE_URL: %w", err)
+		}
+		defer pg.Close()
+		db = pg
+	}
+
 	dir := config.Directory()
-	store := &oauthfile.FileStore{Dir: filepath.Join(dataDir, "oauth")}
+	var store oauth.ClientAuthStore
+	var sweep func()
+	sessionDir := filepath.Join(dataDir, "oauth")
+	if db != nil {
+		// Sessions earlier versions kept as files are copied in first, so
+		// moving doesn't sign anyone out. If that fails, don't start:
+		// serving without them would sign everyone out.
+		res, err := web.ImportFileSessions(ctx, db, sessionDir, log)
+		if err != nil {
+			return fmt.Errorf("moving the saved sessions in %s into the database: %w", sessionDir, err)
+		}
+		if res.Imported+res.Present+res.Unreadable > 0 {
+			log.Info("moved saved web sessions into the database", "imported", res.Imported, "already_there", res.Present,
+				"unreadable", res.Unreadable, "kept_at", res.Moved)
+		}
+		as := web.AuthStore{DB: db}
+		store = as
+		sweep = func() {
+			if n, err := as.Sweep(ctx); err != nil {
+				log.Warn("sweeping expired sessions failed", "err", err)
+			} else if n > 0 {
+				log.Info("removed expired web sessions and sign-ins", "n", n)
+			}
+		}
+	} else {
+		fs := &oauthfile.FileStore{Dir: sessionDir}
+		store, sweep = fs, fs.Sweep
+	}
 	o, err := web.NewOAuth(web.OAuthConfig{PublicURL: publicURL, Key: key, Store: store, Dir: dir, HTTP: outbound})
 	if err != nil {
 		return err
@@ -115,25 +156,19 @@ func run(log *slog.Logger) error {
 	// The connector for apps like claude.ai (MCP over HTTP). Its tools
 	// search with query text, so the appview has to embed it
 	// (ENGRAM_TEXT_SEARCH there). Its apps and approvals go in the
-	// control-plane database, the one the appview uses.
+	// control-plane database.
 	switch v := config.Get("ENGRAM_WEB_MCP", ""); v {
 	case "", "0", "false":
 	case "1", "true":
-		var db control.Store
-		if url := config.Get("ENGRAM_DATABASE_URL", ""); url != "" {
-			pg, err := control.OpenPostgres(ctx, url)
-			if err != nil {
-				return fmt.Errorf("ENGRAM_DATABASE_URL: %w", err)
+		cdb := db
+		if cdb == nil {
+			if !dev {
+				return errors.New("ENGRAM_DATABASE_URL is required with ENGRAM_WEB_MCP: the connector's apps and approvals are kept in the database")
 			}
-			defer pg.Close()
-			db = pg
-		} else if dev {
 			log.Warn("ENGRAM_DATABASE_URL isn't set: the connector's apps and approvals are kept in memory and will be lost on restart")
-			db = control.NewMemory()
-		} else {
-			return errors.New("ENGRAM_DATABASE_URL is required with ENGRAM_WEB_MCP: the connector's apps and approvals are kept in the database")
+			cdb = control.NewMemory()
 		}
-		srv.Connector = web.NewConnector(db)
+		srv.Connector = web.NewConnector(cdb)
 		log.Info("serving the Claude connector", "mcp", publicURL+"/mcp")
 	default:
 		return fmt.Errorf("ENGRAM_WEB_MCP must be true or false, not %q", v)
@@ -143,7 +178,7 @@ func run(log *slog.Logger) error {
 		t := time.NewTicker(time.Hour)
 		defer t.Stop()
 		for {
-			store.Sweep()
+			sweep()
 			select {
 			case <-ctx.Done():
 				return

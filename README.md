@@ -359,12 +359,12 @@ The server keeps OAuth tokens; the browser holds only a signed session cookie. A
 | `ENGRAM_WEB_CLIENT_KEY` | | The OAuth client's P-256 private key, multibase (`goat key generate -t P-256`). Required for https. |
 | `ENGRAM_WEB_LISTEN` | `:8090` | |
 | `ENGRAM_WEB_METRICS_LISTEN` | off | Address for Prometheus metrics at `/metrics`, e.g. `:9465`. See [Monitoring](docs/monitoring.md). |
-| `ENGRAM_WEB_DATA` | `engram-web-data` | Sessions and pending sign-ins, one file each. Keep it private. |
+| `ENGRAM_WEB_DATA` | `engram-web-data` | Sessions and pending sign-ins, one file each, when there's no `ENGRAM_DATABASE_URL`; the cookie key. Keep it private. |
 | `ENGRAM_WEB_COOKIE_KEY` | generated in the data directory | Hex, at least 32 bytes. Signs session cookies. |
 | `ENGRAM_APPVIEW_URL` / `ENGRAM_APPVIEW_DID` | `https://api.engram.garden` / `did:web:<appview host>` | |
 | `ENGRAM_WEB_ALLOW_PRIVATE` | on for `127.0.0.1` | Allow requests to private addresses, for a local PDS. |
 | `ENGRAM_WEB_MCP` | `false` | Serve the connector for Claude and other MCP clients at `/mcp` (see below). Needs `ENGRAM_TEXT_SEARCH` on the appview and `ENGRAM_DATABASE_URL` here. |
-| `ENGRAM_DATABASE_URL` | | `postgres://` URL of the control-plane database, the one the appview uses. Only the connector uses it, so it's needed only with `ENGRAM_WEB_MCP` (without it, a development client keeps the connector's state in memory). |
+| `ENGRAM_DATABASE_URL` | | `postgres://` URL of the control-plane database, the one the appview uses. When set, the web app's OAuth sessions and sign-ins in progress live there (in `web_sessions` and `web_requests`, apart from the appview's own sessions) instead of in files, so several web nodes share them and a restart signs nobody out. On the first start with it set, sessions still saved as files in `ENGRAM_WEB_DATA/oauth` are copied in (never replacing one the database has), and that directory is renamed to `oauth.imported-<time>`, kept as a backup. Required with `ENGRAM_WEB_MCP`. Without it, a development client keeps sessions as files and the connector's state in memory. |
 
 Put the web app's origin in the appview's `ENGRAM_RETURN_ORIGINS`, so granting and stopping come back to it.
 
