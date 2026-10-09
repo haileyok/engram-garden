@@ -75,6 +75,14 @@ and `recall` tools.
 
 They live in [`lexicons/`](lexicons/garden/engram).
 
+The official Bluesky PDS looks up `garden.engram.space` when someone signs in with a
+`space:` scope, and refuses with `invalid_scope: Unable to retrieve space declarations`
+if it can't find it. Cocoon doesn't mind. The lexicons are found through the DNS TXT record
+`_lexicon.engram.garden` (`did=<the publishing account's DID>`) and the
+`com.atproto.lexicon.schema` records in that account's repo;
+[`scripts/publish-lexicons.sh`](scripts/publish-lexicons.sh) writes the records and says how
+to set the DNS record. A deployment on other NSIDs would publish its own.
+
 ## Running the appview
 
 | Variable | Default | |

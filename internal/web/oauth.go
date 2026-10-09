@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode"
 
 	"github.com/bluesky-social/indigo/atproto/atclient"
 	"github.com/bluesky-social/indigo/atproto/atcrypto"
@@ -165,6 +166,38 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"redirect": redirect})
 }
 
+// signInErrorMessage says why a sign-in failed, for the sign-in page, and
+// whether it counts as declined or failed. When the account's server refused
+// the request, it says what the server said; that text comes from another
+// server, so it is cleaned and cut short. Other errors stay in the log.
+func signInErrorMessage(err error) (msg, result string) {
+	var ce *oauth.AuthRequestCallbackError
+	if !errors.As(err, &ce) {
+		return "signing in failed", "failed"
+	}
+	if ce.ErrorCode == "access_denied" {
+		return "you declined to sign in", "declined"
+	}
+	clean := func(s string, max int) string {
+		s = strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) {
+				return ' '
+			}
+			return r
+		}, s)
+		s = strings.Join(strings.Fields(s), " ")
+		if r := []rune(s); len(r) > max {
+			s = string(r[:max]) + "…"
+		}
+		return s
+	}
+	detail := clean(ce.ErrorCode, 40)
+	if d := clean(ce.ErrorDescription, 160); d != "" {
+		detail += ": " + d
+	}
+	return "your account's server refused the sign-in (" + detail + ")", "failed"
+}
+
 // handleCallback finishes signing in and returns to the app.
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: signinCookie, Value: "", Path: "/oauth/callback", MaxAge: -1, HttpOnly: true,
@@ -177,11 +210,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, err := s.OAuth.App.ProcessCallback(r.Context(), r.URL.Query())
 	if err != nil {
-		msg, result := "signing in failed", "failed"
-		var ce *oauth.AuthRequestCallbackError
-		if errors.As(err, &ce) && ce.ErrorCode == "access_denied" {
-			msg, result = "you declined to sign in", "declined"
-		}
+		msg, result := signInErrorMessage(err)
 		signIns.WithLabelValues(result).Inc()
 		s.log().Info("sign-in callback failed", "err", err)
 		http.Redirect(w, r, "/?signin_error="+url.QueryEscape(msg), http.StatusSeeOther)
