@@ -154,12 +154,8 @@ func setup(t *testing.T, spaces ...string) *fixture {
 	f.av.PublicURL = avs.URL
 	auth.callback = avs.URL + "/oauth/callback"
 
-	connector, err := NewConnector("")
-	if err != nil {
-		t.Fatal(err)
-	}
 	f.web = &Server{
-		Connector:  connector,
+		Connector:  NewConnector(controltest.New(t)),
 		Auth:       netAuth{n},
 		Dir:        n.Dir,
 		AppviewURL: avs.URL,

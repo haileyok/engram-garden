@@ -10,10 +10,8 @@ import (
 	"html"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 
@@ -22,6 +20,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"golang.org/x/time/rate"
+
+	"github.com/haileyok/engram-garden/internal/control"
 )
 
 // The connector lets an app such as claude.ai read an account's memory
@@ -43,73 +43,30 @@ const (
 	maxPendingCodes = 1000
 )
 
-// Connector is the state of the connector: the apps and approvals, and the
-// approvals waiting to be traded for tokens.
+// Connector is the connector's state: the apps and approvals, and the
+// approvals waiting to be traded for tokens, all in the control-plane
+// database, so every web node sees them and they survive a restart.
 type Connector struct {
-	store *connectorStore
-	// registrations limits how fast apps can register (anyone can).
+	db control.Store
+	// registrations limits how fast this node registers apps (anyone can).
 	registrations *rate.Limiter
-
-	mu    sync.Mutex
-	codes map[string]*authCode
 }
 
-// authCode is an approval waiting for its app to trade it for tokens.
-type authCode struct {
-	ClientID    string
-	RedirectURI string
-	Challenge   string
-	DID         string
-	SessionID   string
-	Expires     time.Time
+// NewConnector keeps the connector's state in db.
+func NewConnector(db control.Store) *Connector {
+	return &Connector{db: db, registrations: rate.NewLimiter(rate.Every(6*time.Second), 20)}
 }
 
-// NewConnector opens the connector's state in dir. With no dir it's kept
-// in memory.
-func NewConnector(dir string) (*Connector, error) {
-	path := ""
-	if dir != "" {
-		path = filepath.Join(dir, "connectors.json")
-	}
-	st, err := openConnectorStore(path)
-	if err != nil {
-		return nil, err
-	}
-	return &Connector{store: st, registrations: rate.NewLimiter(rate.Every(6*time.Second), 20), codes: map[string]*authCode{}}, nil
-}
-
-func (c *Connector) registerClient(name string, redirects []string) (*connectorClient, error) {
-	return c.store.addClient(name, redirects)
-}
-
-func (c *Connector) putCode(code string, a *authCode) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	now := time.Now()
-	if len(c.codes) >= maxPendingCodes {
-		for k, v := range c.codes {
-			if now.After(v.Expires) {
-				delete(c.codes, k)
-			}
-		}
-		if len(c.codes) >= maxPendingCodes {
-			return false
-		}
-	}
-	c.codes[code] = a
-	return true
+// putCode saves an approval, by the hash of its code, and reports false
+// when too many are waiting.
+func (c *Connector) putCode(ctx context.Context, code string, a control.MCPCode) (bool, error) {
+	a.Hash = hashToken(code)
+	return c.db.PutMCPCode(ctx, a, time.Now().UTC(), maxPendingCodes)
 }
 
 // takeCode returns an approval's details and spends it.
-func (c *Connector) takeCode(code string) (*authCode, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	a, ok := c.codes[code]
-	if !ok {
-		return nil, false
-	}
-	delete(c.codes, code)
-	return a, time.Now().Before(a.Expires)
+func (c *Connector) takeCode(ctx context.Context, code string) (*control.MCPCode, error) {
+	return c.db.TakeMCPCode(ctx, hashToken(code), time.Now().UTC())
 }
 
 // ---- routes ----
@@ -248,14 +205,16 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = "An app"
 	}
-	c, err := s.Connector.registerClient(name, in.RedirectURIs)
+	c, err := s.Connector.registerClient(r.Context(), name, in.RedirectURIs)
 	if err != nil {
-		s.log().Warn("couldn't register an app", "err", err)
+		if err != errTooManyClients {
+			s.log().Warn("couldn't register an app", "err", err)
+		}
 		oauthErr(w, http.StatusServiceUnavailable, "temporarily_unavailable", "couldn't register the app")
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"client_id": c.ID, "client_id_issued_at": c.CreatedAt.Unix(), "client_name": c.Name, "redirect_uris": c.RedirectURIs,
+		"client_id": c.ID, "client_id_issued_at": c.Created.Unix(), "client_name": c.Name, "redirect_uris": c.RedirectURIs,
 		"grant_types": []string{"authorization_code", "refresh_token"}, "response_types": []string{"code"},
 		"token_endpoint_auth_method": "none",
 	})
@@ -299,7 +258,7 @@ func errorPage(w http.ResponseWriter, status int, msg string) {
 // authRequest is an app's request to be let in, once its client and
 // redirect URI check out.
 type authRequest struct {
-	client    connectorClient
+	client    control.MCPClient
 	redirect  string
 	state     string
 	challenge string
@@ -311,9 +270,13 @@ type authRequest struct {
 // the browser must not be sent to a URL the app didn't register. When
 // anything else is wrong it returns the request and an OAuth error code to
 // send back to the app.
-func (s *Server) authRequest(v url.Values) (ar *authRequest, pageErr, code string) {
-	c, ok := s.Connector.store.client(v.Get("client_id"))
-	if !ok {
+func (s *Server) authRequest(ctx context.Context, v url.Values) (ar *authRequest, pageErr, code string) {
+	c, err := s.Connector.db.GetMCPClient(ctx, v.Get("client_id"))
+	if err != nil {
+		s.log().Warn("couldn't look up an app", "err", err)
+		return nil, "couldn't look this app up; try again", ""
+	}
+	if c == nil {
 		return nil, "this app isn't registered", ""
 	}
 	redirect := v.Get("redirect_uri")
@@ -326,7 +289,7 @@ func (s *Server) authRequest(v url.Values) (ar *authRequest, pageErr, code strin
 	if !found {
 		return nil, "this app asked to be sent somewhere it didn't register", ""
 	}
-	ar = &authRequest{client: c, redirect: redirect, state: v.Get("state"), challenge: v.Get("code_challenge"), values: v}
+	ar = &authRequest{client: *c, redirect: redirect, state: v.Get("state"), challenge: v.Get("code_challenge"), values: v}
 	switch {
 	case v.Get("response_type") != "code":
 		return ar, "", "unsupported_response_type"
@@ -359,7 +322,7 @@ func (ar *authRequest) callback(s *Server, q url.Values) string {
 var authorizeFields = []string{"response_type", "client_id", "redirect_uri", "code_challenge", "code_challenge_method", "state", "resource", "scope"}
 
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
-	ar, pageErr, code := s.authRequest(r.URL.Query())
+	ar, pageErr, code := s.authRequest(r.Context(), r.URL.Query())
 	if pageErr != "" {
 		errorPage(w, http.StatusBadRequest, pageErr)
 		return
@@ -444,7 +407,7 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		errorPage(w, http.StatusBadRequest, "bad form")
 		return
 	}
-	ar, pageErr, code := s.authRequest(r.PostForm)
+	ar, pageErr, code := s.authRequest(r.Context(), r.PostForm)
 	if pageErr != "" {
 		errorPage(w, http.StatusBadRequest, pageErr)
 		return
@@ -467,8 +430,12 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		errorPage(w, http.StatusInternalServerError, "couldn't approve")
 		return
 	}
-	if !s.Connector.putCode(code, &authCode{ClientID: ar.client.ID, RedirectURI: ar.redirect, Challenge: ar.challenge,
-		DID: did.String(), SessionID: sid, Expires: time.Now().Add(authCodeTTL)}) {
+	saved, err := s.Connector.putCode(r.Context(), code, control.MCPCode{ClientID: ar.client.ID, RedirectURI: ar.redirect, Challenge: ar.challenge,
+		DID: did.String(), SessionID: sid, Expires: time.Now().Add(authCodeTTL).UTC()})
+	if err != nil {
+		s.log().Warn("couldn't save an approval", "err", err)
+	}
+	if err != nil || !saved {
 		errorPage(w, http.StatusServiceUnavailable, "too many approvals are waiting; try again shortly")
 		return
 	}
@@ -537,17 +504,22 @@ func (s *Server) handleMCPToken(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.PostForm.Get("grant_type") {
 	case "authorization_code":
-		s.exchangeCode(w, r.PostForm)
+		s.exchangeCode(r.Context(), w, r.PostForm)
 	case "refresh_token":
-		s.refreshToken(w, r.PostForm)
+		s.refreshToken(r.Context(), w, r.PostForm)
 	default:
 		oauthErr(w, http.StatusBadRequest, "unsupported_grant_type", "use authorization_code or refresh_token")
 	}
 }
 
-func (s *Server) exchangeCode(w http.ResponseWriter, f url.Values) {
-	a, ok := s.Connector.takeCode(f.Get("code"))
-	if !ok {
+func (s *Server) exchangeCode(ctx context.Context, w http.ResponseWriter, f url.Values) {
+	a, err := s.Connector.takeCode(ctx, f.Get("code"))
+	if err != nil {
+		s.log().Warn("couldn't look up an approval", "err", err)
+		oauthErr(w, http.StatusServiceUnavailable, "temporarily_unavailable", "couldn't issue tokens")
+		return
+	}
+	if a == nil {
 		oauthErr(w, http.StatusBadRequest, "invalid_grant", "the code is invalid, expired or was already used")
 		return
 	}
@@ -559,7 +531,7 @@ func (s *Server) exchangeCode(w http.ResponseWriter, f url.Values) {
 		oauthErr(w, http.StatusBadRequest, "invalid_grant", "the code doesn't match this request")
 		return
 	}
-	g, refresh, err := s.Connector.store.newGrant(a.ClientID, a.DID, a.SessionID)
+	g, refresh, err := s.Connector.newGrant(ctx, a.ClientID, a.DID, a.SessionID)
 	if err != nil {
 		s.log().Warn("couldn't record a connector grant", "err", err)
 		oauthErr(w, http.StatusServiceUnavailable, "temporarily_unavailable", "couldn't issue tokens")
@@ -568,8 +540,8 @@ func (s *Server) exchangeCode(w http.ResponseWriter, f url.Values) {
 	s.writeTokens(w, g.ID, refresh)
 }
 
-func (s *Server) refreshToken(w http.ResponseWriter, f url.Values) {
-	g, refresh, err := s.Connector.store.rotate(f.Get("refresh_token"), f.Get("client_id"))
+func (s *Server) refreshToken(ctx context.Context, w http.ResponseWriter, f url.Values) {
+	g, refresh, err := s.Connector.rotate(ctx, f.Get("refresh_token"), f.Get("client_id"))
 	if err == errInvalidGrant {
 		oauthErr(w, http.StatusBadRequest, "invalid_grant", "the refresh token is invalid or was already used")
 		return
@@ -617,30 +589,44 @@ func (s *Server) verifyAccessToken(ctx context.Context, token string, _ *http.Re
 	if !ok || err != nil {
 		return invalid("malformed")
 	}
-	g, ok := s.Connector.store.grant(id)
-	if !ok {
+	g, err := s.Connector.db.GetMCPGrant(ctx, id)
+	if err != nil {
+		// Not the token's fault: don't have the app start over.
+		return nil, err
+	}
+	if g == nil {
 		return invalid("this connection was ended")
 	}
 	u, err := s.userFor(ctx, syntax.DID(g.DID), g.SessionID)
 	if err != nil {
 		// The account signed out of the web app, or its session lapsed.
-		s.Connector.store.drop(g.ID)
+		// The grant stays, as the failure may not be permanent; the
+		// account can end it from the app.
 		return invalid("the sign-in behind this connection ended; connect again")
 	}
-	s.Connector.store.touch(g.ID)
+	if time.Since(g.LastUsed) > time.Minute {
+		if err := s.Connector.db.TouchMCPGrant(ctx, g.ID, time.Now().UTC()); err != nil {
+			s.log().Warn("couldn't note a connection's use", "err", err)
+		}
+	}
 	return &auth.TokenInfo{Scopes: []string{mcpScope}, Expiration: time.Unix(exp, 0), UserID: g.ID, Extra: map[string]any{"user": u}}, nil
 }
 
 // ---- managing connections ----
 
 func (s *Server) handleConnectors(w http.ResponseWriter, r *http.Request, u *user) {
+	grants, err := s.Connector.db.ListMCPGrants(r.Context(), u.did.String())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
 	out := []map[string]any{}
-	for _, g := range s.Connector.store.grantsOf(u.did.String()) {
+	for _, g := range grants {
 		name := "An app"
-		if c, ok := s.Connector.store.client(g.ClientID); ok {
+		if c, err := s.Connector.db.GetMCPClient(r.Context(), g.ClientID); err == nil && c != nil {
 			name = c.Name
 		}
-		out = append(out, map[string]any{"id": g.ID, "clientName": name, "createdAt": g.CreatedAt, "lastUsed": g.LastUsed})
+		out = append(out, map[string]any{"id": g.ID, "clientName": name, "createdAt": g.Created, "lastUsed": g.LastUsed})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"connectors": out, "url": s.mcpURL()})
 }
@@ -653,7 +639,12 @@ func (s *Server) handleRevokeConnector(w http.ResponseWriter, r *http.Request, u
 		writeErr(w, e)
 		return
 	}
-	if !s.Connector.store.revoke(in.ID, u.did.String()) {
+	ok, err := s.Connector.db.DeleteMCPGrant(r.Context(), in.ID, u.did.String())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if !ok {
 		writeErr(w, apiErr(http.StatusNotFound, "NotFound", "no such connection"))
 		return
 	}

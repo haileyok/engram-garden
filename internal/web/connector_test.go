@@ -498,34 +498,40 @@ func TestConnectorRevocation(t *testing.T) {
 	}
 }
 
-func TestConnectorsPersist(t *testing.T) {
+// TestConnectorStateIsInTheDatabase starts a second web node, or a restarted
+// one, on the same database: what the first approved is there, and a token
+// is traded once across both.
+func TestConnectorStateIsInTheDatabase(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	c, err := NewConnector(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cl, err := c.registerClient("Claude", []string{claudeCallback})
-	if err != nil {
-		t.Fatal(err)
-	}
-	g, refresh, err := c.store.newGrant(cl.ID, "did:plc:alice", "s-alice")
-	if err != nil {
-		t.Fatal(err)
-	}
+	f := setup(t)
+	// A space is listed for accounts that wrote to it.
+	f.net.Put(f.alice, indexer.Collection, "a1", memory("pop1 deploys go through the deploy repo workflow", "infra"))
+	clientID, tok := f.connect(t, f.alice)
 
-	again, err := NewConnector(dir)
-	if err != nil {
-		t.Fatal(err)
+	second := &Server{Connector: NewConnector(f.web.Connector.db), Auth: f.web.Auth, Dir: f.web.Dir, AppviewURL: f.web.AppviewURL,
+		AppviewDID: appviewDID, Origin: origin, CookieKey: f.web.CookieKey}
+	ts := httptest.NewServer(second.Handler())
+	t.Cleanup(ts.Close)
+	g := &fixture{net: f.net, web: second, url: ts.URL, alice: f.alice, bob: f.bob}
+
+	// The second node honors the first's access token...
+	cs := g.mcpSession(t, tok.Access)
+	out, errText := callTool(t, cs, "list_spaces", nil)
+	if sp, _ := out["spaces"].([]any); errText != "" || len(sp) != 1 {
+		t.Fatalf("list_spaces on the second node: %v %s", out, errText)
 	}
-	if got, ok := again.store.client(cl.ID); !ok || got.Name != "Claude" {
-		t.Fatalf("client after a restart: %v %v", got, ok)
+	// ...and sees the account's connection.
+	if status, body := g.call(t, "GET", "/api/connectors", f.alice, nil); status != 200 || len(list(body, "connectors")) != 1 {
+		t.Fatalf("connectors on the second node: %d %v", status, body)
 	}
-	if got, ok := again.store.grant(g.ID); !ok || got.DID != "did:plc:alice" {
-		t.Fatalf("grant after a restart: %v %v", got, ok)
+	// The refresh token is traded on the second node, and is spent on the
+	// first.
+	status, out := g.token(t, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {tok.Refresh}, "client_id": {clientID}})
+	if status != 200 {
+		t.Fatalf("refresh on the second node: %d %v", status, out)
 	}
-	if _, _, err := again.store.rotate(refresh, cl.ID); err != nil {
-		t.Fatalf("refresh token after a restart: %v", err)
+	if status, body := f.token(t, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {tok.Refresh}, "client_id": {clientID}}); status != 400 {
+		t.Fatalf("the spent refresh token on the first node: %d %v", status, body)
 	}
 }
 

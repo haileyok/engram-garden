@@ -24,6 +24,7 @@ import (
 	"github.com/bluesky-social/indigo/util/ssrf"
 
 	"github.com/haileyok/engram-garden/internal/config"
+	"github.com/haileyok/engram-garden/internal/control"
 	"github.com/haileyok/engram-garden/internal/metrics"
 	"github.com/haileyok/engram-garden/internal/oauthfile"
 	"github.com/haileyok/engram-garden/internal/web"
@@ -113,13 +114,26 @@ func run(log *slog.Logger) error {
 	}
 	// The connector for apps like claude.ai (MCP over HTTP). Its tools
 	// search with query text, so the appview has to embed it
-	// (ENGRAM_TEXT_SEARCH there).
+	// (ENGRAM_TEXT_SEARCH there). Its apps and approvals go in the
+	// control-plane database, the one the appview uses.
 	switch v := config.Get("ENGRAM_WEB_MCP", ""); v {
 	case "", "0", "false":
 	case "1", "true":
-		if srv.Connector, err = web.NewConnector(dataDir); err != nil {
-			return fmt.Errorf("connector state in %s: %w", dataDir, err)
+		var db control.Store
+		if url := config.Get("ENGRAM_DATABASE_URL", ""); url != "" {
+			pg, err := control.OpenPostgres(ctx, url)
+			if err != nil {
+				return fmt.Errorf("ENGRAM_DATABASE_URL: %w", err)
+			}
+			defer pg.Close()
+			db = pg
+		} else if dev {
+			log.Warn("ENGRAM_DATABASE_URL isn't set: the connector's apps and approvals are kept in memory and will be lost on restart")
+			db = control.NewMemory()
+		} else {
+			return errors.New("ENGRAM_DATABASE_URL is required with ENGRAM_WEB_MCP: the connector's apps and approvals are kept in the database")
 		}
+		srv.Connector = web.NewConnector(db)
 		log.Info("serving the Claude connector", "mcp", publicURL+"/mcp")
 	default:
 		return fmt.Errorf("ENGRAM_WEB_MCP must be true or false, not %q", v)

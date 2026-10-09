@@ -359,6 +359,8 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Fatalf("%d callers registered the same space", created)
 		}
 	})
+
+	testMCP(t, newStore)
 }
 
 func TestMemory(t *testing.T) {
