@@ -3,6 +3,7 @@ package segment
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"slices"
 	"sort"
@@ -212,12 +213,14 @@ func TestPrunedEqualsExhaustive(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, win := range []int{1, 7, 128, window} {
-			got, err := topK(ctx, kq, k, n, accept, win)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !slices.Equal(got, want) {
-				t.Fatalf("%q n=%d window=%d: pruned %v\nexhaustive %v", q, n, win, got[:min(5, len(got))], want[:min(5, len(want))])
+			for _, workers := range []int{1, 3, 8} {
+				got, err := topK(ctx, kq, k, n, accept, win, workers)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !slices.Equal(got, want) {
+					t.Fatalf("%q n=%d window=%d workers=%d: pruned %v\nexhaustive %v", q, n, win, workers, got[:min(5, len(got))], want[:min(5, len(want))])
+				}
 			}
 		}
 		// Scoring single rows agrees with the search.
@@ -242,6 +245,33 @@ func TestPrunedEqualsExhaustive(t *testing.T) {
 	}
 }
 
+// Another worker's n-th hit may tie with a row here that has a lower row
+// number, which wins the tie, so the shared floor only skips strictly
+// lower bounds.
+func TestSharedFloorIsStrict(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	docs := makeDocs(rand.New(rand.NewPCG(2, 2)), 50, 16)
+	for i := range docs {
+		docs[i].Text, docs[i].Tags, docs[i].Source = "alpha beta", nil, ""
+	}
+	r, k, _, _ := openV2(t, docs, WriteOptions{Dims: 16})
+	kq := query(t, r, k, "alpha")
+	want, err := TopKExhaustive(kq, k, 5, nil)
+	if err != nil || len(want) != 5 {
+		t.Fatalf("%v %v", want, err)
+	}
+	floor := &sharedFloor{}
+	floor.v.Store(math.Float64bits(want[0].Score)) // every row ties it
+	h, err := searchRows(ctx, kq, k, 5, nil, 1, 0, k.Count, floor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := h.sorted(); !slices.Equal(got, want) {
+		t.Fatalf("with a tied floor: %v, want %v", got, want)
+	}
+}
+
 // A memory repeating a word hundreds of times saturates the block bound's
 // tf byte; pruning must still find it.
 func TestSaturatedTFBound(t *testing.T) {
@@ -250,7 +280,7 @@ func TestSaturatedTFBound(t *testing.T) {
 	docs := keywordDocs(rand.New(rand.NewPCG(6, 6)), 600, 16)
 	r, k, got, _ := openV2(t, docs, WriteOptions{Dims: 16})
 	kq := query(t, r, k, "spam")
-	hits, err := topK(ctx, kq, k, 1, nil, 1)
+	hits, err := topK(ctx, kq, k, 1, nil, 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +305,7 @@ func TestSaturatedTFBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pruned, err := topK(ctx, kq2, k2, 1, nil, 1)
+	pruned, err := topK(ctx, kq2, k2, 1, nil, 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
