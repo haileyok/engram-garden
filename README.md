@@ -66,7 +66,7 @@ and `recall` tools.
 | `garden.engram.space` | space type | Declares a memory space. Its collections are `garden.engram.memory` and `garden.engram.config`. |
 | `garden.engram.config` | record (`self`) | The space's embedding model: `model`, `modelDigest`, `dims`, optional `documentPrefix`, `queryPrefix`, and `next` during a model change |
 | `garden.engram.memory` | record | `text`, optional `tags`, optional `source`, `createdAt`, `embedding`, and `nextEmbedding` during a model change |
-| `garden.engram.searchMemories` | query | Vector search with `vector`, `model`, `modelDigest`, `limit`, `author`, `tags` and `since`. With text search on, `q` alone is enough: the appview embeds it (see `ENGRAM_TEXT_SEARCH`). |
+| `garden.engram.searchMemories` | query | Search with `vector`, `model`, `modelDigest`, `q`, `limit`, `author`, `tags` and `since`. With `q` and a keyword index (`ENGRAM_KEYWORD_SEARCH`), results rank by meaning and exact words together and explain each `match`; `mode` picks `hybrid`, `vector` or `keyword` (no vector needed). With text search on, `q` alone is enough: the appview embeds it (see `ENGRAM_TEXT_SEARCH`); otherwise `q` alone searches by keyword. The response's `mode` says what ran. |
 | `garden.engram.getMemory` | query | One memory by URI |
 | `garden.engram.listMemories` | query | Newest first, paged, with `author` and `tags` filters |
 | `garden.engram.getMemoryGraph` | query | The newest memories (up to 500) and links between the ones that mean similar things, for drawing the space as a graph |

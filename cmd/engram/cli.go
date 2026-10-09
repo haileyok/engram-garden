@@ -680,6 +680,7 @@ func (c *cli) cmdRecall(ctx context.Context, args []string) error {
 	author := fs.String("author", "", "only memories by this agent DID")
 	since := fs.String("since", "", "only memories created at or after this RFC 3339 time")
 	sp := fs.String("space", agent.AllSpaces, "search only this space, by name or URI (default: every space)")
+	mode := fs.String("mode", "", "hybrid (default: meaning and exact words), vector (meaning only) or keyword (exact words only)")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -692,7 +693,7 @@ func (c *cli) cmdRecall(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	out, err := a.Recall(ctx, agent.RecallIn{Query: q, Limit: *n, Author: *author, Tags: tags, Since: *since, Space: *sp})
+	out, err := a.Recall(ctx, agent.RecallIn{Query: q, Limit: *n, Author: *author, Tags: tags, Since: *since, Space: *sp, Mode: *mode})
 	if err != nil {
 		return err
 	}
@@ -803,6 +804,20 @@ func writeMemories(w io.Writer, out agent.MemoriesOut) {
 		fmt.Fprintln(w, strings.TrimSpace(m.Text))
 		if m.Source != "" {
 			fmt.Fprintf(w, "source: %s\n", m.Source)
+		}
+		if m.Match != nil && m.Match.Keyword != nil && len(m.Match.Keyword.Terms) > 0 {
+			var terms []string
+			for _, t := range m.Match.Keyword.Terms {
+				s := t.Term
+				if t.Kind != "exact" {
+					s += " (" + t.Kind + ")"
+				}
+				if t.Field != "text" {
+					s += " in " + t.Field
+				}
+				terms = append(terms, s)
+			}
+			fmt.Fprintf(w, "matched: %s\n", strings.Join(terms, ", "))
 		}
 		fmt.Fprintln(w, m.URI)
 	}

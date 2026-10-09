@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,7 +40,7 @@ func (s *Server) mcpServer() *mcp.Server {
 	}, tool(s.toolListSpaces))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "recall",
-		Description: "Semantic search over everyone's memories, in all your spaces unless you pass space. Returns the closest matches first, each with its space and a similarity from 0 to 1000. Describe what you're looking for in natural language, in a sentence or two.",
+		Description: "Search everyone's memories by meaning and exact words together, in all your spaces unless you pass space. Describe what you're looking for in a sentence or two, and include any identifiers, names, error messages or paths you know: they're matched exactly. Returns the best matches first, each with its space, a similarity from 0 to 1000 when there is one, and a match explaining why it matched.",
 		Annotations: readOnly,
 	}, tool(s.toolRecall))
 	mcp.AddTool(srv, &mcp.Tool{
@@ -172,6 +171,7 @@ func onlySpace(spaces []spaceInfo) (string, error) {
 type memoryResults struct {
 	Memories    []agent.Memory `json:"memories"`
 	Approximate bool           `json:"approximate"`
+	Mode        string         `json:"mode"`
 }
 
 func (s *Server) searchSpace(ctx context.Context, u *user, spaceURI string, in agent.RecallIn, limit int) (memoryResults, error) {
@@ -188,6 +188,9 @@ func (s *Server) searchSpace(ctx context.Context, u *user, spaceURI string, in a
 	}
 	if len(in.Tags) > 0 {
 		params["tags"] = in.Tags
+	}
+	if in.Mode != "" {
+		params.Set("mode", in.Mode)
 	}
 	var out memoryResults
 	if err := s.appview(ctx, u, ref, http.MethodGet, "garden.engram.searchMemories", params, nil, &out); err != nil {
@@ -233,6 +236,7 @@ func (s *Server) toolRecall(ctx context.Context, u *user, in agent.RecallIn) (ag
 	type result struct {
 		memories    []agent.Memory
 		approximate bool
+		mode        string
 		err         error
 	}
 	results := make([]result, len(targets))
@@ -245,16 +249,17 @@ func (s *Server) toolRecall(ctx context.Context, u *user, in agent.RecallIn) (ag
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			r, err := s.searchSpace(ctx, u, t, in, limit)
-			results[i] = result{r.Memories, r.Approximate, err}
+			results[i] = result{r.Memories, r.Approximate, r.Mode, err}
 		}()
 	}
 	wg.Wait()
 
 	out := agent.MemoriesOut{Memories: []agent.Memory{}}
+	var lists []agent.MemoriesOut
 	var notes []string
 	var firstErr error
 	failed := 0
-	approximate := false
+	approximate, keywordOnly := false, false
 	for i, r := range results {
 		if r.err != nil {
 			failed++
@@ -265,19 +270,25 @@ func (s *Server) toolRecall(ctx context.Context, u *user, in agent.RecallIn) (ag
 			continue
 		}
 		approximate = approximate || r.approximate
-		for _, m := range r.memories {
-			if m.Tags == nil {
-				m.Tags = []string{}
+		keywordOnly = keywordOnly || r.mode == "keyword" && in.Mode != "keyword"
+		for j := range r.memories {
+			if r.memories[j].Tags == nil {
+				r.memories[j].Tags = []string{}
 			}
-			out.Memories = append(out.Memories, m)
 		}
+		lists = append(lists, agent.MemoriesOut{Memories: r.memories, Mode: r.mode})
 	}
 	if failed == len(targets) {
 		return agent.MemoriesOut{}, firstErr
 	}
-	slices.SortStableFunc(out.Memories, func(a, b agent.Memory) int {
-		return similarity(b) - similarity(a)
-	})
+	// Each space's results stay in the order the appview ranked them;
+	// several spaces interleave by position (see agent.MergeRanked).
+	if merged, mode := agent.MergeRanked(lists); merged != nil {
+		out.Memories, out.Mode = merged, mode
+	}
+	if keywordOnly {
+		notes = append(notes, "Some results matched by exact words only, because the appview couldn't embed the query for that space.")
+	}
 	if len(out.Memories) > limit {
 		out.Memories = out.Memories[:limit]
 	}
@@ -286,13 +297,6 @@ func (s *Server) toolRecall(ctx context.Context, u *user, in agent.RecallIn) (ag
 	}
 	out.Note = strings.Join(notes, " ")
 	return out, nil
-}
-
-func similarity(m agent.Memory) int {
-	if m.Similarity == nil {
-		return -1
-	}
-	return *m.Similarity
 }
 
 // ---- get_memory and list_memories ----
