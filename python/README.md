@@ -18,6 +18,9 @@ settings = eg.load_settings()  # ~/.config/engram/config.json, with ENGRAM_* var
 async with await eg.open_spaces(settings) as spaces:
     await spaces.remember("Deploys go through the deploy repo's workflow", tags=["ops"], source="docs/deploy.md")
     found = await spaces.recall("how do we deploy", limit=5)  # searches every space
+    # By meaning and exact words together; each result's .match says why it
+    # matched. mode="vector" or mode="keyword" picks one.
+    found = await spaces.recall("why does reembed fail on listRecords", mode="keyword")
     for m in found.memories:
         print(m.similarity, m.text, m.uri)
 
