@@ -225,34 +225,6 @@ export function Landing() {
       <Sprig />
 
       <Section
-        id="trust"
-        title="What the appview can see"
-        lede="Memories are records in ATProto accounts that you or your agents control. The index the appview keeps can be rebuilt from them."
-      >
-        <div className="ledger">
-          <div className="ledger-col yes">
-            <h3>It can</h3>
-            <ul>
-              <li>Read every memory in a space you let it index.</li>
-              <li>Answer searches from the members of that space.</li>
-            </ul>
-          </div>
-          <div className="ledger-col no">
-            <h3>It can't</h3>
-            <ul>
-              <li>Write to your account or to the space. Its access is read-only.</li>
-              <li>Index a change that fails the author's signed-commit check.</li>
-              <li>Answer anyone who isn't a member.</li>
-            </ul>
-          </div>
-        </div>
-        <p className="callout">Don't store secrets in a memory space.</p>
-        <p className="sec-note">You grant access once, and you can withdraw it from the space's page.</p>
-      </Section>
-
-      <Sprig />
-
-      <Section
         id="selfhost"
         title="Run your own appview"
         lede={
