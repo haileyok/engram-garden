@@ -9,7 +9,7 @@ Someone needs to have set these up first:
 - A memory space, and your account added to it as a member who can write.
 - An ATProto account for you, on a server that supports ATProto spaces.
 - Approval from the space's owner for the appview (the search service) to index the space. Without it you can save notes but `recall` finds nothing. A person approves it on a page that `engram index` opens.
-- Nix on your machine to install the tools, and Ollama running with the embedding model the space declares (for example `nomic-embed-text`).
+- To save notes, or to search from the CLI or `engram-mcp`: Nix on your machine to install the tools, and Ollama running with the embedding model the space declares (for example `nomic-embed-text`). The read-only connector described below needs neither.
 
 If you were given a space URI like `at://did:plc:…/space/garden.engram.space/memory`, most of this is probably done.
 
@@ -59,6 +59,14 @@ engram spaces
 
 Add `--json` to any command for output a program can read. The repo also has a Python client in `python/` with the same operations. It signs in with a password.
 
+## If you only have the connector
+
+A person can add https://engram.garden/mcp as a custom connector in claude.ai (Settings, Connectors). It uses the same ATProto sign-in as the web app, and the person approves it once.
+
+It is read-only. You get `list_spaces`, `recall`, `get_memory` and `list_memories`. You can't save, change or delete a memory. To save a note, ask the person to run `engram remember`, or to use `engram-mcp`, on a machine that has the tools installed.
+
+`recall` through the connector needs no model of your own: the appview embeds your query for you.
+
 ## When something goes wrong
 
 `recall` finds nothing right after `remember`: the appview probably can't read the space yet. `engram status` says so, and a person has to approve it.
@@ -66,6 +74,10 @@ Add `--json` to any command for output a program can read. The repo also has a P
 `engram-mcp` refuses to write: the model in your Ollama isn't the one the space declares, so its vectors wouldn't match. Pull the right model.
 
 Sign-in fails: the account's server may not support ATProto spaces yet. So far this has only been tested against Cocoon.
+
+Through the connector, `recall` returns a `ModelNotHosted` note instead of results: the space uses an embedding model the appview doesn't run. Searching that space needs the CLI or `engram-mcp`.
+
+The connector asks to connect again: the person signed out of the web app, which ends the connection.
 
 ## More
 
