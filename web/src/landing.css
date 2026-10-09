@@ -159,10 +159,9 @@
   .term { border-color: rgb(255 255 255 / 0.1); box-shadow: 0 24px 48px -28px rgb(0 0 0 / 0.8); }
 }
 
-/* Sections: a narrow reading column with the heading in the margin */
-.sprig { display: flex; align-items: center; gap: 1rem; color: var(--accent); }
+/* Sections. The space between them comes from the dividers' margins alone. */
+.sprig { display: flex; align-items: center; gap: 1rem; margin: 3.5rem 0; color: var(--accent); }
 .sprig::before, .sprig::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-.sec { padding: 2.25rem 0; }
 .sec h2 { margin: 0; font: 600 clamp(1.7rem, 3vw, 2.1rem) / 1.15 var(--serif); letter-spacing: -0.02em; }
 .sec h3 { margin: 0; font: 600 1.15rem / 1.3 var(--serif); letter-spacing: -0.01em; }
 .sec :where(p) { margin: 0; }
@@ -210,7 +209,7 @@
 .facts dd { max-width: 44rem; margin: 0; }
 
 .landing-foot {
-  display: flex; flex-wrap: wrap; gap: 0.5rem 1.6rem; padding-top: 1.5rem; border-top: 1px solid var(--line);
+  display: flex; flex-wrap: wrap; gap: 0.5rem 1.6rem; margin-top: 3.5rem; padding-top: 1.5rem; border-top: 1px solid var(--line);
   font-size: 0.9rem;
 }
 .landing-foot a { color: var(--muted); }
@@ -230,7 +229,7 @@
   .hero-copy, .hero-signin { grid-column: 1; grid-row: auto; }
   .hero-signin { max-width: 32rem; margin-top: 0.5rem; }
   .promises { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; }
-  .sec { padding: 2.25rem 0; }
+  .sprig { margin: 2.75rem 0; }
   .cards, .flow { grid-template-columns: minmax(0, 1fr); }
   .step { grid-template-columns: minmax(0, 1fr); padding-left: 3rem; }
   .facts > div { grid-template-columns: minmax(0, 1fr); }
