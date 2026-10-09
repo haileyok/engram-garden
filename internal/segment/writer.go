@@ -14,6 +14,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
+	"github.com/haileyok/engram-garden/internal/text"
 	"github.com/haileyok/engram-garden/internal/vec"
 )
 
@@ -43,6 +44,10 @@ type WriteOptions struct {
 	ClusterThreshold int
 	// BlockSize is the uncompressed size of a docs block (default 64 KB).
 	BlockSize int
+	// Keyword writes a version 2 segment with a keyword index (analyzing
+	// each memory's text, tags and source with internal/text). Without it,
+	// Write produces version 1, which older readers can open.
+	Keyword bool
 }
 
 // Info describes a written segment.
@@ -52,6 +57,8 @@ type Info struct {
 	MinCreatedAt time.Time
 	MaxCreatedAt time.Time
 	Clustered    bool
+	// Version is the format version written.
+	Version int
 }
 
 var encoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
@@ -188,17 +195,28 @@ func Write(w io.Writer, docs []Doc, opt WriteOptions) (Info, error) {
 		clSec = clusters.marshal()
 	}
 
+	h := header{version: 1, count: uint32(len(docs)), dims: uint32(dims)}
 	secs := [numSections][]byte{meta, strSec, bits, int8s, docsSec, docIdx, clSec}
-	h := header{count: uint32(len(docs)), dims: uint32(dims)}
-	pos := uint64(HeaderSize)
-	for i, s := range secs {
+	if opt.Keyword {
+		// Rows are final now (clustering has reordered docs).
+		kw, err := buildKeyword(docs)
+		if err != nil {
+			return Info{}, err
+		}
+		h.version, h.analyzer, h.totalLength = 2, uint32(text.Version), kw.totalLength
+		secs[secNorms], secs[secTermIndex], secs[secTerms], secs[secPostings] = kw.norms, kw.termIndex, kw.terms, kw.postings
+	}
+	n := sectionsIn(h.version)
+	pos := uint64(headerSize(h.version))
+	for i, s := range secs[:n] {
 		h.sections[i] = section{off: pos, len: uint64(len(s)), crc: crc32.Checksum(s, crcTable)}
 		pos += uint64(len(s))
 	}
+	info.Version = int(h.version)
 	hb := h.marshal()
 	cw := &countWriter{w: w}
 	parts := [][]byte{hb}
-	parts = append(parts, secs[:]...)
+	parts = append(parts, secs[:n]...)
 	parts = append(parts, hb, []byte(endMagic))
 	for _, p := range parts {
 		if _, err := cw.Write(p); err != nil {
