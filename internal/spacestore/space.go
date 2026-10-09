@@ -96,6 +96,9 @@ type seg struct {
 	// bits is the 1-bit section, or nil when the space is too large to pin
 	// it in RAM and scans stream it instead.
 	bits []byte
+	// kw is the keyword index's in-RAM part (lengths and term index), nil
+	// for a version 1 segment.
+	kw   *segment.Keyword
 	rows map[uint32]int // memory id -> row
 }
 

@@ -61,7 +61,11 @@ type Options struct {
 	Deadline         time.Duration
 	HardLimit        time.Duration
 	ClusterThreshold int
-	Limits           Limits
+	// KeywordWrite makes flushes and merges write segments with a keyword
+	// index (format version 2). Nodes read both versions either way; turn
+	// this on only once every node runs a release that reads version 2.
+	KeywordWrite bool
+	Limits       Limits
 	// PerSpaceMetrics adds gauges labeled with each loaded space's URI.
 	// Leave it off where spaces are many.
 	PerSpaceMetrics bool
