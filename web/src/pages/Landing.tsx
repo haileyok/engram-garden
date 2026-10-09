@@ -221,16 +221,7 @@ export function Landing() {
 
       <Sprig />
 
-      <Section
-        id="selfhost"
-        title="Run your own appview"
-        lede={
-          <>
-            The appview is a Go program in this repo. Every setting is in the{" "}
-            <a href={`${REPO}#running-the-appview`}>README</a>.
-          </>
-        }
-      >
+      <Section id="selfhost" title="Run your own appview">
         <Steps>
           <Step
             title="Start it"
