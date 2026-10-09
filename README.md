@@ -64,7 +64,7 @@ and `recall` tools.
 | `garden.engram.space` | space type | Declares a memory space. Its collections are `garden.engram.memory` and `garden.engram.config`. |
 | `garden.engram.config` | record (`self`) | The space's embedding model: `model`, `modelDigest`, `dims`, optional `documentPrefix`, `queryPrefix`, and `next` during a model change |
 | `garden.engram.memory` | record | `text`, optional `tags`, optional `source`, `createdAt`, `embedding`, and `nextEmbedding` during a model change |
-| `garden.engram.searchMemories` | query | Vector search with `vector`, `model`, `modelDigest`, `limit`, `author`, `tags` and `since` |
+| `garden.engram.searchMemories` | query | Vector search with `vector`, `model`, `modelDigest`, `limit`, `author`, `tags` and `since`. With text search on, `q` alone is enough: the appview embeds it (see `ENGRAM_TEXT_SEARCH`). |
 | `garden.engram.getMemory` | query | One memory by URI |
 | `garden.engram.listMemories` | query | Newest first, paged, with `author` and `tags` filters |
 | `garden.engram.getMemoryGraph` | query | The newest memories (up to 500) and links between the ones that mean similar things, for drawing the space as a graph |
@@ -105,6 +105,10 @@ to set the DNS record. A deployment on other NSIDs would publish its own.
 | `ENGRAM_CACHE_BYTES` | 100 GiB | Disk cache budget |
 | `ENGRAM_RAM_BYTES` | 8 GiB | RAM budget for loaded spaces |
 | `ENGRAM_LIMIT_MEMORIES` / `ENGRAM_LIMIT_BYTES` / `ENGRAM_LIMIT_SEARCHES_PER_SECOND` / `ENGRAM_LIMIT_WRITES_PER_DAY` | unlimited | Per-space limits |
+| `ENGRAM_TEXT_SEARCH` | `false` | Embed the text of searches that come without a vector, for callers that have no model of their own (the web app, the Claude connector). Uses the model `ENGRAM_EMBED_URL` / `ENGRAM_EMBED_MODEL` / `ENGRAM_EMBED_MODEL_DIGEST` name, usually an Ollama next to the appview, and only serves spaces that declare that same model (same name and digest); others get `ModelNotHosted`. The appview embeds only after verifying a credential for an indexed space. |
+| `ENGRAM_TEXT_SEARCH_PER_SECOND` / `ENGRAM_TEXT_SEARCH_BURST` | `2` / `20` | How many text searches one space authority may make (not per space, so many spaces don't multiply it) |
+| `ENGRAM_TEXT_SEARCH_CONCURRENCY` | `4` | Embeddings running at once on a node; callers past it get `EmbedderBusy` (503) |
+| `ENGRAM_TEXT_SEARCH_AUTHORITIES` | any | Comma-separated DIDs: only spaces these accounts govern may use text search |
 | `ENGRAM_NODES` | single node | `id=url,id=url`: every appview node and its internal URL |
 | `ENGRAM_NODE_ID` | | This node's id in `ENGRAM_NODES` |
 | `ENGRAM_NODES_EPOCH` | | A number that increases whenever `ENGRAM_NODES` changes |

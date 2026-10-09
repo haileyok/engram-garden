@@ -134,6 +134,46 @@ func openControlFromEnv(ctx context.Context, log *slog.Logger) (control.Store, f
 	return openControl(ctx, log, config.Get("ENGRAM_STORAGE", "dir"), config.Get("ENGRAM_DATABASE_URL", ""))
 }
 
+// textSearchFromEnv builds the embedder for searches that come as text, or
+// nil when it's off. It embeds with the model ENGRAM_EMBED_* names, which
+// has to be the model a space declares (same name and digest), so it only
+// serves spaces that use it.
+//
+//	ENGRAM_TEXT_SEARCH               true to embed query text for callers (default false)
+//	ENGRAM_TEXT_SEARCH_PER_SECOND    per space authority (default 2)
+//	ENGRAM_TEXT_SEARCH_BURST         per space authority (default 20)
+//	ENGRAM_TEXT_SEARCH_CONCURRENCY   embeddings at once, node-wide (default 4)
+//	ENGRAM_TEXT_SEARCH_AUTHORITIES   only these space authorities (comma-separated
+//	                                 DIDs; default any)
+func textSearchFromEnv(log *slog.Logger) (*appview.QueryEmbedder, error) {
+	switch v := config.Get("ENGRAM_TEXT_SEARCH", ""); v {
+	case "", "0", "false":
+		return nil, nil
+	case "1", "true":
+	default:
+		return nil, fmt.Errorf("ENGRAM_TEXT_SEARCH must be true or false, not %q", v)
+	}
+	provider, err := config.Provider()
+	if err != nil {
+		return nil, err
+	}
+	per, err := strconv.ParseFloat(config.Get("ENGRAM_TEXT_SEARCH_PER_SECOND", "2"), 64)
+	if err != nil || per <= 0 {
+		return nil, errors.New("ENGRAM_TEXT_SEARCH_PER_SECOND must be a positive number")
+	}
+	burst, err := config.Int("ENGRAM_TEXT_SEARCH_BURST", 20)
+	if err != nil || burst < 1 {
+		return nil, errors.New("ENGRAM_TEXT_SEARCH_BURST must be a positive integer")
+	}
+	conc, err := config.Int("ENGRAM_TEXT_SEARCH_CONCURRENCY", 4)
+	if err != nil || conc < 1 {
+		return nil, errors.New("ENGRAM_TEXT_SEARCH_CONCURRENCY must be a positive integer")
+	}
+	auths := config.List("ENGRAM_TEXT_SEARCH_AUTHORITIES")
+	log.Info("embedding query text for callers", "per_second", per, "burst", burst, "concurrency", conc, "authorities", auths)
+	return &appview.QueryEmbedder{Provider: provider, PerSecond: per, Burst: int(burst), MaxConcurrent: int(conc), Authorities: auths}, nil
+}
+
 // openControl opens the control-plane store: the grants, OAuth sessions and
 // registered spaces. It returns what to call to close it. With no database
 // URL it uses memory, but only next to directory storage, which is for
@@ -289,7 +329,12 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	textSearch, err := textSearchFromEnv(log)
+	if err != nil {
+		return err
+	}
 	srv := &appview.Server{
+		TextSearch: textSearch,
 		Store:      st,
 		Indexer:    &indexer.Indexer{Store: st, Client: client, Dir: dir, Log: log},
 		Dir:        dir,

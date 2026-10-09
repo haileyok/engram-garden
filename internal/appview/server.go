@@ -68,6 +68,9 @@ type Server struct {
 	DB control.Store
 	// HTTP forwards requests to other nodes.
 	HTTP *http.Client
+	// TextSearch, when set, embeds the text of searches that come without
+	// a vector. Nil requires callers to embed their own queries.
+	TextSearch *QueryEmbedder
 
 	// MaxSyncs caps notified syncs running at once across the node
 	// (default 32), and MaxSpaceSyncs per space (default 2), so one busy
@@ -455,15 +458,6 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "q is at most 4000 characters"))
 		return
 	}
-	if q.Get("vector") == "" || q.Get("model") == "" || q.Get("modelDigest") == "" {
-		s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "vector, model and modelDigest are required: embed the query with the space's model"))
-		return
-	}
-	vector, err := lex.DecodeQueryVector(q.Get("vector"))
-	if err != nil || len(vector) == 0 || len(vector) > 16000 {
-		s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "vector must be base64url-encoded f16le"))
-		return
-	}
 	limit, err := parseLimit(r, 10, 50)
 	if err != nil {
 		s.writeErr(w, err)
@@ -474,7 +468,28 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, err)
 		return
 	}
-	model := lex.ModelInfo{Model: q.Get("model"), ModelDigest: q.Get("modelDigest"), Dims: len(vector)}
+	var (
+		vector []float32
+		model  lex.ModelInfo
+	)
+	if q.Get("vector") == "" && q.Get("q") != "" && s.TextSearch != nil {
+		// No vector: embed the text with the space's model, if this
+		// service runs it.
+		if vector, model, err = s.embedQuery(r.Context(), spaceURI, q.Get("q")); err != nil {
+			s.writeErr(w, err)
+			return
+		}
+	} else {
+		if q.Get("vector") == "" || q.Get("model") == "" || q.Get("modelDigest") == "" {
+			s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "vector, model and modelDigest are required: embed the query with the space's model"))
+			return
+		}
+		if vector, err = lex.DecodeQueryVector(q.Get("vector")); err != nil || len(vector) == 0 || len(vector) > 16000 {
+			s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "vector must be base64url-encoded f16le"))
+			return
+		}
+		model = lex.ModelInfo{Model: q.Get("model"), ModelDigest: q.Get("modelDigest"), Dims: len(vector)}
+	}
 	res, err := s.Store.Search(r.Context(), spaceURI, spacestore.SearchQuery{Vector: vector, Model: model, Limit: limit, Filter: f})
 	if err != nil {
 		s.writeErr(w, err)
@@ -489,6 +504,26 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		body["approximate"] = true
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// embedQuery turns a search's text into a vector with the space's declared
+// model, and returns that model for the search to check against.
+func (s *Server) embedQuery(ctx context.Context, spaceURI, text string) ([]float32, lex.ModelInfo, error) {
+	if len(text) > MaxTextQueryChars {
+		return nil, lex.ModelInfo{}, errf(http.StatusBadRequest, "InvalidRequest", "q is at most %d characters when the service embeds it", MaxTextQueryChars)
+	}
+	cfg, err := s.Store.Config(ctx, spaceURI)
+	if err != nil {
+		return nil, lex.ModelInfo{}, err
+	}
+	if cfg == nil {
+		return nil, lex.ModelInfo{}, spacestore.ErrNoModel
+	}
+	v, err := s.TextSearch.Embed(ctx, spaceURI, cfg, text)
+	if err != nil {
+		return nil, lex.ModelInfo{}, err
+	}
+	return v, cfg.ModelInfo, nil
 }
 
 // parseMemoryURI splits a memory URI in the space into author and rkey.
