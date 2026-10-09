@@ -22,6 +22,10 @@ var (
 		Name: "engram_notify_registrations_total",
 		Help: "Requests to space authorities to send this service write notifications, by result.",
 	}, []string{"result"})
+	textSearches = metrics.Factory.NewCounterVec(prometheus.CounterOpts{
+		Name: "engram_text_searches_total",
+		Help: "Searches that sent query text for the appview to embed, by result: ok, not_allowed (the space's authority isn't on the list), rate_limited (past the authority's limit), model_not_hosted (the appview doesn't run the space's model), busy (too many embeddings at once), error.",
+	}, []string{"result"})
 	spacesIndexed = metrics.Factory.NewGauge(prometheus.GaugeOpts{
 		Name: "engram_spaces_indexed",
 		Help: "Spaces the appview indexes: configured, plus those whose authority granted access.",
@@ -42,6 +46,9 @@ func init() {
 	}
 	for _, r := range []string{"ok", "error", "no_slot"} {
 		notifiedSyncs.WithLabelValues(r)
+	}
+	for _, r := range []string{"ok", "not_allowed", "rate_limited", "model_not_hosted", "busy", "error"} {
+		textSearches.WithLabelValues(r)
 	}
 }
 

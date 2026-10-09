@@ -95,6 +95,7 @@ the Go runtime's (`go_*`) and the process's (`process_*`) metrics, and
 | `engram_space_sync_duration_seconds` | histogram | | |
 | `engram_spaces_indexed` | gauge | | Spaces the appview indexes. |
 | `engram_spaces_owned` | gauge | | Indexed spaces this node owns and may read. |
+| `engram_text_searches_total` | counter | `result` (`ok`, `not_allowed`, `rate_limited`, `model_not_hosted`, `busy`, `error`) | Searches that sent query text for the appview to embed. `busy` and `rate_limited` rising means the embedder is being leaned on; `model_not_hosted` means a space uses a model this appview doesn't run. |
 
 ### Search and index storage (appview)
 

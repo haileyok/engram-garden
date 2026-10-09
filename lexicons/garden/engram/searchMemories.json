@@ -4,10 +4,10 @@
   "defs": {
     "main": {
       "type": "query",
-      "description": "Vector search over a space's memories. The caller embeds its query with the space's model and query prefix. Requires a space credential for the space, presented with an HTTP message signature whose audience is this service's DID.",
+      "description": "Vector search over a space's memories. The caller embeds its query with the space's model and query prefix and sends vector, model and modelDigest. A service that runs the space's model may instead embed q itself when no vector is sent. A service that doesn't embed queries answers InvalidRequest, and one that doesn't run the space's model answers ModelNotHosted. Requires a space credential for the space, presented with an HTTP message signature whose audience is this service's DID.",
       "parameters": {
         "type": "params",
-        "required": ["space", "vector", "model", "modelDigest"],
+        "required": ["space"],
         "properties": {
           "space": { "type": "string", "description": "The space URI." },
           "vector": {
@@ -20,7 +20,7 @@
           "q": {
             "type": "string",
             "maxLength": 4000,
-            "description": "The query's text. Optional and not used for ranking yet; kept for keyword search later."
+            "description": "The query's text. Sent with a vector, it isn't used for ranking. Sent alone, a service that embeds queries (at most 1000 characters) embeds it with the space's model and query prefix."
           },
           "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 },
           "author": { "type": "string", "format": "did", "description": "Only memories written by this DID." },
@@ -54,6 +54,9 @@
         { "name": "UnknownSpace", "description": "This service does not index the space." },
         { "name": "NoModel", "description": "The space's authority hasn't declared an embedding model." },
         { "name": "ModelMismatch", "description": "The query's model isn't the space's model. Re-read the space's config." },
+        { "name": "ModelNotHosted", "description": "q was sent without a vector, and this service doesn't run the space's model. Embed the query with the space's model and send the vector." },
+        { "name": "TextSearchNotAllowed", "description": "This service doesn't embed queries for this space's authority." },
+        { "name": "EmbedderBusy", "description": "Too many queries are being embedded. Retry shortly." },
         { "name": "IndexLoading", "description": "The space's index is loading. Retry shortly." },
         { "name": "RateLimitExceeded", "description": "Too many searches for this space." }
       ]
