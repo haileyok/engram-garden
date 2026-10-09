@@ -72,6 +72,9 @@ type Hit struct {
 	IndexedAt time.Time
 	// Similarity is the cosine similarity to the query, for search results.
 	Similarity float64
+	// Keyword is the BM25 keyword score, for hybrid search results (0 when
+	// no query term occurs).
+	Keyword float64
 }
 
 // Filter narrows searches and listings.

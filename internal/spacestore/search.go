@@ -11,15 +11,20 @@ import (
 	"time"
 
 	"github.com/haileyok/engram-garden/internal/segment"
+	"github.com/haileyok/engram-garden/internal/text"
 	"github.com/haileyok/engram-garden/internal/vec"
 )
 
-// SearchQuery is a vector search.
+// SearchQuery is a vector search, made hybrid by Text.
 type SearchQuery struct {
 	Vector []float32
 	Model  ModelInfo
 	Limit  int
 	Filter Filter
+	// Text is the query's text. When set and every segment has a keyword
+	// index, keyword candidates join the vector ones and the two scores
+	// are fused; otherwise it's ignored.
+	Text string
 }
 
 // SearchResult is a search's answer.
@@ -28,23 +33,39 @@ type SearchResult struct {
 	// Approximate is set when re-ranking missed its deadline and results
 	// are ranked by the 1-bit scan alone.
 	Approximate bool
+	// Hybrid is set when keyword scores took part in the ranking.
+	Hybrid bool
 }
 
 type cand struct {
-	seg  *seg
-	row  int
-	buf  *bufEntry
+	seg *seg
+	row int
+	buf *bufEntry
+	// id is the memory id, which breaks ties: equal distances keep the
+	// older memory, so results don't depend on scan or map order.
+	id   uint32
 	dist int
 	sim  float64
+	// kw is the keyword score (hybrid searches), and fused the ranking
+	// score.
+	kw    float64
+	hasKW bool
+	fused float64
 }
 
-// candHeap is a max-heap on distance, keeping the closest candidates.
+// candHeap is a max-heap on distance (then id), keeping the closest
+// candidates.
 type candHeap []cand
 
-func (h candHeap) Len() int           { return len(h) }
-func (h candHeap) Less(i, j int) bool { return h[i].dist > h[j].dist }
-func (h candHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *candHeap) Push(x any)        { *h = append(*h, x.(cand)) }
+func (h candHeap) Len() int { return len(h) }
+func (h candHeap) Less(i, j int) bool {
+	if h[i].dist != h[j].dist {
+		return h[i].dist > h[j].dist
+	}
+	return h[i].id > h[j].id
+}
+func (h candHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *candHeap) Push(x any)   { *h = append(*h, x.(cand)) }
 func (h *candHeap) Pop() any {
 	old := *h
 	x := old[len(old)-1]
@@ -55,7 +76,7 @@ func (h *candHeap) Pop() any {
 func (h *candHeap) offer(c cand, limit int) {
 	if h.Len() < limit {
 		heap.Push(h, c)
-	} else if c.dist < (*h)[0].dist {
+	} else if w := (*h)[0]; c.dist < w.dist || c.dist == w.dist && c.id < w.id {
 		(*h)[0] = c
 		heap.Fix(h, 0)
 	}
@@ -156,6 +177,15 @@ func (s *Space) search(ctx context.Context, q SearchQuery, start time.Time) (*Se
 			bufs = append(bufs, e)
 		}
 	}
+	var pq text.Query
+	var bufKW bufSnapshot
+	hybrid := false
+	if q.Text != "" && keywordCovered(segs) {
+		if pq = text.ParseQuery(q.Text); len(pq.Groups) > 0 {
+			hybrid = true
+			bufKW = s.snapshotBufKW(&pq)
+		}
+	}
 	s.mu.RUnlock()
 
 	dims := sl.model.Dims
@@ -215,7 +245,7 @@ func (s *Space) search(ctx context.Context, q SearchQuery, start time.Time) (*Se
 							continue
 						}
 						off := (row - from) * bl
-						local.offer(cand{seg: sg, row: row, dist: vec.Hamming(qbits, bits[off:off+bl])}, ncand)
+						local.offer(cand{seg: sg, row: row, id: id, dist: vec.Hamming(qbits, bits[off:off+bl])}, ncand)
 					}
 				}
 			}
@@ -237,9 +267,20 @@ func (s *Space) search(ctx context.Context, q SearchQuery, start time.Time) (*Se
 		if !q.Filter.matchDoc(&e.doc) {
 			continue
 		}
-		h.offer(cand{buf: e, dist: vec.Hamming(qbits, e.bits[0])}, ncand)
+		h.offer(cand{buf: e, id: e.id, dist: vec.Hamming(qbits, e.bits[0])}, ncand)
 	}
 	cands := []cand(*h)
+
+	// 1b. Hybrid: add the keyword candidates and complete both scores.
+	if hybrid {
+		var err error
+		if cands, err = s.addKeyword(hardCtx, &pq, q.Filter, segs, bufKW, pending, published, qbits, dims, cands, ncand); err != nil {
+			if hardCtx.Err() != nil {
+				return nil, ErrRetryable
+			}
+			return nil, err
+		}
+	}
 
 	// 2. Re-rank with the int8 vectors, by the deadline.
 	rerankCtx, cancelRerank := context.WithDeadline(hardCtx, start.Add(opt.Deadline))
@@ -288,6 +329,9 @@ func (s *Space) search(ctx context.Context, q SearchQuery, start time.Time) (*Se
 	} else {
 		sort.SliceStable(cands, func(a, b int) bool { return cands[a].sim > cands[b].sim })
 	}
+	if hybrid {
+		fuse(cands)
+	}
 	if len(cands) > limit {
 		cands = cands[:limit]
 	}
@@ -304,7 +348,7 @@ func (s *Space) search(ctx context.Context, q SearchQuery, start time.Time) (*Se
 		}
 		return nil, err
 	}
-	out := &SearchResult{Approximate: approximate, Hits: make([]Hit, len(cands))}
+	out := &SearchResult{Approximate: approximate, Hybrid: hybrid, Hits: make([]Hit, len(cands))}
 	for i, c := range cands {
 		var h Hit
 		if c.buf != nil {
@@ -316,6 +360,7 @@ func (s *Space) search(ctx context.Context, q SearchQuery, start time.Time) (*Se
 		}
 		h.Text, h.Source, h.CID, h.IndexedAt = bodies[i].Text, bodies[i].Source, bodies[i].CID, bodies[i].IndexedAt
 		h.Similarity = max(-1, min(1, c.sim))
+		h.Keyword = c.kw
 		out.Hits[i] = h
 	}
 	return out, nil
