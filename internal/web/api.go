@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -179,6 +180,79 @@ func (s *Server) handleMemories(w http.ResponseWriter, r *http.Request, u *user)
 	}
 	var out json.RawMessage
 	err := s.appview(r.Context(), u, ref, http.MethodGet, "garden.engram.listMemories", params, nil, &out)
+	s.relay(w, err, out)
+}
+
+// handleSearch finds the memories nearest a query the browser embedded
+// with the space's model (the web app has no model of its own), by asking
+// the appview. It only reads; it is a POST because of the size of the
+// vector.
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request, u *user) {
+	var in struct {
+		Space       string    `json:"space"`
+		Vector      []float32 `json:"vector"`
+		Model       string    `json:"model"`
+		ModelDigest string    `json:"modelDigest"`
+		Limit       int       `json:"limit"`
+		Author      string    `json:"author"`
+		Tags        []string  `json:"tags"`
+		Since       string    `json:"since"`
+	}
+	if e := decode(r, &in); e != nil {
+		writeErr(w, e)
+		return
+	}
+	ref, e := memorySpace(in.Space)
+	if e != nil {
+		writeErr(w, e)
+		return
+	}
+	if n := len(in.Vector); n == 0 || n > 16000 {
+		writeErr(w, apiErr(http.StatusBadRequest, "InvalidRequest", "send the query's vector, up to 16000 numbers"))
+		return
+	}
+	if in.Model == "" || in.ModelDigest == "" {
+		writeErr(w, apiErr(http.StatusBadRequest, "InvalidRequest", "name the model that made the vector, and its digest"))
+		return
+	}
+	params := url.Values{
+		"space": {ref.String()}, "vector": {lex.EncodeQueryVector(in.Vector)},
+		"model": {in.Model}, "modelDigest": {in.ModelDigest},
+	}
+	if in.Limit > 0 {
+		params.Set("limit", strconv.Itoa(in.Limit))
+	}
+	if in.Author != "" {
+		params.Set("author", in.Author)
+	}
+	if in.Since != "" {
+		params.Set("since", in.Since)
+	}
+	if len(in.Tags) > 0 {
+		params["tags"] = in.Tags
+	}
+	var out json.RawMessage
+	err := s.appview(r.Context(), u, ref, http.MethodGet, "garden.engram.searchMemories", params, nil, &out)
+	s.relay(w, err, out)
+}
+
+// handleGraph relays the space's memory graph: its newest memories and the
+// links between those that mean similar things.
+func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request, u *user) {
+	q := r.URL.Query()
+	ref, e := memorySpace(q.Get("space"))
+	if e != nil {
+		writeErr(w, e)
+		return
+	}
+	params := url.Values{"space": {ref.String()}}
+	for _, k := range []string{"limit", "neighbors", "minSimilarity"} {
+		if v := q.Get(k); v != "" {
+			params.Set(k, v)
+		}
+	}
+	var out json.RawMessage
+	err := s.appview(r.Context(), u, ref, http.MethodGet, "garden.engram.getMemoryGraph", params, nil, &out)
 	s.relay(w, err, out)
 }
 

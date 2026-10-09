@@ -1,0 +1,50 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.getMemoryGraph",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "A space's newest memories and links between the ones that mean similar things, for drawing the space as a graph. Only memories indexed with the space's model are included. Each memory links to its nearest neighbors among the memories returned. Same authentication as garden.engram.searchMemories.",
+      "parameters": {
+        "type": "params",
+        "required": ["space"],
+        "properties": {
+          "space": { "type": "string", "description": "The space URI." },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 200, "description": "How many of the newest memories to include." },
+          "neighbors": { "type": "integer", "minimum": 1, "maximum": 8, "default": 3, "description": "How many of its most similar memories each memory links to." },
+          "minSimilarity": { "type": "string", "description": "A number above 0 and at most 1 (default 0.4): the cosine similarity a pair needs to be linked." }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["nodes", "edges"],
+          "properties": {
+            "nodes": {
+              "type": "array",
+              "description": "Newest first.",
+              "items": { "type": "ref", "ref": "garden.engram.defs#memoryView" }
+            },
+            "edges": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["a", "b", "similarity"],
+                "properties": {
+                  "a": { "type": "integer", "description": "Position of one memory in nodes. Always smaller than b." },
+                  "b": { "type": "integer", "description": "Position of the other memory in nodes." },
+                  "similarity": { "type": "integer", "minimum": 0, "maximum": 1000, "description": "Cosine similarity, times 1000." }
+                }
+              }
+            }
+          }
+        }
+      },
+      "errors": [
+        { "name": "UnknownSpace", "description": "This service does not index the space." },
+        { "name": "NoModel", "description": "The space has not declared an embedding model." }
+      ]
+    }
+  }
+}

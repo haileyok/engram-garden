@@ -67,6 +67,7 @@ and `recall` tools.
 | `garden.engram.searchMemories` | query | Vector search with `vector`, `model`, `modelDigest`, `limit`, `author`, `tags` and `since` |
 | `garden.engram.getMemory` | query | One memory by URI |
 | `garden.engram.listMemories` | query | Newest first, paged, with `author` and `tags` filters |
+| `garden.engram.getMemoryGraph` | query | The newest memories (up to 500) and links between the ones that mean similar things, for drawing the space as a graph |
 | `garden.engram.getSpaceStatus` | query | The space's model, memory count, authors whose vectors don't match, and whether the appview's access is granted, missing or lapsed |
 | `garden.engram.warmSpace` | procedure | Start loading a space's index ahead of searches |
 | `garden.engram.exportSpace` | query | Download the space's index as a tar |

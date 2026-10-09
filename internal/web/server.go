@@ -112,6 +112,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/status", s.signedIn(s.handleStatus))
 	mux.HandleFunc("GET /api/memories", s.signedIn(s.handleMemories))
 	mux.HandleFunc("GET /api/memory", s.signedIn(s.handleMemory))
+	mux.HandleFunc("GET /api/graph", s.signedIn(s.handleGraph))
+	mux.HandleFunc("POST /api/search", s.change(s.signedIn(s.handleSearch)))
 	mux.HandleFunc("POST /api/memories/delete", s.change(s.signedIn(s.handleDeleteMemory)))
 	mux.HandleFunc("GET /api/live", s.signedIn(s.handleLive))
 

@@ -159,6 +159,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /xrpc/garden.engram.searchMemories", s.owned(q, s.handleSearch))
 	mux.HandleFunc("GET /xrpc/garden.engram.getMemory", s.owned(q, s.handleGet))
 	mux.HandleFunc("GET /xrpc/garden.engram.listMemories", s.owned(q, s.handleList))
+	mux.HandleFunc("GET /xrpc/garden.engram.getMemoryGraph", s.owned(q, s.handleGraph))
 	mux.HandleFunc("GET /xrpc/garden.engram.getSpaceStatus", s.owned(q, s.handleStatus))
 	mux.HandleFunc("GET /xrpc/garden.engram.exportSpace", s.owned(q, s.handleExport))
 	mux.HandleFunc("POST /xrpc/garden.engram.warmSpace", s.ownedBody(s.handleWarm))
@@ -563,6 +564,58 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		res["cursor"] = cursor
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// handleGraph answers with the space's newest memories and links between
+// the ones that mean similar things, for drawing the space as a graph.
+func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	spaceURI := q.Get("space")
+	if err := s.authorizeReader(r, spaceURI, true); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	limit, err := parseLimit(r, spacestore.DefaultGraphNodes, spacestore.MaxGraphNodes)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	query := spacestore.GraphQuery{Limit: limit}
+	if v := q.Get("neighbors"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > spacestore.MaxGraphNeighbors {
+			s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "neighbors must be between 1 and %d", spacestore.MaxGraphNeighbors))
+			return
+		}
+		query.Neighbors = n
+	}
+	if v := q.Get("minSimilarity"); v != "" {
+		m, err := strconv.ParseFloat(v, 64)
+		if err != nil || m <= 0 || m > 1 {
+			s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "minSimilarity must be above 0 and at most 1"))
+			return
+		}
+		query.MinSimilarity = m
+	}
+	g, err := s.Store.Graph(r.Context(), spaceURI, query)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	type edgeView struct {
+		A          int `json:"a"`
+		B          int `json:"b"`
+		Similarity int `json:"similarity"`
+	}
+	nodes := make([]memoryView, len(g.Nodes))
+	for i, m := range g.Nodes {
+		nodes[i] = view(spaceURI, m, false)
+	}
+	edges := make([]edgeView, len(g.Edges))
+	for i, e := range g.Edges {
+		edges[i] = edgeView{A: e.A, B: e.B, Similarity: int(max(0, min(1, e.Similarity)) * 1000)}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes, "edges": edges})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
