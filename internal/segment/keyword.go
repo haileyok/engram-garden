@@ -28,14 +28,20 @@ package segment
 // before (−1 for the first block), so any block decodes on its own.
 
 import (
+	"bufio"
+	"container/heap"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"math/bits"
+	"os"
+	"runtime"
 	"slices"
 	"sort"
+	"sync"
 
 	"github.com/haileyok/engram-garden/internal/text"
 )
@@ -55,84 +61,270 @@ type keywordSections struct {
 
 type posting struct{ row, tf uint32 }
 
+// defaultKeywordChunk is how many memories buildKeyword analyzes and
+// holds postings for at once.
+const defaultKeywordChunk = 1 << 16
+
 // buildKeyword analyzes docs, whose order is final, and encodes the
-// keyword sections.
-func buildKeyword(docs []Doc) (keywordSections, error) {
+// keyword sections. Its working memory is bounded by chunk memories, not by
+// the segment: each chunk's postings are sorted by term and spilled to a
+// temporary file in dir (the system's if empty), and the files are merged
+// term by term. Chunks are in row order, so a term's postings concatenate
+// in order, and the output is the same bytes whatever the chunk size.
+func buildKeyword(docs []Doc, chunk int, dir string) (keywordSections, error) {
+	if chunk <= 0 {
+		chunk = defaultKeywordChunk
+	}
 	var ks keywordSections
 	ks.norms = make([]byte, len(docs))
-	post := map[string][]posting{}
-	for row, d := range docs {
-		a := text.AnalyzeMemory(d.Text, d.Tags, d.Source)
-		n := text.EncodeLength(a.Length)
-		ks.norms[row] = n
-		// Sum the lengths scorers will use, so the average agrees with them.
-		ks.totalLength += uint64(text.DecodeLength(n))
-		for term, tf := range a.TF {
-			post[term] = append(post[term], posting{uint32(row), tf})
+	tw := &termWriter{ks: &ks}
+	var runs []*os.File
+	defer func() {
+		for _, f := range runs {
+			f.Close()
+			os.Remove(f.Name())
+		}
+	}()
+	for start := 0; start < len(docs); start += chunk {
+		end := min(start+chunk, len(docs))
+		post := map[string][]posting{}
+		for i, a := range analyzeAll(docs[start:end]) {
+			row := start + i
+			n := text.EncodeLength(a.Length)
+			ks.norms[row] = n
+			// Sum the lengths scorers will use, so the average agrees.
+			ks.totalLength += uint64(text.DecodeLength(n))
+			for term, tf := range a.TF {
+				post[term] = append(post[term], posting{uint32(row), tf})
+			}
+		}
+		terms := make([]string, 0, len(post))
+		for t := range post {
+			terms = append(terms, t)
+		}
+		slices.Sort(terms)
+		if start == 0 && end == len(docs) {
+			// One chunk: no need to spill.
+			for _, t := range terms {
+				tw.add(t, post[t])
+			}
+			return tw.finish(), nil
+		}
+		f, err := os.CreateTemp(dir, "engram-postings-*")
+		if err != nil {
+			return ks, err
+		}
+		runs = append(runs, f)
+		if err := writeRun(f, terms, post); err != nil {
+			return ks, err
 		}
 	}
-	terms := make([]string, 0, len(post))
-	for t := range post {
-		terms = append(terms, t)
+	if err := mergeRuns(runs, tw); err != nil {
+		return ks, err
 	}
-	slices.Sort(terms)
+	return tw.finish(), nil
+}
 
-	var idx []byte
-	nblocks := 0
-	var block []byte
-	var prev string
-	inBlock := 0
-	blockStart := 0
-	first := ""
-	flush := func() {
-		if inBlock == 0 {
-			return
-		}
-		b := binary.AppendUvarint(nil, uint64(inBlock))
-		b = append(b, block...)
-		idx = binary.AppendUvarint(idx, uint64(len(first)))
-		idx = append(idx, first...)
-		idx = binary.AppendUvarint(idx, uint64(blockStart))
-		idx = binary.AppendUvarint(idx, uint64(len(b)))
-		ks.terms = append(ks.terms, b...)
-		blockStart = len(ks.terms)
-		nblocks++
-		block, inBlock, prev = block[:0], 0, ""
+// analyzeAll analyzes docs on every core.
+func analyzeAll(docs []Doc) []text.Doc {
+	out := make([]text.Doc, len(docs))
+	workers := min(runtime.GOMAXPROCS(0), max(1, len(docs)/64))
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			for i := w; i < len(docs); i += workers {
+				out[i] = text.AnalyzeMemory(docs[i].Text, docs[i].Tags, docs[i].Source)
+			}
+		})
 	}
+	wg.Wait()
+	return out
+}
+
+// A run is one chunk's postings, sorted by term: per term, uvarint length,
+// the term, uvarint count, then (row, tf) uvarint pairs.
+func writeRun(f *os.File, terms []string, post map[string][]posting) error {
+	w := bufio.NewWriterSize(f, 1<<20)
+	var buf []byte
 	for _, t := range terms {
-		if inBlock == termBlock {
-			flush()
-		}
-		if inBlock == 0 {
-			first = t
-		}
-		shared := commonPrefix(prev, t)
-		block = binary.AppendUvarint(block, uint64(shared))
-		block = binary.AppendUvarint(block, uint64(len(t)-shared))
-		block = append(block, t[shared:]...)
 		ps := post[t]
-		var total uint64
+		buf = binary.AppendUvarint(buf[:0], uint64(len(t)))
+		buf = append(buf, t...)
+		buf = binary.AppendUvarint(buf, uint64(len(ps)))
 		for _, p := range ps {
-			total += uint64(p.tf)
+			buf = binary.AppendUvarint(buf, uint64(p.row))
+			buf = binary.AppendUvarint(buf, uint64(p.tf))
 		}
-		block = binary.AppendUvarint(block, uint64(len(ps)))
-		block = binary.AppendUvarint(block, total)
-		if len(ps) == 1 {
-			block = binary.AppendUvarint(block, uint64(ps[0].row))
-		} else {
-			off := len(ks.postings)
-			ks.postings = encodePostings(ks.postings, ps, ks.norms)
-			block = binary.AppendUvarint(block, uint64(off))
-			block = binary.AppendUvarint(block, uint64(len(ks.postings)-off))
+		if _, err := w.Write(buf); err != nil {
+			return err
 		}
-		prev = t
-		inBlock++
 	}
-	flush()
-	ks.termIndex = binary.AppendUvarint(nil, uint64(len(terms)))
-	ks.termIndex = binary.AppendUvarint(ks.termIndex, uint64(nblocks))
-	ks.termIndex = append(ks.termIndex, idx...)
-	return ks, nil
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	_, err := f.Seek(0, io.SeekStart)
+	return err
+}
+
+type runReader struct {
+	idx  int
+	r    *bufio.Reader
+	term string
+	n    int
+}
+
+// next reads the next term's header; it reports false at the end.
+func (rr *runReader) next() (bool, error) {
+	l, err := binary.ReadUvarint(rr.r)
+	if err == io.EOF {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	b := make([]byte, l)
+	if _, err := io.ReadFull(rr.r, b); err != nil {
+		return false, err
+	}
+	n, err := binary.ReadUvarint(rr.r)
+	if err != nil {
+		return false, err
+	}
+	rr.term, rr.n = string(b), int(n)
+	return true, nil
+}
+
+func (rr *runReader) postings(dst []posting) ([]posting, error) {
+	for range rr.n {
+		row, err := binary.ReadUvarint(rr.r)
+		if err != nil {
+			return dst, err
+		}
+		tf, err := binary.ReadUvarint(rr.r)
+		if err != nil {
+			return dst, err
+		}
+		dst = append(dst, posting{uint32(row), uint32(tf)})
+	}
+	return dst, nil
+}
+
+type runHeap []*runReader
+
+func (h runHeap) Len() int { return len(h) }
+func (h runHeap) Less(a, b int) bool {
+	if h[a].term != h[b].term {
+		return h[a].term < h[b].term
+	}
+	return h[a].idx < h[b].idx
+}
+func (h runHeap) Swap(a, b int) { h[a], h[b] = h[b], h[a] }
+func (h *runHeap) Push(x any)   { *h = append(*h, x.(*runReader)) }
+func (h *runHeap) Pop() any {
+	old := *h
+	x := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return x
+}
+
+// mergeRuns merges sorted runs; a term in several runs gets their postings
+// in run order, which is row order.
+func mergeRuns(runs []*os.File, tw *termWriter) error {
+	h := &runHeap{}
+	for i, f := range runs {
+		rr := &runReader{idx: i, r: bufio.NewReaderSize(f, 1<<20)}
+		ok, err := rr.next()
+		if err != nil {
+			return err
+		}
+		if ok {
+			heap.Push(h, rr)
+		}
+	}
+	var ps []posting
+	for h.Len() > 0 {
+		term := (*h)[0].term
+		ps = ps[:0]
+		for h.Len() > 0 && (*h)[0].term == term {
+			rr := heap.Pop(h).(*runReader)
+			var err error
+			if ps, err = rr.postings(ps); err != nil {
+				return err
+			}
+			ok, err := rr.next()
+			if err != nil {
+				return err
+			}
+			if ok {
+				heap.Push(h, rr)
+			}
+		}
+		tw.add(term, ps)
+	}
+	return nil
+}
+
+// termWriter encodes terms, in order, into the dictionary and postings.
+type termWriter struct {
+	ks                       *keywordSections
+	idx, block               []byte
+	prev, first              string
+	nterms, nblocks, inBlock int
+	blockStart               int
+}
+
+func (tw *termWriter) flush() {
+	if tw.inBlock == 0 {
+		return
+	}
+	b := binary.AppendUvarint(nil, uint64(tw.inBlock))
+	b = append(b, tw.block...)
+	tw.idx = binary.AppendUvarint(tw.idx, uint64(len(tw.first)))
+	tw.idx = append(tw.idx, tw.first...)
+	tw.idx = binary.AppendUvarint(tw.idx, uint64(tw.blockStart))
+	tw.idx = binary.AppendUvarint(tw.idx, uint64(len(b)))
+	tw.ks.terms = append(tw.ks.terms, b...)
+	tw.blockStart = len(tw.ks.terms)
+	tw.nblocks++
+	tw.block, tw.inBlock, tw.prev = tw.block[:0], 0, ""
+}
+
+func (tw *termWriter) add(t string, ps []posting) {
+	if tw.inBlock == termBlock {
+		tw.flush()
+	}
+	if tw.inBlock == 0 {
+		tw.first = t
+	}
+	shared := commonPrefix(tw.prev, t)
+	tw.block = binary.AppendUvarint(tw.block, uint64(shared))
+	tw.block = binary.AppendUvarint(tw.block, uint64(len(t)-shared))
+	tw.block = append(tw.block, t[shared:]...)
+	var total uint64
+	for _, p := range ps {
+		total += uint64(p.tf)
+	}
+	tw.block = binary.AppendUvarint(tw.block, uint64(len(ps)))
+	tw.block = binary.AppendUvarint(tw.block, total)
+	if len(ps) == 1 {
+		tw.block = binary.AppendUvarint(tw.block, uint64(ps[0].row))
+	} else {
+		off := len(tw.ks.postings)
+		tw.ks.postings = encodePostings(tw.ks.postings, ps, tw.ks.norms)
+		tw.block = binary.AppendUvarint(tw.block, uint64(off))
+		tw.block = binary.AppendUvarint(tw.block, uint64(len(tw.ks.postings)-off))
+	}
+	tw.prev = t
+	tw.inBlock++
+	tw.nterms++
+}
+
+func (tw *termWriter) finish() keywordSections {
+	tw.flush()
+	ti := binary.AppendUvarint(nil, uint64(tw.nterms))
+	ti = binary.AppendUvarint(ti, uint64(tw.nblocks))
+	tw.ks.termIndex = append(ti, tw.idx...)
+	return *tw.ks
 }
 
 func commonPrefix(a, b string) int {

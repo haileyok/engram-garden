@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -375,6 +376,30 @@ func TestKeywordCorruptionDetected(t *testing.T) {
 	future[8] = 3
 	if _, err := Open(ctx, BytesReader(future)); err == nil {
 		t.Error("version 3 opened")
+	}
+}
+
+// Building in chunks, with postings spilled to files and merged, must
+// produce the same bytes as building at once, and clean up its files.
+func TestChunkedBuildMatches(t *testing.T) {
+	t.Parallel()
+	docs := keywordDocs(rand.New(rand.NewPCG(12, 12)), 2000, 16)
+	whole, _, err := Bytes(slices.Clone(docs), WriteOptions{Dims: 16, Keyword: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, chunk := range []int{1, 37, 999, 1999} {
+		dir := t.TempDir()
+		got, _, err := Bytes(slices.Clone(docs), WriteOptions{Dims: 16, Keyword: true, KeywordChunk: chunk, TempDir: dir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got, whole) {
+			t.Fatalf("chunk %d: the segment differs from building at once", chunk)
+		}
+		if left, _ := os.ReadDir(dir); len(left) != 0 {
+			t.Errorf("chunk %d left %d temporary files", chunk, len(left))
+		}
 	}
 }
 

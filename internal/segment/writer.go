@@ -48,6 +48,12 @@ type WriteOptions struct {
 	// each memory's text, tags and source with internal/text). Without it,
 	// Write produces version 1, which older readers can open.
 	Keyword bool
+	// KeywordChunk is how many memories the keyword index is built from at
+	// a time (default 65,536); larger segments spill sorted postings to
+	// temporary files in TempDir (the system's if empty) and merge them,
+	// so building needs memory for a chunk, not the whole segment.
+	KeywordChunk int
+	TempDir      string
 }
 
 // Info describes a written segment.
@@ -199,7 +205,7 @@ func Write(w io.Writer, docs []Doc, opt WriteOptions) (Info, error) {
 	secs := [numSections][]byte{meta, strSec, bits, int8s, docsSec, docIdx, clSec}
 	if opt.Keyword {
 		// Rows are final now (clustering has reordered docs).
-		kw, err := buildKeyword(docs)
+		kw, err := buildKeyword(docs, opt.KeywordChunk, opt.TempDir)
 		if err != nil {
 			return Info{}, err
 		}
