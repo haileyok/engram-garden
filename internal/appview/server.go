@@ -506,8 +506,12 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			embedErr = err
 		}
 		if embedErr != nil {
+			// Fall back only when this service can never embed for the
+			// space. A failing or busy embedder, or a storage error, stays
+			// an error, so results never quietly lose vector search.
 			var xe *xrpcError
-			fallback := mode == "" && (!errors.As(embedErr, &xe) || xe.name == "InvalidRequest" && s.TextSearch == nil || xe.name == "ModelNotHosted" || xe.name == "TextSearchNotAllowed")
+			named := errors.As(embedErr, &xe)
+			fallback := mode == "" && (s.TextSearch == nil || named && (xe.name == "ModelNotHosted" || xe.name == "TextSearchNotAllowed"))
 			if !fallback {
 				s.writeErr(w, embedErr)
 				return
