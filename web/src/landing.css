@@ -81,16 +81,17 @@
 .garden { display: block; }
 .garden-body { display: grid; grid-template-columns: minmax(0, 1fr) 26rem; height: 35rem; }
 .garden-main { min-width: 0; display: flex; flex-direction: column; border-right: 1px solid rgb(255 255 255 / 0.09); }
-.garden-head { display: grid; gap: 0.5rem; padding: 0.9rem 1.1rem 0.75rem; font: 0.8125rem / 1.6 var(--mono); }
+.garden-head { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.5rem; padding: 0.9rem 1.1rem 0.75rem; font: 0.8125rem / 1.6 var(--mono); }
 .garden-ask { display: flex; align-items: baseline; font: 0.8125rem / 1.6 var(--mono); white-space: pre; }
 .garden .garden-ask input {
-  flex: 1 1 6rem; width: auto; min-width: 0; font: inherit; color: var(--t-fg); background: transparent;
+  flex: 0 1 auto; min-width: 2ch; font: inherit; color: var(--t-fg); background: transparent;
   border: 0; border-radius: 0; padding: 0; caret-color: var(--t-fg); caret-shape: block;
 }
 .garden .garden-ask input::placeholder { color: var(--t-dim); }
 .garden .garden-ask input:focus-visible { outline: 1px dotted var(--t-green); outline-offset: 4px; }
+.garden-ask .end { flex: none; margin-right: 0.75rem; }
 .garden .garden-ask button {
-  margin-left: 0.75rem; padding: 0 0.5rem; font: inherit; font-size: 0.75rem; color: var(--t-dim); background: none;
+  flex: none; margin-left: auto; padding: 0 0.5rem; font: inherit; font-size: 0.75rem; color: var(--t-dim); background: none;
   border: 1px solid rgb(255 255 255 / 0.16); border-radius: 4px;
 }
 .garden .garden-ask button:hover { color: var(--t-green); border-color: var(--t-green); }

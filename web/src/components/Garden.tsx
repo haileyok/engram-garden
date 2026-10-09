@@ -8,6 +8,9 @@ import { Prompt } from "./Terminal";
 // but everything it shows is also in the list beside it, which is real text.
 
 const EDGES = neighbors();
+// What the empty prompt suggests. It's also how wide the empty prompt is, so the
+// closing quote sits right after it, as it would after typed text.
+const PLACEHOLDER = "how do we ship a change?";
 const SPEED = 0.5; // how fast the ripple travels, in px per ms
 const PLANT_AT = [5200, 11800, 18400, 25000]; // when the late notes are written, ms after start
 const ANSWER_MS = 6800; // how long autoplay lingers on an answer
@@ -568,14 +571,19 @@ export function Garden() {
                 value={text}
                 autoComplete="off"
                 spellCheck={false}
-                placeholder="how do we ship a change?"
+                placeholder={PLACEHOLDER}
+                // As wide as the text (plus a cell for the cursor), so the quote that
+                // closes it follows the text the way it would in a terminal.
+                style={{ width: `${(text ? text.length : PLACEHOLDER.length) + 1}ch` }}
                 onFocus={stopAuto}
                 onChange={(e) => {
                   stopAuto();
                   setText(e.target.value);
                 }}
               />
-              <span aria-hidden>"</span>
+              <span className="end" aria-hidden>
+                "
+              </span>
               <button type="submit">run &#8629;</button>
             </form>
             <div className="garden-chips">
