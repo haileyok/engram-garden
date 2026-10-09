@@ -21,6 +21,9 @@ type Memory struct {
 	mcpClients map[string]MCPClient
 	mcpGrants  map[string]MCPGrant
 	mcpCodes   map[string]MCPCode
+
+	webSessions map[[2]string]Session // by DID and ID
+	webRequests map[string]Request
 }
 
 var _ Store = (*Memory)(nil)
@@ -36,6 +39,9 @@ func NewMemory() *Memory {
 		mcpClients: map[string]MCPClient{},
 		mcpGrants:  map[string]MCPGrant{},
 		mcpCodes:   map[string]MCPCode{},
+
+		webSessions: map[[2]string]Session{},
+		webRequests: map[string]Request{},
 	}
 }
 

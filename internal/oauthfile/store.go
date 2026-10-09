@@ -161,6 +161,49 @@ func (s *FileStore) DeleteAuthRequestInfo(_ context.Context, state string) error
 	return err
 }
 
+// SavedSession is a session in the store and when it was last saved.
+type SavedSession struct {
+	Data    oauth.ClientSessionData
+	SavedAt time.Time
+}
+
+// Sessions lists the sessions that haven't expired, for moving them
+// elsewhere. A file that can't be read is skipped, and counted in bad.
+func (s *FileStore) Sessions() (sessions []SavedSession, bad int, err error) {
+	dir := filepath.Join(s.Dir, "sessions")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, 0, nil
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	now := s.now()
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			bad++
+			continue
+		}
+		var st stored[oauth.ClientSessionData]
+		if json.Unmarshal(raw, &st) != nil || st.Data.AccountDID == "" || st.Data.SessionID == "" {
+			bad++
+			continue
+		}
+		if now.Sub(st.SavedAt) > sessionTTL {
+			continue
+		}
+		sessions = append(sessions, SavedSession{Data: st.Data, SavedAt: st.SavedAt})
+	}
+	return sessions, bad, nil
+}
+
+// SessionTTL is how long a session may go unused before it expires.
+const SessionTTL = sessionTTL
+
 // Sweep removes expired sign-ins and sessions.
 func (s *FileStore) Sweep() {
 	now := s.now()

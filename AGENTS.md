@@ -74,7 +74,10 @@ Guidance for working on Engram Garden.
   (`ENGRAM_WEB_MCP`): the web app is an OAuth authorization server for MCP
   clients (metadata, dynamic registration, consent page, PKCE token
   endpoint; apps, grants and pending codes in `control.Store`) and serves read-only
-  tools at `/mcp`. A grant acts through the web app session it was approved
+  tools at `/mcp`. With `ENGRAM_DATABASE_URL` the web app's own OAuth
+  sessions are in `control.Store` too (`web_sessions`, `web_requests`: never
+  the appview's `oauth_sessions`, whose sweep deletes what no grant uses),
+  and `ImportFileSessions` copies in the old session files on start. A grant acts through the web app session it was approved
   in, so signing out ends it. Keep its tools read-only unless the web app's
   OAuth scopes grow a write permission.
 - `web/`: the React frontend (Vite, TypeScript, no router library). It
