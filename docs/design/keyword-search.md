@@ -37,12 +37,15 @@ enforces the rest:
 - **Vector sent:** `q` is ignored for ranking. Both clients send `q` with
   their vector on every recall (`internal/agent/agent.go`,
   `python/src/engram_garden/agent.py`).
-- **Only `q` sent:** a service that runs the space's model embeds `q`
-  itself (`handleSearch` in `internal/appview/server.go`). One that doesn't
-  answers `ModelNotHosted` or `TextSearchNotAllowed`.
+- **Only `q` sent:** a service configured to embed queries embeds `q`
+  itself (`handleSearch` and `embedQuery` in `internal/appview/server.go`),
+  or answers `ModelNotHosted` (it doesn't run the space's model),
+  `TextSearchNotAllowed` (it doesn't embed for this authority) or
+  `EmbedderBusy`. A service not configured to embed queries answers
+  `InvalidRequest`, because the vector fields are missing.
 
-Either way ranking is by vector only. This design adds keyword ranking
-without changing what requests are valid today.
+Either way ranking is by vector only. This design adds keyword ranking, and
+turns some of those errors into keyword results (see [Modes](#modes)).
 
 ## Overview
 
@@ -108,15 +111,18 @@ often exactly what an agent searches for.
      `memory.add`).
    - Each run of CJK characters becomes one token per overlapping
      character bigram.
-2. **Find parts** of compound and camelCase tokens, still on the original
-   text: split on joiners, on lower→upper case changes, at the end of an
-   acronym (`HTTPServer` → `HTTP`, `Server`) and on letter–digit boundaries
+2. **Detect opaque pieces before splitting them.** A piece is *opaque* when
+   it is 16 or more characters of hex or base32 (hashes, CIDs, DID
+   identifiers). Test the whole token first; if it's opaque, it emits only
+   itself. Otherwise split it on joiners only, and test each of those
+   components the same way. An opaque component emits only itself: it is
+   never split at case or letter–digit boundaries, which would otherwise
+   shred a hash like `3fa9c2e1…` into noise. So `did:plc:abc…` yields the
+   compound, `did`, `plc` and the opaque identifier, nothing more.
+3. **Find parts** of the remaining components, still on the original text:
+   split on lower→upper case changes, at the end of an acronym
+   (`HTTPServer` → `HTTP`, `Server`) and on letter–digit boundaries
    (`v2beta` → `v`, `2`, `beta`). One-character parts are dropped.
-3. **Classify opaque tokens and parts.** A token or part is *opaque* when it
-   is 16 or more characters of hex or base32 (hashes, CIDs, DID
-   identifiers). Opaque parts aren't split further or stemmed. The test
-   applies to each part as well as the whole token, so `did:plc:abc…`
-   yields the compound, `did`, `plc` and the opaque identifier.
 4. **Normalize each term** separately: Unicode NFKD, remove nonspacing marks
    (so both precomposed and decomposed `café` become `cafe`), NFKC, then
    full Unicode case folding.
@@ -188,16 +194,25 @@ so a token can't score twice for one occurrence:
 ```
 word token w:      c(w) = max( 1.0 · s(w), 0.5 · s(~w) )
 compound token x:  c(x) = max( 1.0 · s(x),
-                               0.4 · Σ over parts p of max( s(p), 0.5 · s(~p) ) )
+                               0.4 · Σ over distinct parts p of max( s(p), 0.5 · s(~p) ) )
 opaque token o:    c(o) = s(o)
 score(d) = Σ over distinct query tokens of c
 ```
 
-Repeated query tokens count once. The weights (1.0, 0.5, 0.4) are starting
-points for the evaluation to tune. Every combination is a max or sum of
-non-negative terms that rise with *tf* and fall with *dl*, so a score bound
-computed the same way from per-block bounds is a valid upper bound (see
-[Query execution](#query-execution)).
+- Query tokens are compared after normalization, so `Space` and `space`
+  are the same token and count once. A compound's parts are also distinct
+  after normalization: `space_space` has one part, `space`.
+- The weights (1.0, 0.5, 0.4) are starting points for the evaluation to
+  tune.
+- This is a tree of max and sum over non-negative leaves, not a flat sum
+  of term scores: a word whose exact form scores 1.0 and stem 0.8
+  contributes 1.0, not 1.8. Every path that scores (the pruned walk, the
+  dense walk for small segments, the buffer, and scoring a single
+  candidate) evaluates the same tree, sharing one implementation, so they
+  can't disagree.
+- Each leaf rises with *tf* and falls with *dl*, so evaluating the same
+  tree on per-block upper bounds gives a valid upper bound for every row
+  those blocks cover (see [Query execution](#query-execution)).
 
 The evaluation must include exact-identifier queries against memories that
 contain only the identifier's rarer parts, to check that the exact form
@@ -267,22 +282,42 @@ whichever wins, and the response names the fusion used.
 
 ### When parts run late
 
-| What missed the deadline | What the search does | Reason reported |
-|---|---|---|
-| 1-byte re-rank | Vector rank from 1-bit distances, as today | `vectorRerank` |
-| 1-bit distances for keyword-only candidates | Those candidates have no vector rank; they rank on keyword alone | `vectorPartial` |
-| Keyword scores for vector-only candidates | Those candidates have no keyword rank | `keywordPartial` |
-| Postings walk (budget or deadline) | Keyword candidates found so far | `keywordBudget` |
+Each candidate's two scores are each one of: **known**, **known to be
+zero** (keyword only: no query term occurs), or **unknown** (its stage ran
+out of time). Unknown is never treated as zero, and the two vector
+estimators are never mixed in one ranking. The vector rank is chosen in
+this order:
+
+1. **The 1-byte re-rank finished for every candidate:** rank all by it.
+   1-bit distances aren't used, even where they're missing.
+2. **Otherwise,** if every candidate has a 1-bit distance, rank all by
+   1-bit distance, as today, and discard the partial re-rank.
+3. **Otherwise** (the re-rank is incomplete *and* some keyword-only
+   candidates lack a 1-bit distance), rank by 1-bit distance the
+   candidates that have one; the rest have an unknown vector score.
+
+A candidate with an unknown score contributes nothing to that side of the
+fusion (as a missing rank does in rank fusion), and its explanation says
+the score is unknown rather than omitting it, so it can't be mistaken for a
+non-match.
+
+| What ran out of time | Reason reported |
+|---|---|
+| 1-byte re-rank (cases 2 and 3 above) | `vectorRerank` |
+| 1-bit distances for some keyword-only candidates (case 3) | `vectorPartial` |
+| Keyword scores for some vector-only candidates | `keywordPartial` |
+| Postings walk (budget or deadline) | `keywordBudget` |
 
 Any of these sets `approximate`, and the reasons are listed in a new
-`approximateReasons` field. Explanations show only scores actually
-computed.
+`approximateReasons` field. Several can apply at once; tests cover each
+combination.
 
 ## Segment format version 2
 
-Version 2 adds four sections **after** `clusters`, so everything before
-them keeps its offsets, and today's two-read `LoadIndex` (metadata and
-strings, then doc index and clusters) stays the same:
+Version 2 adds four sections **after** `clusters`. The header grows, so
+absolute offsets shift, but the existing sections keep their order and
+layout, and today's two-read `LoadIndex` (metadata and strings, then doc
+index and clusters) still reads two adjacent ranges:
 
 ```
 [header]       version 2, plus analyzer version and keyword statistics
@@ -360,14 +395,29 @@ for this workload, not a property of the format.
 ### Limits and budgets
 
 - **Query size:** at most 32 distinct query tokens and 128 terms after
-  expansion. Further tokens are dropped and the response says so.
-- **Work budget:** each search may decode a bounded number of postings
-  blocks and read a bounded number of postings bytes per segment.
-  Exhausting it stops the postings walk with `keywordBudget`.
-- **Cancellation:** the walk checks the deadline every few hundred blocks.
+  expansion. Tokens are taken in query order until either limit would be
+  exceeded; the rest are dropped and the response says so
+  (`queryTruncated` in `approximateReasons`). A single compound with more
+  than 16 parts keeps the compound itself and its first 16 parts.
+- **One work budget per search,** not per segment, so it doesn't grow
+  with the number of segments. It counts postings blocks decoded, bytes
+  read (dictionary blocks, skip tables, postings, cold prefetch) and
+  buffer memories scored, across every stage:
+  - prefetch during a cold load,
+  - dictionary and skip-table lookups,
+  - the postings walk, with each segment given a share in proportion to
+    its rows and unused shares passed on,
+  - scoring the buffer,
+  - completing scores for vector-only candidates.
 
-The budgets are set from benchmarks, so that well-formed queries never hit
-them and adversarial ones can't monopolize a node.
+  Running out stops the stage it happens in: the walk reports
+  `keywordBudget`, completion reports `keywordPartial`, and later stages
+  are skipped.
+- **Cancellation:** every stage checks the request's deadline and
+  cancellation every few hundred blocks or memories.
+
+The budget is set from benchmarks, so that well-formed queries never hit
+it and adversarial ones can't monopolize a node.
 
 ### Warm
 
@@ -377,13 +427,29 @@ For each segment of the active index, in parallel:
    usually cached), and collect *df* for the space-wide statistics.
 2. After all segments report *df* (a barrier; lookups are fast), walk the
    postings with **dynamic pruning**: keep the current top 200 and skip any
-   range of rows whose summed score bound can't beat the 200th score. The
-   bound for a block range comes from the stored largest *tf* and smallest
-   norm of each term's overlapping block, combined with the same max and
-   sum as the score
+   range of rows whose score bound can't beat the 200th score
    ([block-max WAND, Ding and Suel, 2011](https://dl.acm.org/doi/10.1145/2009916.2010048),
    or block-max MaxScore; we'll pick by benchmark).
 3. Offer the segment's top 200 to the space-wide heap.
+
+Because the score is a max/sum tree rather than a flat sum, the walk works
+on **query tokens**, not terms:
+
+- Each query token is one iterator: a union over its terms' postings (the
+  exact form, the stem, the parts and their stems) that yields each row any
+  of them contains, and evaluates that token's part of the tree for it.
+  Pruning algorithms see one list per query token.
+- A token's bound over a range of rows is its tree evaluated on its terms'
+  block bounds. A range ends where any of its terms' current blocks ends,
+  so every bound used covers the whole range; this is the usual block-max
+  rule, applied to unions.
+- In MaxScore, query tokens, not terms, are split into essential and
+  non-essential by their maximum bounds.
+- Rows are scored by the same tree in every path (see
+  [Combining a query token's terms](#combining-a-query-tokens-terms)).
+  Randomized tests compare pruned and exhaustive top-k, and record blocks
+  visited, for queries with overlapping exact and stem postings, parts
+  shared between query tokens, and repeated parts.
 
 Pruning helps most when a query mixes rare and common terms: the common
 terms' blocks rarely beat the threshold set by the rare ones. It does
@@ -397,7 +463,9 @@ score array is simpler and as fast. The cutoff is for the benchmark to set.
 The write buffer's inverted index is scored exhaustively. It's updated as
 memories arrive, so its cost follows the number of matching memories, not
 the buffer's size. (A flush starts at 1,000 memories, but that isn't a cap:
-an initial sync or a slow upload can grow the buffer well past it.)
+an initial sync or a slow upload can grow the buffer well past it.) A
+common word can still match every buffered memory, so buffer scoring draws
+on the search's work budget like everything else.
 
 ### Cold
 
@@ -406,11 +474,32 @@ then its 1-bit section, for up to 16 segments at once) before searching. Keyword
 dependency chain: term index, then dictionary blocks, then the statistics
 barrier, then postings. To keep cold searches no slower:
 
-- **Query-aware loading.** A search that joins a space's load registers its
-  query terms. As each segment's term index arrives (with its metadata,
-  before the 1-bit section), the dictionary reads for those terms start, and
-  then the postings reads, while the 1-bit sections are still downloading.
-  Scoring waits for the statistics barrier; fetching doesn't.
+- **Query-aware loading.** Today a load is shared through a
+  `singleflight` group in `Node.space`: the first caller runs it, and
+  later callers only see its final result. Nothing can join a load in
+  progress. So each load gets a small **progress object**, registered for
+  the space while the load runs:
+  - It publishes each segment's index (metadata, norms, term index) as
+    soon as it's read, before that segment's 1-bit section, and keeps the
+    ones already published so a search that joins late catches up.
+  - A search subscribes with its query terms. For each published segment
+    it starts the dictionary reads for its terms, then the postings reads,
+    while the 1-bit sections are still downloading. Scoring waits for the
+    statistics barrier; fetching doesn't.
+  - Prefetch belongs to the search, not the load: it's admitted by the
+    space's rate and concurrency limits *before* it starts (today those are
+    checked only after loading), draws on the search's work budget, is
+    deduplicated across searches waiting on the same load, and is cancelled
+    if its search is. Cancelling a search never cancels the shared load.
+  - **Text-only searches** need the space's model before they can embed
+    `q`, and today `embedQuery` gets it through `Store.Config`, which waits
+    for the whole load. The load publishes the space's config as soon as
+    it's read (it comes from the manifest), so embedding the query, keyword
+    prefetch and the 1-bit download all overlap.
+
+  Tests cover a search arriving first, a text-only search arriving first,
+  several searches with different terms, a search joining late, and a
+  waiting search being cancelled.
 - **Parallel range reads.** `ReadInt8` today reads each adjacent run of
   rows in turn. With 400 scattered candidates in a large merged segment,
   that can be hundreds of sequential requests. Reads per segment become
@@ -424,9 +513,11 @@ barrier, then postings. To keep cold searches no slower:
   segments onto SSD in the background, but that can lag or fail, so cold
   reads are designed for, not assumed away.
 
-For scale, a 5M-memory space has 480 MB of 1-bit vectors, so its cold load
-already takes seconds and streams its bits rather than pinning them. The
-keyword reads are small next to that. "No slower" is a target the
+For scale, a 5M-memory space has 480 MB of 1-bit vectors at 768
+dimensions, so its cold load already takes seconds. Whether a space's bits
+are pinned in RAM or streamed depends on `SpaceRAMShare` (1 GiB by default,
+counting both indexes during a model change), so the benchmarks cover both.
+The keyword reads are small next to the bits. "No slower" is a target the
 benchmarks must show, across one large merged segment, many small ones,
 and a disabled or undersized SSD cache.
 
@@ -462,7 +553,7 @@ filters and the candidate heap will be slower, and is measured alongside.
 | `q` only, service embeds queries | `hybrid` | Server embeds `q`, then both | yes |
 | `q` only, service doesn't embed | `keyword` (fallback) | Keyword only | no |
 | `q`, `mode=keyword` | — | Keyword only, no embedding | no |
-| `mode=vector` with `q` | — | Today's search, `q` ignored | yes |
+| `mode=vector` with `q` | — | Today's search: `q` is ignored for ranking if a vector is sent, and embedded by the service as today if not | yes |
 
 - **Hybrid is the default** whenever there's a query text and a vector (sent
   or embedded by the service). Existing clients send both, so they get
@@ -479,9 +570,13 @@ filters and the candidate heap will be slower, and is measured alongside.
 - The response gains `mode`, the mode that actually ran, so a client can
   tell a fallback from a hybrid search and say so (for example, "keyword
   matches only: this service can't embed queries for this space").
-- `mode=keyword` without `q`, `mode=hybrid` or `mode=vector` without any
-  way to get a vector, and an unknown mode are `InvalidRequest`. An
-  explicit `mode=hybrid` or `mode=vector` never falls back.
+- `mode=keyword` or `mode=hybrid` without `q`, `mode=hybrid` or
+  `mode=vector` without any way to get a vector, and an unknown mode are
+  `InvalidRequest`. An explicit `mode=hybrid` or `mode=vector` never falls
+  back.
+- A `q` that's empty after analysis (only whitespace or punctuation)
+  counts as no `q`: a vector search if there's a vector, `InvalidRequest`
+  otherwise.
 - **Keyword mode searches the active index.** It needs no query vector, but
   it searches the same memories as any other mode: those whose vector
   matches the space's active model. A memory without a usable vector isn't
@@ -586,30 +681,52 @@ semantic or vector-only changes in the same release that turns it on:
 A space's keyword index is either complete in one analyzer version or not
 used. Scores are never mixed across versions.
 
-- The manifest's active index records its **keyword analyzer** version.
-  Segments in that version are *covered*; anything else (a version 1
-  segment, or one from another analyzer) isn't.
+- **The target analyzer version** is derived, not stored, so it can't be
+  lost or disagree across restarts: it's the highest of the node's
+  configured analyzer version (the newest one its code ships, unless
+  overridden) and every analyzer version found in the space's segment
+  headers that the node supports. It never moves backwards: a node never
+  rewrites segments to an older analyzer, so two releases can't fight. A
+  release that targets a new analyzer version only ships after a release
+  that can read it, the same rule as the segment format.
+- Segments in the target version are *covered*; anything else (a version 1
+  segment, or one from an older analyzer) isn't.
+- **The buffer is always analyzed in the target version.** Buffered
+  memories keep their text, so if a node's target changes (at load, or on
+  finding a newer segment), it re-analyzes the buffer under the space's
+  lock before anything else runs. The buffer is therefore always covered,
+  and a space with only a buffer and no segments is correctly searchable.
 - Keyword search runs for a space only when every segment of its active
   index is covered. Until then, `hybrid` falls back to `vector` and
   `keywordCoverage` reports the covered fraction.
+- **Flushes, merges and rewrites capture the target when they start** and
+  write that version. If the target moved while they ran, their output is
+  simply uncovered, and the rewrite job picks it up.
+- **Model changes:** the rewrite job covers the building index too, so a
+  promotion usually finds it already covered. If not, keyword search
+  pauses until it is. The buffer's keyword index depends only on text, so
+  it carries over unchanged when promotion swaps the buffer's vectors.
+- Tests cover a buffer-only space, a restart midway through an analyzer
+  upgrade, a flush in flight when the target changes, and promotion with
+  the building index partly covered.
 - **Getting covered:** a *rewrite* job replaces an uncovered segment with a
   covered one with the same rows and vectors, publishing a manifest per
   replacement, under the same lease check and manifest rules as a merge.
   It's scheduled independently of the merge triggers (a space with few
   segments and no deletions would otherwise never merge), rate-limited per
   node, and also handles the building index during a model change.
-- New flushes are written in the target analyzer version, and the buffer
-  is analyzed with it.
-- **Analyzer upgrades** work the same way: setting a new target version
-  makes every segment uncovered, keyword search pauses for that space until
-  rewriting finishes, and coverage is reported meanwhile. Analyzer changes
+- **Analyzer upgrades** work the same way: a release with a new analyzer
+  version makes every older segment uncovered, keyword search pauses for
+  that space until rewriting finishes, and coverage is reported meanwhile. Analyzer changes
   should be rare. If the pause becomes a problem, rewritten segments could
   carry postings for both versions during the switch, at the cost of
   temporarily larger segments.
 - Rewriting early costs the rest of the old segment's 90-day minimum on
   Wasabi. That's small today, and the rate limit bounds it.
-- **Manifest fields are hints.** A segment's header is the truth about its
-  format and analyzer version. A node that finds the manifest fields
+- **Manifest fields are hints.** The manifest records each segment's
+  format and analyzer version so a node can plan rewrites without opening
+  segments, but a segment's header is the truth, and the target is derived
+  from headers and configuration. A node that finds the manifest fields
   missing, because an older node wrote the manifest and dropped them,
   reads the headers instead.
 - **Releases:**
@@ -699,9 +816,14 @@ On the held-out set:
   (hybrid − vector) nDCG@10 is at least −0.01.
 - For exact identifiers, parts of identifiers and names, hybrid is better
   than vector-only with the whole interval above zero.
-- For "no answer" queries, hybrid's top results are no more confident than
-  vector-only's (keyword matches on common words shouldn't manufacture
-  relevance).
+- **"No answer" queries** use a false-positive rate. On the tuning set,
+  choose a similarity threshold and a keyword-score threshold that 90% of
+  relevant top results clear. On held-out "no answer" queries, a false
+  positive is a top result that clears a threshold: the similarity
+  threshold for vector-only, either threshold for hybrid. Hybrid's rate
+  must not exceed vector-only's beyond the confidence interval, so keyword
+  matches on common words don't make irrelevant results look strong. Fused
+  scores are rank-based, so they're never used as confidence.
 - Ties go to the simpler choice: rank fusion over a tuned combination,
   fewer term kinds.
 
