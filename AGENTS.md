@@ -51,6 +51,11 @@ Guidance for working on Engram Garden.
 - `internal/segment`: the segment file format. `internal/vec`: half
   precision, quantization, Hamming distance and the int8 dot product (with a
   `GOEXPERIMENT=simd` version).
+- `internal/text`: the keyword-search analyzer (splitting memories and
+  queries into terms), the per-query-token scoring tree, BM25 and the
+  one-byte length encoding. Not wired into search yet; see
+  `docs/design/keyword-search.md`. Any change to what it returns for the
+  same input changes the index: bump `text.Version`.
 - `internal/blob`: object storage (local directory, S3) and the
   conditional-write probe.
 - `internal/routing`: rendezvous hashing of spaces over nodes, and which
