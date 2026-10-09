@@ -407,8 +407,17 @@ Longer memories add postings in proportion to their text, but also add
 compressed text to the segment, so the proportion moves less than the
 absolute size.
 
-The proportion depends on dimensions and text length; the target below is
-for this workload, not a property of the format.
+**Measured** with the implementation, on segments grown from an agent's
+real memories (about 900 bytes each, so longer than the estimate assumed):
+at 1M memories the keyword sections are 264 MB, **20% of a 768-dimension
+segment** (1.3 GB): postings 253 MB at 1.16 bytes per posting in long lists,
+the dictionary 10 MB, norms 1 MB, and 1.4 MB in RAM for the term index.
+That's above the 15% first estimated, and accepted: on Wasabi it's well
+under a cent a month per million memories, and only the term index and
+norms are held in RAM. The largest remaining saving is the open question
+of the stems that equal their word (28% of postings).
+
+The proportion depends on dimensions and text length.
 
 ### Building
 
@@ -418,7 +427,7 @@ for this workload, not a property of the format.
   postings and always produces the current analyzer version. Analysis runs
   at about 55–65 µs per real memory per core (14–16 MB/s, with stems
   cached), so a million memories cost about a minute of CPU, spread across
-  cores.
+  cores. Measured: building a 1M-memory keyword index takes 41 s.
 - **Memory:** merges already hold every input's vectors and text. Postings
   are built from (term, row, tf) tuples sorted in chunks of bounded size,
   spilled to local SSD when a chunk fills, and merged, so the extra peak
@@ -563,14 +572,19 @@ On the benchmark machine with real text and 768 dimensions. "Warm" means
 the space is loaded and its segments are on SSD. Query sizes count query
 tokens before expansion.
 
-| | Target |
-|---|---|
-| Warm keyword part, 4-token query, 5M memories | p50 ≤ 5 ms, p99 ≤ 20 ms |
-| Warm keyword part, 1 common-word query, 5M memories | p99 ≤ 50 ms, or stopped by the budget |
-| Warm hybrid search vs vector-only, same space | ≤ 25% slower at p50 |
-| Cold hybrid search vs vector-only | no slower at p50 |
-| Index size | ≤ 15% of segment size for this workload |
-| Merge of 1M memories | ≤ 2× today's time, extra peak RSS within the configured budget |
+| | Target | Measured so far (1M memories, one segment) |
+|---|---|---|
+| Warm keyword part, 4-token query, 5M memories | p50 ≤ 5 ms, p99 ≤ 20 ms | 4.3–4.6 ms at 1M ("my post about delve", 4.7M postings); a 7-token question 6.0 ms |
+| Warm keyword part, 1 common-word query, 5M memories | p99 ≤ 50 ms, or stopped by the budget | 2.5 ms at 1M ("the", 1.9M postings) |
+| Warm hybrid search vs vector-only, same space | ≤ 25% slower at p50 | not yet (needs the store) |
+| Cold hybrid search vs vector-only | no slower at p50 | not yet |
+| Index size | ≤ 25% of segment size for this workload (first estimated 15%; see [Size](#size)) | 20% |
+| Merge of 1M memories | ≤ 2× today's time, extra peak RSS within the configured budget | keyword build 41 s; postings built in 64k-memory chunks spilled to disk |
+
+The keyword numbers come from the segment package's scale test on a 32-core
+development machine with the segment in memory, not yet the benchmark
+machine or an SSD; exhaustive scoring of the same queries takes 300–960 ms,
+so the pruning is doing the work.
 
 For comparison, the 1-bit scan alone covers 5M memories in about 16 ms on 8
 cores, extrapolated from the measured 313M vectors/s; a full search with
