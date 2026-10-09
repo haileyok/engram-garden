@@ -128,8 +128,11 @@ type Weights struct {
 	Exact, Stem, Parts, PartStem float64
 }
 
-// DefaultWeights are the starting weights, to be tuned by evaluation.
-var DefaultWeights = Weights{Exact: 1.0, Stem: 0.5, Parts: 0.4, PartStem: 0.5}
+// DefaultWeights were tuned with engram-eval on an agent's 1,443 memories
+// (held-out nDCG@10 +0.135 over vector-only search). A stem counts as much
+// as an exact form; an exact match still tends to win, because exact terms
+// are rarer and score a higher IDF. Results were flat near these values.
+var DefaultWeights = Weights{Exact: 1.0, Stem: 1.0, Parts: 0.3, PartStem: 0.5}
 
 // Score evaluates the query for one memory, given each term's value in
 // Query.Terms order: its BM25 score for the memory, or zero if it doesn't

@@ -65,6 +65,14 @@ func NewIndex(mems []Memory, vecs [][]float32) *Index {
 	return ix
 }
 
+// With returns the index scoring keywords with other weights and BM25
+// parameters. It shares everything else, so it costs nothing to make.
+func (ix *Index) With(w text.Weights, p text.BM25) *Index {
+	c := *ix
+	c.Weights, c.BM25 = w, p
+	return &c
+}
+
 // DF is a term's document frequency.
 func (ix *Index) DF(term string) uint64 { return ix.df[term] }
 
