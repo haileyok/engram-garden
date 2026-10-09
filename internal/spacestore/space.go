@@ -14,6 +14,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/haileyok/engram-garden/internal/segment"
+	"github.com/haileyok/engram-garden/internal/text"
 	"github.com/haileyok/engram-garden/internal/vec"
 )
 
@@ -108,6 +109,57 @@ type bufEntry struct {
 	doc  segment.Doc
 	bits [2][]byte
 	int8 [2][]byte
+	// tf and norm are the memory's keyword terms and length code, as a
+	// segment would store them.
+	tf   map[string]uint32
+	norm byte
+}
+
+// bufKeyword is the write buffer's keyword index: for each term, the
+// buffered memories containing it. It changes only through bufPut and
+// bufDrop, under the space's write lock.
+type bufKeyword struct {
+	terms map[string]map[*bufEntry]uint32
+	// length is the buffered memories' total decoded length.
+	length uint64
+}
+
+// bufPut adds a memory to the write buffer and its keyword index.
+func (s *Space) bufPut(path string, e *bufEntry) {
+	if e.tf == nil {
+		a := text.AnalyzeMemory(e.doc.Text, e.doc.Tags, e.doc.Source)
+		e.tf, e.norm = a.TF, text.EncodeLength(a.Length)
+	}
+	s.buf[path] = e
+	if s.bufKW.terms == nil {
+		s.bufKW.terms = map[string]map[*bufEntry]uint32{}
+	}
+	for t, tf := range e.tf {
+		m := s.bufKW.terms[t]
+		if m == nil {
+			m = map[*bufEntry]uint32{}
+			s.bufKW.terms[t] = m
+		}
+		m[e] = tf
+	}
+	s.bufKW.length += uint64(text.DecodeLength(e.norm))
+}
+
+// bufDrop removes path from the write buffer if it still holds e.
+func (s *Space) bufDrop(path string, e *bufEntry) {
+	if s.buf[path] != e {
+		return
+	}
+	delete(s.buf, path)
+	for t := range e.tf {
+		if m := s.bufKW.terms[t]; m != nil {
+			delete(m, e)
+			if len(m) == 0 {
+				delete(s.bufKW.terms, t)
+			}
+		}
+	}
+	s.bufKW.length -= uint64(text.DecodeLength(e.norm))
 }
 
 // loc is where a live memory is: in the buffer, or in a segment of either
@@ -148,6 +200,7 @@ type Space struct {
 	pendingDel map[uint32]struct{}
 	inflight   map[uint32]struct{}
 	buf        map[string]*bufEntry
+	bufKW      bufKeyword
 	locs       map[string]*loc
 	repos      map[string]*pendingRepo
 	nextID     uint32
@@ -209,9 +262,7 @@ func (s *Space) deleteLoc(path string) {
 	delete(s.locs, path)
 	s.liveBytes -= l.size
 	if l.buf != nil {
-		if s.buf[path] == l.buf {
-			delete(s.buf, path)
-		}
+		s.bufDrop(path, l.buf)
 		// An id being flushed right now will be published; mark it deleted
 		// for the next manifest. Otherwise it was never published.
 		if _, flying := s.inflight[l.id]; !flying {
@@ -322,7 +373,7 @@ func (s *Space) apply(did string, pos RepoPosition, upserts []Memory, deletes []
 		e.id = s.nextID
 		s.nextID++
 		e.doc.ID = e.id
-		s.buf[path] = e
+		s.bufPut(path, e)
 		s.locs[path] = &loc{
 			id: e.id, author: did, rkey: m.Rkey, cidHash: segment.CIDHash(m.CID), tags: m.Tags,
 			createdAt: e.doc.CreatedAt.UnixMicro(), size: size, cover: cover, buf: e,
