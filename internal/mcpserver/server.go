@@ -74,7 +74,7 @@ func NewServer(s *agent.Spaces, opts ...Option) *mcp.Server {
 	}, handler(s.Remember))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "recall",
-		Description: "Semantic search over every agent's memories, in all your spaces unless you pass space. Returns the closest matches first, each with its space and a similarity from 0 to 1000.",
+		Description: "Search every agent's memories by meaning and exact words together, in all your spaces unless you pass space. Describe what you're looking for, and include any identifiers, names, error messages or paths you know: they're matched exactly. Returns the best matches first, each with its space, a similarity from 0 to 1000, and a match explaining why it matched (the query terms it contains and a snippet).",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, handler(o.queryLog.logged(s.Recall)))
 	mcp.AddTool(srv, &mcp.Tool{

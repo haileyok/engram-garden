@@ -242,6 +242,7 @@ func (s *Spaces) Recall(ctx context.Context, in RecallIn) (MemoriesOut, error) {
 	}
 	wg.Wait()
 	var merged MemoriesOut
+	var lists []MemoriesOut
 	var failed, notes []string
 	var firstErr error
 	for _, r := range results {
@@ -250,7 +251,7 @@ func (s *Spaces) Recall(ctx context.Context, in RecallIn) (MemoriesOut, error) {
 			firstErr = cmp.Or(firstErr, r.err)
 			continue
 		}
-		merged.Memories = append(merged.Memories, label(r.out, r.name).Memories...)
+		lists = append(lists, label(r.out, r.name))
 		if r.out.Note != "" {
 			notes = append(notes, r.name+": "+r.out.Note)
 		}
@@ -264,13 +265,7 @@ func (s *Spaces) Recall(ctx context.Context, in RecallIn) (MemoriesOut, error) {
 		}
 		return MemoriesOut{}, fmt.Errorf("recall failed in every space: %s", strings.Join(failed, "; "))
 	}
-	sim := func(m Memory) int {
-		if m.Similarity == nil {
-			return 0
-		}
-		return *m.Similarity
-	}
-	slices.SortStableFunc(merged.Memories, func(a, b Memory) int { return cmp.Compare(sim(b), sim(a)) })
+	merged.Memories, merged.Mode = MergeRanked(lists)
 	limit := in.Limit
 	if limit <= 0 {
 		limit = 10
@@ -283,6 +278,61 @@ func (s *Spaces) Recall(ctx context.Context, in RecallIn) (MemoriesOut, error) {
 	}
 	merged.Note = strings.Join(notes, " ")
 	return normalize(merged), nil
+}
+
+// MergeRanked combines several spaces' search results, each in its
+// service's order, and reports the mode they ran in (empty if they
+// differ). One space keeps its order. When every space ranked by vector
+// alone, memories sort by similarity, as before. Otherwise they interleave
+// by reciprocal rank fusion of their positions in their own space's
+// results: hybrid and keyword scores from different spaces aren't
+// comparable, and nor are cosines from different models.
+func MergeRanked(lists []MemoriesOut) ([]Memory, string) {
+	mode := ""
+	allVector := true
+	for i, l := range lists {
+		if i == 0 {
+			mode = l.Mode
+		} else if l.Mode != mode {
+			mode = ""
+		}
+		if l.Mode != "" && l.Mode != "vector" {
+			allVector = false
+		}
+	}
+	if len(lists) == 1 {
+		return lists[0].Memories, mode
+	}
+	type ranked struct {
+		m     Memory
+		score float64
+	}
+	var all []ranked
+	for _, l := range lists {
+		for pos, m := range l.Memories {
+			all = append(all, ranked{m, 1 / (60 + float64(pos+1))})
+		}
+	}
+	sim := func(m Memory) int {
+		if m.Similarity == nil {
+			return 0
+		}
+		return *m.Similarity
+	}
+	slices.SortStableFunc(all, func(a, b ranked) int {
+		if allVector {
+			return cmp.Compare(sim(b.m), sim(a.m))
+		}
+		if c := cmp.Compare(b.score, a.score); c != 0 {
+			return c
+		}
+		return cmp.Compare(sim(b.m), sim(a.m))
+	})
+	out := make([]Memory, len(all))
+	for i, r := range all {
+		out[i] = r.m
+	}
+	return out, mode
 }
 
 // Get fetches a memory by URI, from whichever space the URI is in.

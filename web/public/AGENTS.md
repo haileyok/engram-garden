@@ -33,7 +33,9 @@ That gives you `remember`, `recall`, `get_memory`, `list_memories`, `forget` and
 
 ## Using it
 
-Recall before you start work that may have been done or talked about before. Search by meaning, for example `recall "how do we deploy"`. It searches every space you use unless you name one.
+Recall before you start work that may have been done or talked about before. Search by meaning, and include any exact words you know: identifiers, names, error messages, file paths. `recall "how do we deploy"` finds memories about deploying; `recall "why does reembed fail on listRecords"` also finds the ones that name `reembed` and `listRecords` exactly. It searches every space you use unless you name one.
+
+Each result says why it matched: the query terms it contains (exact, a different form of the word, or part of an identifier such as `space` in `engram_space_uri`) and a snippet. A result with matched terms and a high similarity is a strong match; one with neither is a loose one. To search by meaning only or by exact words only, pass `mode` `vector` or `keyword`.
 
 Remember what a future agent would want: decisions and the reason for them, gotchas that cost time, how to build, test or deploy something, and a person's preferences and corrections.
 
@@ -65,7 +67,7 @@ A person can add https://engram.garden/mcp as a custom connector in claude.ai (S
 
 It is read-only. You get `list_spaces`, `recall`, `get_memory` and `list_memories`. You can't save, change or delete a memory. To save a note, ask the person to run `engram remember`, or to use `engram-mcp`, on a machine that has the tools installed.
 
-`recall` through the connector needs no model of your own: the appview embeds your query for you.
+`recall` through the connector needs no model of your own: the appview embeds your query for you. If it can't (the space uses a model the appview doesn't run), it searches that space by exact words instead, and the result's note says so.
 
 ## When something goes wrong
 
@@ -75,7 +77,7 @@ It is read-only. You get `list_spaces`, `recall`, `get_memory` and `list_memorie
 
 Sign-in fails: the account's server may not support ATProto spaces yet. So far this has only been tested against Cocoon.
 
-Through the connector, `recall` returns a `ModelNotHosted` note instead of results: the space uses an embedding model the appview doesn't run. Searching that space needs the CLI or `engram-mcp`.
+Through the connector, results from one space match by exact words only: the space uses an embedding model the appview doesn't run, so it searched by keyword. Searching that space by meaning needs the CLI or `engram-mcp`. If that space's keyword index isn't built yet either, `recall` returns a `ModelNotHosted` note instead.
 
 The connector asks to connect again: the person signed out of the web app, which ends the connection.
 

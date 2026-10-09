@@ -165,6 +165,52 @@ type Memory struct {
 	Source     string   `json:"source,omitempty"`
 	CreatedAt  string   `json:"createdAt"`
 	Similarity *int     `json:"similarity,omitempty"`
+	// Match explains a hybrid or keyword search result.
+	Match *Match `json:"match,omitempty"`
+}
+
+// Match is why a search result matched (garden.engram.defs#matchView).
+type Match struct {
+	Fusion  string        `json:"fusion,omitempty"`
+	Vector  *VectorMatch  `json:"vector,omitempty"`
+	Keyword *KeywordMatch `json:"keyword,omitempty"`
+	Snippet *Snippet      `json:"snippet,omitempty"`
+}
+
+// VectorMatch is a result's rank by similarity among the results.
+type VectorMatch struct {
+	Rank       int `json:"rank"`
+	Similarity int `json:"similarity"`
+}
+
+// KeywordMatch is a result's rank by keyword score among the results, the
+// score × 100, and the query terms the memory contains.
+type KeywordMatch struct {
+	Rank  int         `json:"rank"`
+	Score int         `json:"score"`
+	Terms []TermMatch `json:"terms"`
+}
+
+// TermMatch is a query term the memory contains: how (exact, stem or
+// part of an identifier) and where (text, tags or source).
+type TermMatch struct {
+	Term  string `json:"term"`
+	Kind  string `json:"kind"`
+	Field string `json:"field"`
+}
+
+// Snippet is part of a field around the matches, with UTF-8 byte ranges
+// to highlight.
+type Snippet struct {
+	Field      string      `json:"field"`
+	Text       string      `json:"text"`
+	Highlights []ByteRange `json:"highlights"`
+}
+
+// ByteRange is a UTF-8 byte range in a snippet.
+type ByteRange struct {
+	ByteStart int `json:"byteStart"`
+	ByteEnd   int `json:"byteEnd"`
 }
 
 // ---- remember ----
@@ -240,11 +286,14 @@ type RecallIn struct {
 	Tags   []string `json:"tags,omitempty" jsonschema:"only memories carrying all of these tags"`
 	Since  string   `json:"since,omitempty" jsonschema:"only memories created at or after this RFC 3339 time"`
 	Space  string   `json:"space,omitempty" jsonschema:"search only this space, by name or URI (default: every space you use; see list_spaces)"`
+	Mode   string   `json:"mode,omitempty" jsonschema:"hybrid (default): by meaning and exact words together; vector: by meaning only; keyword: by exact words only"`
 }
 
 type MemoriesOut struct {
 	Memories []Memory `json:"memories"`
 	Cursor   string   `json:"cursor,omitempty"`
+	// Mode is what a search ran: hybrid, vector or keyword.
+	Mode string `json:"mode,omitempty"`
 	// Note explains results that may be less precise than usual.
 	Note string `json:"note,omitempty"`
 }
@@ -258,18 +307,29 @@ func (t *Agent) Recall(ctx context.Context, in RecallIn) (MemoriesOut, error) {
 		MemoriesOut
 		Approximate bool `json:"approximate"`
 	}
+	switch in.Mode {
+	case "", "hybrid", "vector", "keyword":
+	default:
+		return MemoriesOut{}, errors.New("mode must be hybrid, vector or keyword")
+	}
 	for attempt := range 2 {
-		cfg, err := t.Config(ctx, attempt > 0)
-		if err != nil {
-			return MemoriesOut{}, err
+		params := url.Values{"space": {t.Space}, "q": {truncate(in.Query, 4000)}}
+		if in.Mode != "" {
+			params.Set("mode", in.Mode)
 		}
-		v, err := t.embedOne(ctx, cfg.ModelInfo, cfg.QueryPrefix+in.Query)
-		if err != nil {
-			return MemoriesOut{}, err
-		}
-		params := url.Values{
-			"space": {t.Space}, "q": {truncate(in.Query, 4000)}, "vector": {lex.EncodeQueryVector(v)},
-			"model": {cfg.Model}, "modelDigest": {cfg.ModelDigest},
+		if in.Mode != "keyword" {
+			// Keyword search needs no vector.
+			cfg, err := t.Config(ctx, attempt > 0)
+			if err != nil {
+				return MemoriesOut{}, err
+			}
+			v, err := t.embedOne(ctx, cfg.ModelInfo, cfg.QueryPrefix+in.Query)
+			if err != nil {
+				return MemoriesOut{}, err
+			}
+			params.Set("vector", lex.EncodeQueryVector(v))
+			params.Set("model", cfg.Model)
+			params.Set("modelDigest", cfg.ModelDigest)
 		}
 		if in.Limit != 0 {
 			params.Set("limit", strconv.Itoa(min(max(in.Limit, 1), 50)))
@@ -281,7 +341,7 @@ func (t *Agent) Recall(ctx context.Context, in RecallIn) (MemoriesOut, error) {
 			params.Set("since", in.Since)
 		}
 		params["tags"] = in.Tags
-		err = t.query(ctx, "garden.engram.searchMemories", params, &out)
+		err := t.query(ctx, "garden.engram.searchMemories", params, &out)
 		var xe *spaceclient.Error
 		if attempt == 0 && errors.As(err, &xe) && xe.Name == "ModelMismatch" {
 			continue // the space changed models: re-read the config
