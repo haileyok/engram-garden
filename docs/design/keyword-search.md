@@ -112,8 +112,11 @@ often exactly what an agent searches for.
    - Each run of CJK characters becomes one token per overlapping
      character bigram.
 2. **Detect opaque pieces before splitting them.** A piece is *opaque* when
-   it is 16 or more characters of hex or base32 (hashes, CIDs, DID
-   identifiers). Test the whole token first; if it's opaque, it emits only
+   it is an AT Protocol record key (13 characters of the base32-sortable
+   alphabet, with a digit), or at least 16 ASCII letters and digits that are
+   all digits or switch between letters and digits at least three times
+   (hashes, CIDs, DID identifiers). Long all-letter words never qualify.
+   Test the whole token first; if it's opaque, it emits only
    itself. Otherwise split it on joiners only, and test each of those
    components the same way. An opaque component emits only itself: it is
    never split at case or letter–digit boundaries, which would otherwise
@@ -123,9 +126,11 @@ often exactly what an agent searches for.
    split on lower→upper case changes, at the end of an acronym
    (`HTTPServer` → `HTTP`, `Server`) and on letter–digit boundaries
    (`v2beta` → `v`, `2`, `beta`). One-character parts are dropped.
-4. **Normalize each term** separately: Unicode NFKD, remove nonspacing marks
-   (so both precomposed and decomposed `café` become `cafe`), NFKC, then
-   full Unicode case folding.
+4. **Normalize each term** separately: Unicode NFKC (compatibility forms can
+   produce uppercase: `Ⅻ` → `XII`), full case folding (`ß` → `ss`), NFKD
+   and removing nonspacing marks (so precomposed and decomposed `café` both
+   become `cafe`, and folding `İ` leaves no dot), then NFC (recomposing
+   Hangul). Curly apostrophes become `'`.
 5. **Bound length.** A term longer than 64 bytes becomes its first 48 bytes
    (cut at a UTF-8 character boundary), `#`, and the first 12 hex digits of
    the SHA-256 of the whole term. Long URLs and paths that share a prefix
@@ -367,13 +372,23 @@ be replaced by measurements on real text. The existing benchmark's
 synthetic text has a tiny vocabulary, which would make postings look far
 smaller than they are.
 
-| Per 1M memories | Estimate |
+Measured with the analyzer on an agent's 1,443 real memories (about 900
+characters each): 124 source tokens and **204 distinct terms per memory**,
+about one per 4.4 bytes of text. Half the vocabulary occurs in only one
+memory, and terms average 10.6 bytes. 28% of postings are a stem equal to
+its word (`the` and `~the`); see [Open questions](#open-questions).
+
+| Per 1M memories of ~500 characters | Estimate |
 |---|---|
-| Postings: ~110 distinct terms per memory at ~1.2 bytes each, plus skip tables | ~140 MB |
+| Postings: ~115 distinct terms per memory at ~1.2 bytes each, plus skip tables | ~150 MB |
 | Dictionary: a few million distinct terms, front-coded | 25–40 MB |
 | Norms | 1 MB |
 | Term index (RAM) | ~1 MB |
-| **Total** | **~170 MB, about 14% on top of today's ~1.2 GB** |
+| **Total** | **~180–190 MB, about 15% on top of today's ~1.2 GB** |
+
+Longer memories add postings in proportion to their text, but also add
+compressed text to the segment, so the proportion moves less than the
+absolute size.
 
 The proportion depends on dimensions and text length; the target below is
 for this workload, not a property of the format.
@@ -383,7 +398,10 @@ for this workload, not a property of the format.
 - **Flush:** the buffer's inverted index is written out with the segment.
 - **Merge:** postings are rebuilt by analyzing the inputs' text, which a
   merge already reads (`ReadAll`). Re-analyzing is simpler than remapping
-  postings and always produces the current analyzer version.
+  postings and always produces the current analyzer version. Analysis runs
+  at about 55–65 µs per real memory per core (14–16 MB/s, with stems
+  cached), so a million memories cost about a minute of CPU, spread across
+  cores.
 - **Memory:** merges already hold every input's vectors and text. Postings
   are built from (term, row, tf) tuples sorted in chunks of bounded size,
   spilled to local SSD when a chunk fills, and merged, so the extra peak
@@ -890,5 +908,7 @@ On the held-out set:
 
 - Rank fusion or a tuned combination: decided by the evaluation.
 - Whether to drop the exact-form terms for words whose stem equals the word
-  (most short words), answering those from the stem's postings. That would
-  cut postings by perhaps a fifth at some cost in simplicity.
+  (most short words), answering those from the stem's postings. On real
+  memories that's 28% of postings. The cost is ranking: the exact form of
+  such a word could no longer outrank its stemmed matches (`run` against
+  `running`). The evaluation measures whether that matters.
