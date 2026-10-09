@@ -17,6 +17,7 @@ import (
 	"github.com/haileyok/engram-garden/internal/blob"
 	"github.com/haileyok/engram-garden/internal/metrics"
 	"github.com/haileyok/engram-garden/internal/segment"
+	"github.com/haileyok/engram-garden/internal/text"
 )
 
 // writeSegment writes docs to a local file, uploads it, and opens it from
@@ -35,7 +36,7 @@ func (n *Node) writeSegment(ctx context.Context, spaceURI string, docs []segment
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp)
-	info, err := segment.Write(f, docs, segment.WriteOptions{Dims: dims, ClusterThreshold: n.opt.ClusterThreshold})
+	info, err := segment.Write(f, docs, segment.WriteOptions{Dims: dims, ClusterThreshold: n.opt.ClusterThreshold, Keyword: n.opt.KeywordWrite, TempDir: dir})
 	if err == nil {
 		err = f.Sync()
 	}
@@ -48,6 +49,10 @@ func (n *Node) writeSegment(ctx context.Context, spaceURI string, docs []segment
 	si := SegmentInfo{
 		ID: newSegmentID(), Count: info.Count, Bytes: info.Bytes, Clustered: info.Clustered,
 		MinCreatedAt: info.MinCreatedAt, MaxCreatedAt: info.MaxCreatedAt, CreatedAt: n.now().UTC(),
+		Format: info.Version,
+	}
+	if info.Version >= 2 {
+		si.Analyzer = text.Version
 	}
 	key := SegmentKey(spaceURI, si.ID)
 	rf, err := os.Open(tmp)
@@ -80,7 +85,13 @@ func (n *Node) openSegment(ctx context.Context, spaceURI string, si SegmentInfo,
 	if ix.Count != si.Count {
 		return nil, fmt.Errorf("segment %s holds %d memories, manifest says %d", si.ID, ix.Count, si.Count)
 	}
-	sg := &seg{info: si, src: src, rd: rd, ix: ix, rows: make(map[uint32]int, ix.Count)}
+	// The header, not the manifest's hint, says whether there's a keyword
+	// index.
+	kw, err := rd.LoadKeyword(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("segment %s: %w", si.ID, err)
+	}
+	sg := &seg{info: si, src: src, rd: rd, ix: ix, kw: kw, rows: make(map[uint32]int, ix.Count)}
 	for row := range ix.Count {
 		sg.rows[ix.ID(row)] = row
 	}
@@ -93,7 +104,11 @@ func (n *Node) openSegment(ctx context.Context, spaceURI string, si SegmentInfo,
 }
 
 func (sg *seg) ramBytes() int64 {
-	return sg.ix.RAMBytes() + int64(len(sg.bits)) + int64(len(sg.rows))*16
+	n := sg.ix.RAMBytes() + int64(len(sg.bits)) + int64(len(sg.rows))*16
+	if sg.kw != nil {
+		n += sg.kw.RAMBytes()
+	}
+	return n
 }
 
 // putManifest writes a manifest under its token and generation. With

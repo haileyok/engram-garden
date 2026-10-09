@@ -37,6 +37,13 @@ type SegmentInfo struct {
 	// past the storage provider's minimum retention.
 	CreatedAt time.Time `json:"createdAt"`
 	Clustered bool      `json:"clustered,omitempty"`
+	// Format is the segment format version (0 means 1, from manifests
+	// written before the field), and Analyzer the text analyzer version of
+	// its keyword index (0 for none). Both are hints for planning
+	// rewrites: the segment's header is the truth, and a manifest written
+	// by an older node may lack them.
+	Format   int `json:"format,omitempty"`
+	Analyzer int `json:"analyzer,omitempty"`
 }
 
 // IndexManifest is one model's index: its segments.
