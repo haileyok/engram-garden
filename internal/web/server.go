@@ -25,6 +25,7 @@ import (
 	"github.com/bluesky-social/indigo/atproto/atclient"
 	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/bluesky-social/indigo/atproto/syntax"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/haileyok/engram-garden/internal/spaceclient"
 )
@@ -68,6 +69,12 @@ type Server struct {
 	Log    *slog.Logger
 	// LiveEvery is how often live updates poll the appview (default 5s).
 	LiveEvery time.Duration
+	// Connector, when set, lets apps such as claude.ai connect as MCP
+	// clients and read a signed-in account's memory spaces.
+	Connector *Connector
+
+	mcpOnce sync.Once
+	mcpSrv  *mcp.Server
 
 	mu        sync.Mutex
 	users     map[string]*user
@@ -124,6 +131,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/members/remove", s.change(s.signedIn(s.handleRemoveMember)))
 	mux.HandleFunc("GET /api/config", s.signedIn(s.handleGetConfig))
 	mux.HandleFunc("POST /api/config", s.change(s.signedIn(s.handlePutConfig)))
+
+	if s.Connector != nil {
+		s.connectorRoutes(mux)
+	}
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apiErr(http.StatusNotFound, "NotFound", "no such endpoint"))
@@ -341,6 +352,11 @@ func (s *Server) user(r *http.Request) (*user, error) {
 	if !ok {
 		return nil, errors.New("no session")
 	}
+	return s.userFor(r.Context(), did, sid)
+}
+
+// userFor is user for a session named by its account and ID.
+func (s *Server) userFor(ctx context.Context, did syntax.DID, sid string) (*user, error) {
 	key := did.String() + "\x00" + sid
 	s.mu.Lock()
 	if s.users == nil {
@@ -361,7 +377,7 @@ func (s *Server) user(r *http.Request) (*user, error) {
 	}
 	s.mu.Unlock()
 
-	api, err := s.Auth.Resume(r.Context(), did, sid)
+	api, err := s.Auth.Resume(ctx, did, sid)
 	if err != nil {
 		return nil, err
 	}

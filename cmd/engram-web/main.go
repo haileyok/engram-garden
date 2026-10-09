@@ -111,6 +111,19 @@ func run(log *slog.Logger) error {
 	if srv.Static == nil {
 		log.Warn("the frontend isn't built into this binary; run make web and rebuild")
 	}
+	// The connector for apps like claude.ai (MCP over HTTP). Its tools
+	// search with query text, so the appview has to embed it
+	// (ENGRAM_TEXT_SEARCH there).
+	switch v := config.Get("ENGRAM_WEB_MCP", ""); v {
+	case "", "0", "false":
+	case "1", "true":
+		if srv.Connector, err = web.NewConnector(dataDir); err != nil {
+			return fmt.Errorf("connector state in %s: %w", dataDir, err)
+		}
+		log.Info("serving the Claude connector", "mcp", publicURL+"/mcp")
+	default:
+		return fmt.Errorf("ENGRAM_WEB_MCP must be true or false, not %q", v)
+	}
 
 	go func() {
 		t := time.NewTicker(time.Hour)

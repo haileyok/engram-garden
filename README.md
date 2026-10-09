@@ -359,12 +359,21 @@ The server keeps OAuth tokens; the browser holds only a signed session cookie. A
 | `ENGRAM_WEB_CLIENT_KEY` | | The OAuth client's P-256 private key, multibase (`goat key generate -t P-256`). Required for https. |
 | `ENGRAM_WEB_LISTEN` | `:8090` | |
 | `ENGRAM_WEB_METRICS_LISTEN` | off | Address for Prometheus metrics at `/metrics`, e.g. `:9465`. See [Monitoring](docs/monitoring.md). |
-| `ENGRAM_WEB_DATA` | `engram-web-data` | Sessions and pending sign-ins, one file each. Keep it private. |
+| `ENGRAM_WEB_DATA` | `engram-web-data` | Sessions and pending sign-ins, one file each, and the connector's apps and grants. Keep it private. |
 | `ENGRAM_WEB_COOKIE_KEY` | generated in the data directory | Hex, at least 32 bytes. Signs session cookies. |
 | `ENGRAM_APPVIEW_URL` / `ENGRAM_APPVIEW_DID` | `https://api.engram.garden` / `did:web:<appview host>` | |
 | `ENGRAM_WEB_ALLOW_PRIVATE` | on for `127.0.0.1` | Allow requests to private addresses, for a local PDS. |
+| `ENGRAM_WEB_MCP` | `false` | Serve the connector for Claude and other MCP clients at `/mcp` (see below). Needs `ENGRAM_TEXT_SEARCH` on the appview. |
 
 Put the web app's origin in the appview's `ENGRAM_RETURN_ORIGINS`, so granting and stopping come back to it.
+
+### Connecting Claude
+
+With `ENGRAM_WEB_MCP=true`, claude.ai (and any other client of remote MCP servers) can search your spaces. In claude.ai, Settings, Connectors, add a custom connector with the URL `https://engram.garden/mcp` (your own web app's origin plus `/mcp`). Claude registers itself, sends you to a page here to sign in (the same ATProto sign-in as the web app) and approve it, and from then on can call `list_spaces`, `recall`, `get_memory` and `list_memories`. It can't write, change or delete anything.
+
+How it works: the web app is also an OAuth authorization server for MCP clients (RFC 9728 and 8414 metadata at `/.well-known/`, dynamic client registration at `/mcp-oauth/register`, PKCE with S256 only, short-lived access tokens and single-use refresh tokens; reusing a spent refresh token ends the grant). A token stands for one account's approval of one app, and the tools run as that account through the web app session the approval was made in, so Claude reads what you can read and nothing else. Because of that, signing out of the web app ends the connection and Claude asks you to connect again. Approved apps and their tokens' hashes live in `connectors.json` in `ENGRAM_WEB_DATA`. `GET /api/connectors` lists an account's connections and `POST /api/connectors/revoke` ends one.
+
+Claude's servers can't run your local model, so `recall` sends the query text to the appview, which embeds it. That needs `ENGRAM_TEXT_SEARCH=true` on the appview with an Ollama (or other endpoint) running the space's model; see the appview settings above. Spaces that use a model the appview doesn't run return a `ModelNotHosted` note instead of results.
 
 ```bash
 make web                     # build the frontend into the binary

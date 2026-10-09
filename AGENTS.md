@@ -62,13 +62,21 @@ Guidance for working on Engram Garden.
   under an advisory lock. `controltest.New(t)` gives a test a store.
 - `internal/appview`: XRPC handlers, forwarding to a space's owner,
   notification receivers, `did:web` document, background sync and
-  registration loop.
+  registration loop. `textsearch.go` embeds the text of a search for callers
+  with no model of their own (`ENGRAM_TEXT_SEARCH`); it is limited per space
+  authority, because a space credential doesn't say who holds it.
 - `internal/mcpserver`: the MCP tools, over `internal/agent`.
 - `cmd/engram-web`, `internal/web`: the web app's backend. OAuth sign-in
   (indigo's client; sessions in `FileStore`), then it acts for the user with
   `spaceclient`, like `engram-mcp`. The `Auth` interface lets tests sign in
   as `spacetest` accounts. Requests that change anything must be same-origin
-  JSON.
+  JSON. `connector*.go` is the remote MCP connector for claude.ai
+  (`ENGRAM_WEB_MCP`): the web app is an OAuth authorization server for MCP
+  clients (metadata, dynamic registration, consent page, PKCE token
+  endpoint; apps and grants in `connectors.json`) and serves read-only
+  tools at `/mcp`. A grant acts through the web app session it was approved
+  in, so signing out ends it. Keep its tools read-only unless the web app's
+  OAuth scopes grow a write permission.
 - `web/`: the React frontend (Vite, TypeScript, no router library). It
   builds into `internal/web/dist/app`, which `engram-web` embeds. Files in
   `web/public/` are copied to the site's root: `og.png` is the link preview
