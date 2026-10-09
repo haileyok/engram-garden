@@ -41,6 +41,10 @@ class Memory:
     space: str = ""
     cid: str = ""
     indexed_at: str = ""
+    #: Hybrid and keyword search results only: why the memory matched, as
+    #: garden.engram.defs#matchView (vector and keyword rank and score, the
+    #: query terms it contains, and a snippet with byte-range highlights).
+    match: dict[str, Any] | None = None
 
     @classmethod
     def from_view(cls, d: dict[str, Any]) -> Memory:
@@ -55,6 +59,7 @@ class Memory:
             similarity=d.get("similarity"),
             cid=d.get("cid", "") or "",
             indexed_at=d.get("indexedAt", "") or "",
+            match=d.get("match"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -66,6 +71,8 @@ class Memory:
         d["createdAt"] = self.created_at
         if self.similarity is not None:
             d["similarity"] = self.similarity
+        if self.match is not None:
+            d["match"] = self.match
         return d
 
 
@@ -75,6 +82,8 @@ class MemoriesOut:
     cursor: str = ""
     #: Explains results that may be less precise than usual.
     note: str = ""
+    #: What a search ran: "hybrid", "vector" or "keyword".
+    mode: str = ""
 
 
 @dataclass
@@ -270,21 +279,29 @@ class Agent:
         author: str = "",
         tags: list[str] | None = None,
         since: datetime | str = "",
+        mode: str = "",
     ) -> MemoriesOut:
-        """Search every agent's memories by meaning."""
+        """Search every agent's memories by meaning and exact words together.
+
+        mode is "hybrid" (the default), "vector" (meaning only) or "keyword"
+        (exact words only, with no embedding).
+        """
         if not query.strip():
             raise EngramError("query is required")
+        if mode not in ("", "hybrid", "vector", "keyword"):
+            raise EngramError("mode must be hybrid, vector or keyword")
         out: dict[str, Any] = {}
         for attempt in range(2):
-            cfg = await self.config(attempt > 0)
-            v = await self._embed_one(cfg.model_info, cfg.query_prefix + query)
-            params: dict[str, Any] = {
-                "space": self.space,
-                "q": _truncate(query, 4000),
-                "vector": lex.encode_query_vector(v),
-                "model": cfg.model,
-                "modelDigest": cfg.model_digest,
-            }
+            params: dict[str, Any] = {"space": self.space, "q": _truncate(query, 4000)}
+            if mode:
+                params["mode"] = mode
+            if mode != "keyword":
+                # Keyword search needs no vector.
+                cfg = await self.config(attempt > 0)
+                v = await self._embed_one(cfg.model_info, cfg.query_prefix + query)
+                params["vector"] = lex.encode_query_vector(v)
+                params["model"] = cfg.model
+                params["modelDigest"] = cfg.model_digest
             if limit:
                 params["limit"] = min(max(limit, 1), 50)
             if author:
@@ -467,4 +484,5 @@ def _memories(out: dict[str, Any]) -> MemoriesOut:
     return MemoriesOut(
         memories=[Memory.from_view(m) for m in out.get("memories", []) or []],
         cursor=out.get("cursor", "") or "",
+        mode=out.get("mode", "") or "",
     )

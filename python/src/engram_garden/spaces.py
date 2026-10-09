@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 
 from . import lex
-from .agent import Agent, ForgetOut, GetOut, MemoriesOut, RememberOut
+from .agent import Agent, ForgetOut, GetOut, MemoriesOut, Memory, RememberOut
 from .embed import HashingProvider, OpenAIProvider, Provider
 from .errors import EngramError, SettingsError, SignInExpiredError, explain
 from .identity import Directory
@@ -210,10 +210,12 @@ class Spaces(ManageMixin):
         tags: list[str] | None = None,
         since: datetime | str = "",
         space: str = "",
+        mode: str = "",
     ) -> MemoriesOut:
-        """Search one space or, by default (or with space="all"), every space set up, merging the results by
-        similarity. Each space's query is embedded with that space's model."""
-        kw: dict[str, Any] = {"limit": limit, "author": author, "tags": tags, "since": since}
+        """Search one space or, by default (or with space="all"), every space set up, merging the results with
+        merge_ranked. Each space's query is embedded with that space's model. mode is "hybrid" (the default),
+        "vector" or "keyword"."""
+        kw: dict[str, Any] = {"limit": limit, "author": author, "tags": tags, "since": since, "mode": mode}
         if space and space != ALL_SPACES:
             a, e = self.agent(space)
             out = await a.recall(query, **kw)
@@ -238,6 +240,7 @@ class Spaces(ManageMixin):
 
         results = await asyncio.gather(*(one(e) for e in entries))
         merged = MemoriesOut()
+        lists: list[MemoriesOut] = []
         failed: list[str] = []
         notes: list[str] = []
         first_err: BaseException | None = None
@@ -246,7 +249,7 @@ class Spaces(ManageMixin):
                 failed.append(f"{e.name} ({explain(err)})")
                 first_err = first_err or err
                 continue
-            merged.memories.extend(_label(out, e.name).memories)
+            lists.append(_label(out, e.name))
             if out.note:
                 notes.append(f"{e.name}: {out.note}")
             if note:
@@ -255,7 +258,7 @@ class Spaces(ManageMixin):
             if len(results) == 1 and first_err is not None:
                 raise first_err
             raise EngramError("recall failed in every space: " + "; ".join(failed))
-        merged.memories.sort(key=lambda m: -(m.similarity or 0))  # stable
+        merged.memories, merged.mode = merge_ranked(lists)
         n = limit if limit > 0 else 10
         merged.memories = merged.memories[: min(n, 50)]
         if failed:
@@ -442,3 +445,22 @@ async def open_spaces(
     s = Spaces(client, settings.appview_url, settings.appview_did, provider, settings, client_http)
     s._owns_http = own
     return s
+
+
+def merge_ranked(lists: list[MemoriesOut]) -> tuple[list[Memory], str]:
+    """Combine several spaces' search results, each in its service's order, and report the mode they ran in
+    (empty if they differ). One space keeps its order. When every space ranked by vector alone, memories sort by
+    similarity. Otherwise they interleave by reciprocal rank fusion of their positions in their own space's
+    results: hybrid and keyword scores from different spaces aren't comparable, and nor are cosines from
+    different models. Mirrors the Go client's MergeRanked."""
+    modes = {out.mode for out in lists}
+    mode = modes.pop() if len(modes) == 1 else ""
+    if len(lists) == 1:
+        return list(lists[0].memories), mode
+    all_vector = all(out.mode in ("", "vector") for out in lists)
+    ranked = [(1 / (60 + pos + 1), m) for out in lists for pos, m in enumerate(out.memories)]
+    if all_vector:
+        ranked.sort(key=lambda r: -(r[1].similarity or 0))  # stable
+    else:
+        ranked.sort(key=lambda r: (-r[0], -(r[1].similarity or 0)))  # stable
+    return [m for _, m in ranked], mode
