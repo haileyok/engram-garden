@@ -338,9 +338,7 @@ func (s *Space) install(next *Manifest, deleted *roaring.Bitmap, delSnap []uint3
 	}
 	for path, e := range entries {
 		delete(s.inflight, e.id)
-		if s.buf[path] == e {
-			delete(s.buf, path)
-		}
+		s.bufDrop(path, e)
 		l := s.locs[path]
 		if l == nil || l.buf != e {
 			continue

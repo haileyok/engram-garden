@@ -19,6 +19,75 @@ func segsOf(t *testing.T, n *Node) []*seg {
 	return append([]*seg(nil), s.slots[0].segs...)
 }
 
+// checkBufKW rebuilds the buffer's keyword index from the buffer and
+// compares.
+func checkBufKW(t *testing.T, n *Node, stage string) {
+	t.Helper()
+	s, err := n.space(context.Background(), testSpace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	want := map[string]map[*bufEntry]uint32{}
+	var length uint64
+	for _, e := range s.buf {
+		a := text.AnalyzeMemory(e.doc.Text, e.doc.Tags, e.doc.Source)
+		length += uint64(text.DecodeLength(text.EncodeLength(a.Length)))
+		for term, tf := range a.TF {
+			if want[term] == nil {
+				want[term] = map[*bufEntry]uint32{}
+			}
+			want[term][e] = tf
+		}
+	}
+	if length != s.bufKW.length || len(want) != len(s.bufKW.terms) {
+		t.Fatalf("%s: length %d (want %d), %d terms (want %d)", stage, s.bufKW.length, length, len(s.bufKW.terms), len(want))
+	}
+	for term, m := range want {
+		got := s.bufKW.terms[term]
+		if len(got) != len(m) {
+			t.Fatalf("%s: term %q has %d entries, want %d", stage, term, len(got), len(m))
+		}
+		for e, tf := range m {
+			if got[e] != tf {
+				t.Fatalf("%s: term %q tf %d, want %d", stage, term, got[e], tf)
+			}
+		}
+	}
+}
+
+func TestBufferKeywordIndex(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFixture(t)
+	n := f.node()
+	configure(t, n, SpaceConfig{ModelInfo: modelA})
+	apply := func(rev string, ms []Memory, deletes []string) {
+		t.Helper()
+		if err := n.ApplyRepoChanges(ctx, testSpace, "did:plc:alice", pos(rev), ms, deletes, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	apply("r1", []Memory{mem("did:plc:alice", "a1", "deploy the engram_space_uri fix"), mem("did:plc:alice", "a2", "running tests")}, nil)
+	checkBufKW(t, n, "inserted")
+	apply("r2", []Memory{mem("did:plc:alice", "a1", "an updated memory about argo")}, nil)
+	checkBufKW(t, n, "updated")
+	apply("r3", nil, []string{"a2"})
+	checkBufKW(t, n, "deleted")
+	if err := n.Flush(ctx, testSpace); err != nil {
+		t.Fatal(err)
+	}
+	checkBufKW(t, n, "flushed")
+	s, _ := n.space(ctx, testSpace)
+	s.mu.RLock()
+	empty := len(s.bufKW.terms) == 0 && s.bufKW.length == 0
+	s.mu.RUnlock()
+	if !empty {
+		t.Fatal("buffer index not empty after flush")
+	}
+}
+
 // The reader release: a node that doesn't write keyword segments opens and
 // searches ones another node wrote, and writes version 1 beside them.
 func TestKeywordSegmentsMixWithVersion1(t *testing.T) {
