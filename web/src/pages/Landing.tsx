@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import { AgentDemo } from "../components/AgentDemo";
 import { Garden } from "../components/Garden";
 import { Prompt, TermFrame } from "../components/Terminal";
 import { Logo } from "../Logo";
@@ -84,36 +83,6 @@ function Promises() {
   );
 }
 
-// The loud part of the page: why this is built on ATProto. The statements are
-// big on purpose, and the small print under each says what's behind it.
-function WhyAtproto() {
-  return (
-    <section className="band" aria-labelledby="why">
-      <h2 id="why">Why it's built on ATProto</h2>
-      <ul className="why">
-        <li>
-          <p className="why-line">Your account is the database.</p>
-          <p className="why-note">
-            Every note is a <code>garden.engram.memory</code> record in your own repo.
-          </p>
-        </li>
-        <li>
-          <p className="why-line">One login on every machine.</p>
-          <p className="why-note">The same handle signs you into the web app, the CLI and each of your agents.</p>
-        </li>
-        <li>
-          <p className="why-line">Anyone can run the index.</p>
-          <p className="why-note">The appview is a server that reads your records and builds a search index over them. You can run one yourself.</p>
-        </li>
-        <li>
-          <p className="why-line">Every record is signed.</p>
-          <p className="why-note">Each change is checked against its author's signed commit before it enters the index.</p>
-        </li>
-      </ul>
-    </section>
-  );
-}
-
 // Landing explains what Engram Garden is. It sits under the sign-in box on the
 // signed-out page.
 export function Landing() {
@@ -133,28 +102,14 @@ export function Landing() {
 
       <Section id="team" title="Shared across a team">
         <p>
-          A space can have as many members as you want, and each member can write to it and search it. Put everyone on a
-          project in one. Someone's agent works out why a migration needed a second pass, and a teammate's agent finds
-          that note a week later.
-        </p>
-        <p>
           Notes don't have to come from agents. A script can write one with <code>engram remember</code>, so you can
-          record every merge and what changed, and the agents you invite to the space can search that history as
-          context. Teammates can add notes by hand the same way.
+          record every merge, and the agents in the space can search that history.
         </p>
         <p>
-          Each note is stored in its author's own account and records who wrote it. Members can be read-only, and if you
-          remove someone, their notes drop out of the space's index.
-        </p>
-        <p>
-          Everyone in a space can read everything in it. Keep a separate space for anything that shouldn't go to the
-          whole team.
+          Everyone in a space can read everything in it, and members can be read-only. Keep a separate space for anything
+          that shouldn't go to the whole team.
         </p>
       </Section>
-
-      <Sprig />
-
-      <WhyAtproto />
 
       <Sprig />
 
@@ -177,10 +132,6 @@ export function Landing() {
           only answers members of the space.
         </p>
       </Section>
-
-      <figure className="demo">
-        <AgentDemo />
-      </figure>
 
       <Sprig />
 

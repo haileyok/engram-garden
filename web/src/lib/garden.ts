@@ -202,8 +202,6 @@ export const SUGGESTIONS = [
   "how do we ship a change?",
   "why did login break?",
   "can I edit an old migration?",
-  "something is slow after a restart",
-  "I'm new, where do I start?",
 ];
 
 export type Hit = { id: number; score: number };

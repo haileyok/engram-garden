@@ -30,7 +30,6 @@ type Live = {
   flash: number[]; // a spark as the ripple passes
   q: Ask | null;
   hover: number | null;
-  spores: { x: number; y: number; vx: number; vy: number; r: number; ph: number }[];
 };
 
 function newLive(reduced: boolean): Live {
@@ -54,14 +53,6 @@ function newLive(reduced: boolean): Live {
     flash: new Array(n).fill(0),
     q: null,
     hover: null,
-    spores: Array.from({ length: 34 }, () => ({
-      x: Math.random(),
-      y: Math.random(),
-      vx: (Math.random() - 0.5) * 0.00001,
-      vy: -(0.000004 + Math.random() * 0.00001),
-      r: 0.6 + Math.random() * 1.4,
-      ph: Math.random() * 6.28,
-    })),
   };
 }
 
@@ -100,13 +91,6 @@ function step(live: Live, t: number, dt: number, still: boolean) {
     live.dim[i] += (live.td[i] - live.dim[i]) * k;
     live.flash[i] *= Math.exp(-dt / 280);
   }
-  for (const s of live.spores) {
-    s.x += s.vx * dt * 60;
-    s.y += s.vy * dt * 60;
-    if (s.y < -0.02) s.y = 1.02;
-    if (s.x < -0.02) s.x = 1.02;
-    if (s.x > 1.02) s.x = -0.02;
-  }
 }
 
 function leaf(ctx: CanvasRenderingContext2D, x: number, y: number, angle: number, len: number) {
@@ -137,16 +121,6 @@ function draw(ctx: CanvasRenderingContext2D, live: Live, t: number) {
   horizon.addColorStop(1, "rgb(143 203 155 / 0)");
   ctx.fillStyle = horizon;
   ctx.fillRect(0, 0, w, h);
-
-  // Spores drifting up.
-  for (const s of live.spores) {
-    ctx.globalAlpha = 0.18 + 0.22 * Math.sin(t / 1400 + s.ph);
-    ctx.fillStyle = "#cfe8d2";
-    ctx.beginPath();
-    ctx.arc(s.x * w, s.y * h, s.r, 0, 6.283);
-    ctx.fill();
-  }
-  ctx.globalAlpha = 1;
 
   // Topic names, quiet, above each patch.
   ctx.font = "600 10.5px ui-monospace, 'JetBrains Mono', Menlo, monospace";
@@ -334,7 +308,6 @@ export function Garden() {
   const [asked, setAsked] = useState("");
   const [hits, setHits] = useState<Hit[]>([]);
   const [tip, setTip] = useState<number | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
 
   // ask runs a question: the ripple starts from the ground and the matching
@@ -480,8 +453,6 @@ export function Garden() {
             if (!lv || cancelled) return;
             lv.planted[n.id] = performance.now();
             if (lv.q) lv.applied[n.id] = lv.q.id;
-            setToast(`${AUTHORS[n.author].name} wrote a note: ${n.text}`);
-            timers.push(window.setTimeout(() => setToast(null), 4200));
           }, PLANT_AT[k % PLANT_AT.length]),
         );
       });
@@ -606,22 +577,7 @@ export function Garden() {
               <span>{NOTES[tip].text}</span>
             </div>
           )}
-          {toast && (
-            <p className="garden-toast" aria-hidden>
-              <span />
-              {toast}
-            </p>
-          )}
         </div>
-
-        <ul className="garden-legend" aria-label="Who wrote the notes">
-          {AUTHORS.map((a) => (
-            <li key={a.name}>
-              <i style={{ background: a.color }} />
-              {a.name} <small>{a.kind}</small>
-            </li>
-          ))}
-        </ul>
       </div>
 
       <aside className="garden-side" aria-live="polite">
