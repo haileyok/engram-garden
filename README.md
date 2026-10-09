@@ -107,6 +107,7 @@ to set the DNS record. A deployment on other NSIDs would publish its own.
 | `ENGRAM_CACHE_BYTES` | 100 GiB | Disk cache budget |
 | `ENGRAM_RAM_BYTES` | 8 GiB | RAM budget for loaded spaces |
 | `ENGRAM_LIMIT_MEMORIES` / `ENGRAM_LIMIT_BYTES` / `ENGRAM_LIMIT_SEARCHES_PER_SECOND` / `ENGRAM_LIMIT_WRITES_PER_DAY` | unlimited | Per-space limits |
+| `ENGRAM_KEYWORD_SEARCH` | `false` | Write segments with a keyword index and rewrite older ones. Once all of a space's segments have one, its searches that include `q` rank by meaning and exact words together (hybrid search; see `docs/design/keyword-search.md`). Every node reads keyword segments either way; turn this on only after every node runs a release that does. |
 | `ENGRAM_TEXT_SEARCH` | `false` | Embed the text of searches that come without a vector, for callers that have no model of their own (the web app, the Claude connector). Uses the model `ENGRAM_EMBED_URL` / `ENGRAM_EMBED_MODEL` / `ENGRAM_EMBED_MODEL_DIGEST` name, usually an Ollama next to the appview, and only serves spaces that declare that same model (same name and digest); others get `ModelNotHosted`. The appview embeds only after verifying a credential for an indexed space. |
 | `ENGRAM_TEXT_SEARCH_PER_SECOND` / `ENGRAM_TEXT_SEARCH_BURST` | `2` / `20` | How many text searches one space authority may make (not per space, so many spaces don't multiply it) |
 | `ENGRAM_TEXT_SEARCH_CONCURRENCY` | `4` | Embeddings running at once on a node; callers past it get `EmbedderBusy` (503) |
