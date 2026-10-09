@@ -109,7 +109,10 @@ for f in "$LEXICONS"/*.json; do
   [[ $(basename "$f" .json) == "${SPACE_NSID##*.}" ]] || files+=("$f")
 done
 say "Publishing ${#files[@]} lexicons"
-run goat_saved lex publish --update "${files[@]}"
+# goat checks the DNS with this machine's resolver, which may still remember an
+# earlier "not found" and make it skip every lexicon without an error. The
+# record was checked against the domain's nameserver above.
+run goat_saved lex publish --skip-dns-check --update "${files[@]}"
 
 # 4. The space type declaration.
 say "Publishing $SPACE_NSID"
@@ -129,12 +132,19 @@ else
   fi
 fi
 
-# 5. Read it back the way a PDS would.
+# 5. Read every lexicon back the way a PDS would, so a lexicon that was
+# skipped doesn't go unnoticed.
 if ((DRY_RUN)); then
-  say "Would check that $uri can be read back"
+  say "Would check that every lexicon can be read back from $DID"
 else
-  say "Checking $uri"
+  say "Checking that every lexicon can be read back"
+  missing=()
+  for f in "$LEXICONS"/*.json; do
+    nsid=$(jq -r .id "$f")
+    goat_saved record get "at://$DID/com.atproto.lexicon.schema/$nsid" >/dev/null 2>&1 || missing+=("$nsid")
+  done
+  ((${#missing[@]} == 0)) || die "not published: ${missing[*]}"
   got=$(goat_saved record get "$uri")
   [[ $(jq -r '.value.defs.main.type // .defs.main.type' <<<"$got") == space ]] || die "$uri didn't come back as a space type"
-  say "ok: servers can now find $SPACE_NSID"
+  say "ok: servers can now find every garden.engram lexicon, including $SPACE_NSID"
 fi
