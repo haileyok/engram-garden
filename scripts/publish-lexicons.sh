@@ -35,9 +35,6 @@ DRY_RUN=0
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
-run() {
-  if ((DRY_RUN)); then say "  would run: $*"; else "$@"; fi
-}
 
 for tool in goat jq curl; do
   command -v "$tool" >/dev/null || die "$tool isn't installed"
@@ -102,35 +99,46 @@ goat_saved() {
     -u ATP_AUTH_USERNAME -u ATP_AUTH_PASSWORD -u ATP_AUTH_FACTOR_TOKEN goat "$@"
 }
 
-# 3. The record and query lexicons. goat can't read a space type yet, so that
-# one is written below as a plain record.
-files=()
+# 3. Every lexicon, written as a com.atproto.lexicon.schema record whose key is
+# its NSID, and only when it differs from what is already there.
+#
+# `goat lex publish` isn't used. It first parses every schema already in the
+# repo for the same NSID group, and a goat that doesn't know the space type
+# refuses to run once garden.engram.space has been published
+# ("unexpected schema type: space"), which would make this script fail on every
+# run after the first.
+space_uri="at://$DID/com.atproto.lexicon.schema/$SPACE_NSID"
+# normalize prints a record without its $type and without goat's wrapper, keys
+# in a fixed order, so what is published can be compared with a lexicon file.
+normalize() {
+  jq -S 'if (.value | type) == "object" and has("uri") then .value else . end | del(."$type")'
+}
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+n_created=0 n_updated=0 n_unchanged=0
+say "Publishing $(ls "$LEXICONS"/*.json | wc -l | tr -d ' ') lexicons"
 for f in "$LEXICONS"/*.json; do
-  [[ $(basename "$f" .json) == "${SPACE_NSID##*.}" ]] || files+=("$f")
-done
-say "Publishing ${#files[@]} lexicons"
-# goat checks the DNS with this machine's resolver, which may still remember an
-# earlier "not found" and make it skip every lexicon without an error. The
-# record was checked against the domain's nameserver above.
-run goat_saved lex publish --skip-dns-check --update "${files[@]}"
-
-# 4. The space type declaration.
-say "Publishing $SPACE_NSID"
-record=$(jq '{"$type": "com.atproto.lexicon.schema"} + .' "$LEXICONS/${SPACE_NSID##*.}.json")
-uri="at://$DID/com.atproto.lexicon.schema/$SPACE_NSID"
-if ((DRY_RUN)); then
-  say "  would write $uri:"
-  say "$record" | sed 's/^/    /'
-else
-  tmp=$(mktemp)
-  trap 'rm -f "$tmp"' EXIT
-  printf '%s\n' "$record" >"$tmp"
-  if goat_saved record get "$uri" >/dev/null 2>&1; then
-    goat_saved record update --no-validate --rkey "$SPACE_NSID" "$tmp"
-  else
-    goat_saved record create --no-validate --rkey "$SPACE_NSID" "$tmp"
+  nsid=$(jq -r .id "$f")
+  if ((DRY_RUN)); then
+    say "  would publish $nsid (written only if it differs from what is there)"
+    continue
   fi
-fi
+  uri="at://$DID/com.atproto.lexicon.schema/$nsid"
+  if got=$(goat_saved record get "$uri" 2>/dev/null); then
+    if [[ $(normalize <<<"$got") == "$(normalize <"$f")" ]]; then
+      n_unchanged=$((n_unchanged + 1))
+      continue
+    fi
+    action=update
+  else
+    action=create
+  fi
+  jq '{"$type": "com.atproto.lexicon.schema"} + .' "$f" >"$tmp"
+  goat_saved record "$action" --no-validate --rkey "$nsid" "$tmp" >/dev/null || die "couldn't $action $nsid"
+  say "  ${action}d $nsid"
+  if [[ $action == update ]]; then n_updated=$((n_updated + 1)); else n_created=$((n_created + 1)); fi
+done
+((DRY_RUN)) || say "  $n_created created, $n_updated updated, $n_unchanged unchanged"
 
 # 5. Read every lexicon back the way a PDS would, so a lexicon that was
 # skipped doesn't go unnoticed.
@@ -144,7 +152,7 @@ else
     goat_saved record get "at://$DID/com.atproto.lexicon.schema/$nsid" >/dev/null 2>&1 || missing+=("$nsid")
   done
   ((${#missing[@]} == 0)) || die "not published: ${missing[*]}"
-  got=$(goat_saved record get "$uri")
-  [[ $(jq -r '.value.defs.main.type // .defs.main.type' <<<"$got") == space ]] || die "$uri didn't come back as a space type"
+  got=$(goat_saved record get "$space_uri")
+  [[ $(jq -r '.value.defs.main.type // .defs.main.type' <<<"$got") == space ]] || die "$space_uri didn't come back as a space type"
   say "ok: servers can now find every garden.engram lexicon, including $SPACE_NSID"
 fi
