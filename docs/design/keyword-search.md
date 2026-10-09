@@ -460,12 +460,28 @@ filters and the candidate heap will be slower, and is measured alongside.
 | `vector`, no `q` | `vector` | Today's search | yes |
 | `vector` and `q` | `hybrid` | Both, fused | yes |
 | `q` only, service embeds queries | `hybrid` | Server embeds `q`, then both | yes |
-| `q` only, service doesn't embed | error, as today | `ModelNotHosted` / `TextSearchNotAllowed` | — |
+| `q` only, service doesn't embed | `keyword` (fallback) | Keyword only | no |
 | `q`, `mode=keyword` | — | Keyword only, no embedding | no |
 | `mode=vector` with `q` | — | Today's search, `q` ignored | yes |
 
-- `mode=keyword` without `q`, or `mode=hybrid` without any way to get a
-  vector, is `InvalidRequest`. An unknown mode is `InvalidRequest`.
+- **Hybrid is the default** whenever there's a query text and a vector (sent
+  or embedded by the service). Existing clients send both, so they get
+  hybrid ranking on deploy with no change.
+- **Falling back to keyword.** When only `q` is sent and the service can't
+  embed it (it doesn't embed queries, doesn't run the space's model, or
+  doesn't embed for this authority), the search runs in keyword mode
+  instead of answering `InvalidRequest`, `ModelNotHosted` or
+  `TextSearchNotAllowed`. Clients without a model, such as the Claude
+  connector, get keyword results rather than an error. `EmbedderBusy` stays
+  a retryable error: it's momentary, and keyword results would be a silent
+  downgrade. If the space's keyword index isn't complete either, the
+  original embedding error is returned, since nothing can run.
+- The response gains `mode`, the mode that actually ran, so a client can
+  tell a fallback from a hybrid search and say so (for example, "keyword
+  matches only: this service can't embed queries for this space").
+- `mode=keyword` without `q`, `mode=hybrid` or `mode=vector` without any
+  way to get a vector, and an unknown mode are `InvalidRequest`. An
+  explicit `mode=hybrid` or `mode=vector` never falls back.
 - **Keyword mode searches the active index.** It needs no query vector, but
   it searches the same memories as any other mode: those whose vector
   matches the space's active model. A memory without a usable vector isn't
@@ -544,6 +560,27 @@ The response also gains `approximateReasons` (see
   `engram-mcp` and the Python client, for one space and several.
 - The web app can highlight matched terms from the byte ranges.
 
+### What tells agents and people about search
+
+Hybrid becomes the default, so everything that describes recall as
+semantic or vector-only changes in the same release that turns it on:
+
+- **`engram recall`** (`cmd/engram/cli.go`): a `-mode` flag; output shows
+  matched terms and, after a fallback, which mode ran.
+- **`engram-mcp`'s `recall` tool** (`internal/mcpserver/server.go`) and the
+  **Claude connector's** (`internal/web/connector_tools.go`): both
+  descriptions say "Semantic search … describe what you're looking for in
+  natural language". They become: search by meaning *and* exact words, so
+  include the identifiers, names, error messages or paths you know; the
+  output explains each match. They also gain the `mode` parameter.
+- **The agent guide** (`web/public/AGENTS.md`): how to write recall
+  queries (natural language plus exact terms), what the matched terms
+  mean, and that the connector now falls back to keyword results instead
+  of a `ModelNotHosted` note.
+- **The repository's `AGENTS.md`, the README and `python/README.md`:**
+  where they describe search, the analyzer and keyword index (for people
+  changing the code), and the new parameters and fields.
+
 ## Analyzer and format changes
 
 A space's keyword index is either complete in one analyzer version or not
@@ -610,6 +647,21 @@ first.
   frequency distribution, and some near-duplicates, so exact-identifier
   queries face millions of distractors.
 
+### Running it
+
+The evaluation runs on a developer's machine, not on the appview:
+`engram-eval` reads the spaces through the normal client, builds the
+index in memory, and uses a local model (Ollama) for generating queries and
+grading. Nothing it reads or produces leaves the machine, and its outputs
+(queries, judgments, reports) stay out of the repository except for
+aggregate numbers quoted in PRs.
+
+**Real recall queries** come from an opt-in local log in `engram-mcp`
+(`ENGRAM_QUERY_LOG=<path>`): each recall's query text, space and the
+returned memory ids, appended to a file on the agent's own machine. The
+appview never logs query text. The eval reads that file as an extra query
+set, judged the same way as the generated ones.
+
 ### Queries and judgments
 
 Queries come in categories, because a single average hides regressions:
@@ -659,8 +711,9 @@ On the held-out set:
    opaque detection, normalization, length bounding, stemming, and golden
    tests from real memories, including camelCase, acronyms, accents in both
    Unicode forms, DIDs and long URLs.
-2. **Evaluation harness** with an in-memory index: tune weights and fusion,
-   measure candidate recall.
+2. **Evaluation harness** (`cmd/engram-eval`, run locally) with an
+   in-memory index, and the opt-in query log in `engram-mcp`: tune weights
+   and fusion, measure candidate recall.
 3. **Postings format** (`internal/segment`): version 2 sections, writer
    with bounded memory, reader, dynamic pruning. Randomized tests check that
    pruned top-k equals exhaustive top-k, including *tf* over 255, every
@@ -669,10 +722,15 @@ On the held-out set:
 4. **Per-space store** (`internal/spacestore`): buffer index, statistics
    snapshot, completed candidate scores, fusion, budgets, query-aware
    loading, parallel range reads, coverage and rewrites.
-5. **API and clients:** `mode`, `match`, `approximateReasons`,
-   `keywordCoverage`, `KeywordIndexBuilding`; rank-preserving merges in both
-   `Spaces.Recall`; `engram-mcp` output; web highlighting.
-6. **Rollout:** reader release, writers behind the option, rewriting.
+5. **API and clients:** `mode` (with the keyword fallback), `match`,
+   `approximateReasons`, `keywordCoverage`, `KeywordIndexBuilding`;
+   rank-preserving merges in both `Spaces.Recall`; the CLI, `engram-mcp`
+   and connector tools; web highlighting.
+6. **Documentation**, in the release that turns hybrid on: tool
+   descriptions, `web/public/AGENTS.md`, the repository's `AGENTS.md`, the
+   READMEs (see
+   [What tells agents and people about search](#what-tells-agents-and-people-about-search)).
+7. **Rollout:** reader release, writers behind the option, rewriting.
 
 ## Later
 
@@ -701,17 +759,6 @@ On the held-out set:
 ## Open questions
 
 - Rank fusion or a tuned combination: decided by the evaluation.
-- Whether `hybrid` should become the default for clients that send `q`
-  today, or only when they ask for it. Defaulting to it is the point, but
-  it changes existing agents' results on deploy.
-- Whether a `q`-only request to a service that doesn't embed queries should
-  fall back to keyword mode instead of answering `ModelNotHosted`. That
-  would help clients without a model (such as the Claude connector) on
-  services that don't embed queries, but it turns an error that tells
-  clients to embed into weaker results.
-- Where real recall queries for the evaluation come from. The appview
-  doesn't log query text, and shouldn't by default; an opt-in local log in
-  `engram-mcp` is one option.
 - Whether to drop the exact-form terms for words whose stem equals the word
   (most short words), answering those from the stem's postings. That would
   cut postings by perhaps a fifth at some cost in simplicity.
