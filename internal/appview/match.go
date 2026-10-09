@@ -4,6 +4,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/haileyok/engram-garden/internal/spacestore"
@@ -217,7 +218,7 @@ func snippet(h spacestore.Hit, spans []fieldSpan) *snippetView {
 	}
 	sv := &snippetView{Field: field.String(), Text: prefix + strings.TrimSpace(src[start:end]) + suffix, Highlights: []byteRange{}}
 	// Offsets shift by the prefix and by any leading space trimmed.
-	shift := len(prefix) - (len(src[start:end]) - len(strings.TrimLeft(src[start:end], " \t\n")))
+	shift := len(prefix) - (len(src[start:end]) - len(strings.TrimLeftFunc(src[start:end], unicode.IsSpace))) // the same trim as TrimSpace
 	seen := map[[2]int]bool{}
 	for _, s := range in {
 		if s.start < start || s.end > end || seen[[2]int{s.start, s.end}] {

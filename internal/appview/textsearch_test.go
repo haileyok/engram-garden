@@ -2,6 +2,7 @@ package appview
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"sync"
 	"testing"
@@ -156,6 +157,23 @@ func TestTextSearchModelNotHosted(t *testing.T) {
 	// A caller with its own vector doesn't need the service's model.
 	if status, body := f.get(t, f.alice, serviceDID, "garden.engram.searchMemories", searchParams(f.net.Space, "deploy")); status != 200 {
 		t.Fatalf("search with a vector: %d %v", status, body)
+	}
+}
+
+// broken is a provider whose embedder is failing.
+type broken struct{}
+
+func (broken) For(context.Context, lex.ModelInfo) (embed.Embedder, error) {
+	return nil, errors.New("embedding service unreachable")
+}
+
+func TestTextSearchFailingEmbedderDoesNotFallBack(t *testing.T) {
+	t.Parallel()
+	f := textSearchFixture(t, &QueryEmbedder{Provider: broken{}})
+	// A failure that may pass is an error, not keyword-only results.
+	status, body := f.get(t, f.alice, serviceDID, "garden.engram.searchMemories", textQuery(f.net.Space, "deploy"))
+	if status < 500 || body["mode"] != nil {
+		t.Fatalf("failing embedder: %d %v", status, body)
 	}
 }
 
