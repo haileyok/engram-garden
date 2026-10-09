@@ -10,8 +10,9 @@ type BM25 struct {
 	K1, B float64
 }
 
-// DefaultBM25 are the starting parameters.
-var DefaultBM25 = BM25{K1: 1.2, B: 0.75}
+// DefaultBM25 was tuned with DefaultWeights. A lower b than the usual 0.75
+// penalizes long memories less.
+var DefaultBM25 = BM25{K1: 1.2, B: 0.4}
 
 // IDF is Lucene's BM25 inverse document frequency for a term in df of n
 // memories. It is always positive, which score bounds rely on.

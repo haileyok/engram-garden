@@ -258,7 +258,7 @@ func vals(q *Query, m map[string]float64) []float64 {
 
 func TestScoreTakesTheBestAlternative(t *testing.T) {
 	t.Parallel()
-	w := DefaultWeights
+	w := Weights{Exact: 1.0, Stem: 0.5, Parts: 0.4, PartStem: 0.5}
 	q := ParseQuery("running")
 	// Exact 1.0 and stem 0.8: the token contributes 1.0, not 1.8.
 	if got := q.Score(w, vals(&q, map[string]float64{"running": 1, "~run": 1.6})); got != 1 {

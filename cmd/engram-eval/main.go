@@ -51,6 +51,7 @@ commands:
   import     copy a JSONL corpus (-in) and set its model (-model, -dims, ...)
   gen        generate queries with the chat model (-n memories, -noanswer rounds, -log file)
   judge      grade the pooled results of every system
+  tune       search keyword weights, BM25 and fusion on the tuning split (tuned.json)
   report     tune fusion on the tuning split and report the held-out split
   run        gen, judge and report
   sample     write N model-graded pairs to grade by hand (handgrades.csv)
@@ -115,6 +116,8 @@ func run(ctx context.Context, cmd string, args []string) error {
 		return judge(ctx, o)
 	case "report":
 		return report(ctx, o)
+	case "tune":
+		return tune(ctx, o)
 	case "run":
 		for _, f := range []func(context.Context, opts) error{gen, judge, report} {
 			if err := f(ctx, o); err != nil {
@@ -331,11 +334,31 @@ func judge(ctx context.Context, o opts) error {
 	if err != nil {
 		return err
 	}
+	all := systems()
+	if c, ok, err := tuned(o); err != nil {
+		return err
+	} else if ok {
+		all = append(all, c.System("hybrid-tuned"))
+	}
+	_, err = judgeSystems(ctx, o, e, js, all)
+	return err
+}
+
+// tuned reads the config tune chose, if any.
+func tuned(o opts) (eval.Config, bool, error) {
+	var c eval.Config
+	ok, err := eval.ReadJSON(path(o, "tuned.json"), &c)
+	return c, ok, err
+}
+
+// judgeSystems grades every pooled memory of systems that has no grade
+// yet, saves the judgments and returns them.
+func judgeSystems(ctx context.Context, o opts, e *eval.Experiment, js []eval.Judgment, all []eval.System) ([]eval.Judgment, error) {
 	l, err := llm(o)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	r := e.Run(systems(), o.depth)
+	r := e.Run(all, o.depth)
 	pool := e.Pool(r, o.depth)
 	grades := e.Grades(js)
 	var mu sync.Mutex
@@ -371,10 +394,48 @@ func judge(ctx context.Context, o opts) error {
 	}
 	wg.Wait()
 	if err := eval.WriteJSONL(path(o, "judgments.jsonl"), js); err != nil {
-		return err
+		return nil, err
 	}
 	fmt.Printf("%d judgments\n", len(js))
-	return firstErr
+	return js, firstErr
+}
+
+// tune searches the grid on the tuning split, grades what the best few
+// configs surface that nobody graded (ungraded memories count as not
+// relevant, which would favor the configs the pool came from), searches
+// again and saves the winner to tuned.json.
+func tune(ctx context.Context, o opts) error {
+	e, js, err := experiment(ctx, o)
+	if err != nil {
+		return err
+	}
+	configs := eval.DefaultGrid.Configs()
+	fmt.Printf("trying %d configs on %d tuning queries\n", len(configs), len(e.TuningQueries(e.Grades(js))))
+	ranked := e.Evaluate(configs, e.Grades(js))
+	const top = 5
+	var best []eval.System
+	for _, s := range ranked[:min(top, len(ranked))] {
+		fmt.Printf("  %.4f  %s\n", s.Macro, s.Config.Name())
+		best = append(best, s.Config.System(""))
+	}
+	if js, err = judgeSystems(ctx, o, e, js, best); err != nil {
+		return err
+	}
+	ranked = e.Evaluate(configs, e.Grades(js))
+	fmt.Println("after grading what they surfaced:")
+	for _, s := range ranked[:min(top, len(ranked))] {
+		fmt.Printf("  %.4f  %s\n", s.Macro, s.Config.Name())
+	}
+	win := ranked[0]
+	cats := make([]string, 0, len(win.PerCategory))
+	for c := range win.PerCategory {
+		cats = append(cats, c)
+	}
+	slices.Sort(cats)
+	for _, c := range cats {
+		fmt.Printf("    %-11s %.3f\n", c, win.PerCategory[c])
+	}
+	return eval.WriteJSON(path(o, "tuned.json"), win.Config)
 }
 
 func report(ctx context.Context, o opts) error {
@@ -385,11 +446,18 @@ func report(ctx context.Context, o opts) error {
 	grades := e.Grades(js)
 	tune := e.Tune(grades, alphas)
 	all := systems()
-	r := e.Run(all, 10)
 	names := []string{"vector", "keyword", "hybrid-rrf"}
 	if tune.Name != "hybrid-rrf" {
 		names = append(names, tune.Name)
 	}
+	if c, ok, err := tuned(o); err != nil {
+		return err
+	} else if ok {
+		all = append(all, c.System("hybrid-tuned"))
+		names = append(names, "hybrid-tuned")
+		fmt.Printf("hybrid-tuned is %s\n", c.Name())
+	}
+	r := e.Run(all, 10)
 	var b strings.Builder
 	fmt.Fprintf(&b, "# engram-eval report\n\n%d memories, %d queries, %d judgments.\n\n", len(e.Ix.Mems), len(e.Queries), len(js))
 	answerableNoAnswer := 0
