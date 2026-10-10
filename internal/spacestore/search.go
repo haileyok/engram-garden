@@ -42,6 +42,10 @@ type SearchResult struct {
 	// KeywordOnly is set for a keyword-only search: hits have no
 	// similarity.
 	KeywordOnly bool
+	// TermIDF is the inverse document frequency of each term of the parsed
+	// query text (text.ParseQuery's Terms), over the whole space; set when
+	// keyword scores took part. A small value means the term is common.
+	TermIDF []float64
 }
 
 type cand struct {
@@ -206,7 +210,7 @@ func (s *Space) search(ctx context.Context, q SearchQuery, start time.Time) (*Se
 			}
 			return nil, ErrKeywordIndexBuilding
 		}
-		cands, err := s.addKeyword(hardCtx, &pq, q.Filter, segs, bufKW, pending, published, nil, 0, nil, limit)
+		cands, idf, err := s.addKeyword(hardCtx, &pq, q.Filter, segs, bufKW, pending, published, nil, 0, nil, limit)
 		if err != nil {
 			if hardCtx.Err() != nil {
 				return nil, ErrRetryable
@@ -219,7 +223,11 @@ func (s *Space) search(ctx context.Context, q SearchQuery, start time.Time) (*Se
 			}
 			return cands[a].id < cands[b].id
 		})
-		return s.results(hardCtx, cands[:min(limit, len(cands))], false, true, true)
+		res, err := s.results(hardCtx, cands[:min(limit, len(cands))], false, true, true)
+		if res != nil {
+			res.TermIDF = idf
+		}
+		return res, err
 	}
 
 	dims := sl.model.Dims
@@ -302,9 +310,10 @@ func (s *Space) search(ctx context.Context, q SearchQuery, start time.Time) (*Se
 	cands := []cand(*h)
 
 	// 1b. Hybrid: add the keyword candidates and complete both scores.
+	var termIDF []float64
 	if hybrid {
 		var err error
-		if cands, err = s.addKeyword(hardCtx, &pq, q.Filter, segs, bufKW, pending, published, qbits, dims, cands, ncand); err != nil {
+		if cands, termIDF, err = s.addKeyword(hardCtx, &pq, q.Filter, segs, bufKW, pending, published, qbits, dims, cands, ncand); err != nil {
 			if hardCtx.Err() != nil {
 				return nil, ErrRetryable
 			}
@@ -366,7 +375,11 @@ func (s *Space) search(ctx context.Context, q SearchQuery, start time.Time) (*Se
 		cands = cands[:limit]
 	}
 
-	return s.results(hardCtx, cands, approximate, hybrid, false)
+	res, err := s.results(hardCtx, cands, approximate, hybrid, false)
+	if res != nil {
+		res.TermIDF = termIDF
+	}
+	return res, err
 }
 
 // results fetches the documents of ranked candidates and builds hits.

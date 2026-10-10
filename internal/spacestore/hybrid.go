@@ -76,7 +76,7 @@ func keyID(k candKey) uint32 {
 // score, and each keyword-only candidate's 1-bit distance (its int8
 // cosine comes from the re-rank, like everyone's).
 func (s *Space) addKeyword(ctx context.Context, pq *text.Query, f Filter, segs []*seg, buf bufSnapshot,
-	pending map[uint32]struct{}, published *roaring.Bitmap, qbits []byte, dims int, cands []cand, ncand int) ([]cand, error) {
+	pending map[uint32]struct{}, published *roaring.Bitmap, qbits []byte, dims int, cands []cand, ncand int) ([]cand, []float64, error) {
 	// Space-wide statistics: every segment and the buffer, filters aside.
 	type segTerms struct {
 		sg    *seg
@@ -112,10 +112,10 @@ func (s *Space) addKeyword(ctx context.Context, pq *text.Query, f Filter, segs [
 	}
 	wg.Wait()
 	if firstErr != nil {
-		return nil, firstErr
+		return nil, nil, firstErr
 	}
 	if n == 0 {
-		return cands, nil
+		return cands, nil, nil
 	}
 	avg := float64(total) / float64(n)
 	idf := make([]float64, len(pq.Terms))
@@ -139,7 +139,7 @@ func (s *Space) addKeyword(ctx context.Context, pq *text.Query, f Filter, segs [
 			}
 			p, err := st.sg.rd.Postings(ctx, st.sg.kw, ti)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			kq.Postings[t] = p
 		}
@@ -153,7 +153,7 @@ func (s *Space) addKeyword(ctx context.Context, pq *text.Query, f Filter, segs [
 			return !s.isDeleted(sg.ix.ID(row), pending, published) && sf.match(sg.ix, row)
 		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, h := range top {
 			hits = append(hits, kwHit{candKey{seg: sg, row: h.Row}, h.Score})
@@ -213,7 +213,7 @@ func (s *Space) addKeyword(ctx context.Context, pq *text.Query, f Filter, segs [
 		default:
 			b, err := c.seg.rd.BitsRange(ctx, c.row, c.row+1)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			c.dist = vec.Hamming(qbits, b)
 		}
@@ -243,13 +243,13 @@ func (s *Space) addKeyword(ctx context.Context, pq *text.Query, f Filter, segs [
 		}
 		scores, err := segment.ScoreRows(kqOf[sg], sg.kw, rows)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for k, i := range idxs {
 			cands[i].kw, cands[i].hasKW = scores[k], true
 		}
 	}
-	return cands, nil
+	return cands, idf, nil
 }
 
 // fuse orders candidates by a convex combination of their min-max
