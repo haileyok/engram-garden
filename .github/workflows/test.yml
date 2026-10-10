@@ -32,6 +32,16 @@ jobs:
       # Go verifies what Python signed and encoded (python/tests/fixtures/python.json).
       - run: go test -count=1 -run 'TestPythonFixtures' ./internal/lex/
 
+  # The Nix package (engram, engram-mcp) that dotfiles install. Fails when
+  # go.mod or go.sum change without updating vendorHash in flake.nix.
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - run: nix build .#engram --print-build-logs
+      - run: ./result/bin/engram help && test -x ./result/bin/engram-mcp
+
   web:
     runs-on: ubuntu-latest
     steps:
