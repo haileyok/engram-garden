@@ -375,30 +375,8 @@ func (s *Space) maintainLocked(ctx context.Context) error {
 			return fmt.Errorf("merging: %w", err)
 		}
 	}
-	// Rewrite segments without a current keyword index, independently of
-	// the merge triggers (a space with few segments and no deletions would
-	// never merge), at most once per RewriteInterval.
-	s.mu.RLock()
-	rewrite := opt.KeywordWrite && !s.readOnly && !s.spaceGone && s.n.now().Sub(s.lastRewrite) >= opt.RewriteInterval
-	if rewrite {
-		rewrite = false
-		for _, sl := range s.slots {
-			if sl != nil && len(uncovered(sl.segs)) > 0 {
-				rewrite = true
-			}
-		}
-	}
-	s.mu.RUnlock()
-	if rewrite {
-		start := time.Now()
-		err := s.mergeLocked(ctx, true)
-		observeMaintenance("rewrite", start, err)
-		s.mu.Lock()
-		s.lastRewrite = s.n.now()
-		s.mu.Unlock()
-		if err != nil {
-			return fmt.Errorf("rewriting segments with a keyword index: %w", err)
-		}
+	if err := s.rewriteLocked(ctx); err != nil {
+		return err
 	}
 	if gcDue {
 		start := time.Now()
@@ -409,6 +387,51 @@ func (s *Space) maintainLocked(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// rewriteDue reports whether the space has segments without a current
+// keyword index and may rewrite them now (with KeywordWrite, at most once
+// per RewriteInterval).
+func (s *Space) rewriteDue() bool {
+	opt := s.n.opt
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !opt.KeywordWrite || s.readOnly || s.spaceGone || s.n.now().Sub(s.lastRewrite) < opt.RewriteInterval {
+		return false
+	}
+	for _, sl := range s.slots {
+		if sl != nil && len(uncovered(sl.segs)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// rewriteLocked rewrites segments without a current keyword index, if due.
+// It runs independently of the merge triggers: a space with few segments
+// and no deletions would never merge.
+func (s *Space) rewriteLocked(ctx context.Context) error {
+	if !s.rewriteDue() {
+		return nil
+	}
+	start := time.Now()
+	err := s.mergeLocked(ctx, true)
+	observeMaintenance("rewrite", start, err)
+	s.mu.Lock()
+	s.lastRewrite = s.n.now()
+	s.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("rewriting segments with a keyword index: %w", err)
+	}
+	return nil
+}
+
+// rewriteIdle rewrites a space that has nothing to flush, so a space nobody
+// writes to still gets a keyword index.
+func (s *Space) rewriteIdle(ctx context.Context) error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	return s.rewriteLocked(ctx)
 }
 
 // mergeInputs picks the segments of one slot to merge, or nil.

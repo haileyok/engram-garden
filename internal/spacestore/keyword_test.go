@@ -203,6 +203,47 @@ func TestHybridCompletesVectorOnlyScores(t *testing.T) {
 	}
 }
 
+// A space with nothing to flush still gets rewritten: the appview's
+// periodic Tick runs the rewrite, not only flushes.
+func TestTickRewritesIdleSpace(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFixture(t)
+	old := f.node()
+	configure(t, old, SpaceConfig{ModelInfo: modelA})
+	for i, m := range []Memory{mem("did:plc:alice", "a1", "engram_space_uri lives in memory_config"), mem("did:plc:alice", "a2", "deploys go through argo")} {
+		if err := old.ApplyRepoChanges(ctx, testSpace, "did:plc:alice", pos(fmt.Sprint("r", i)), []Memory{m}, nil, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := old.Flush(ctx, testSpace); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q := SearchQuery{Vector: embedFor(modelA, "engram_space_uri"), Model: modelA, Limit: 5, Text: "engram_space_uri"}
+
+	// Without KeywordWrite, Tick leaves the segments alone.
+	off := f.node()
+	if _, err := off.Search(ctx, testSpace, q); err != nil {
+		t.Fatal(err)
+	}
+	off.Tick(ctx)
+	if len(uncovered(segsOf(t, off))) != 2 {
+		t.Fatal("Tick rewrote segments without KeywordWrite")
+	}
+
+	n := f.node(func(o *Options) { o.KeywordWrite = true; o.RewriteInterval = time.Nanosecond })
+	if res, err := n.Search(ctx, testSpace, q); err != nil || res.Hybrid { // loads the space; nothing to flush
+		t.Fatalf("before Tick: hybrid %v, err %v", res.Hybrid, err)
+	}
+	n.Tick(ctx)
+	if segs := segsOf(t, n); len(uncovered(segs)) != 0 {
+		t.Fatalf("after Tick: %d of %d segments without a keyword index", len(uncovered(segs)), len(segs))
+	}
+	if res, err := n.Search(ctx, testSpace, q); err != nil || !res.Hybrid || len(res.Hits) != 2 || res.Hits[0].Rkey != "a1" {
+		t.Fatalf("after Tick: %+v %v", res, err)
+	}
+}
+
 // Turning on KeywordWrite rewrites a space's version 1 segments, after
 // which its searches become hybrid; the rewrite keeps every memory and
 // drops deleted ones.
