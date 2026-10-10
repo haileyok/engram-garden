@@ -418,7 +418,8 @@ func (n *Node) flushSoon(s *Space) {
 	}()
 }
 
-// Tick flushes spaces whose buffers are full or old, and runs maintenance.
+// Tick flushes spaces whose buffers are full or old, which runs maintenance,
+// and rewrites the other spaces' segments that lack a keyword index.
 // Run calls it periodically.
 func (n *Node) Tick(ctx context.Context) {
 	n.mu.Lock()
@@ -431,9 +432,15 @@ func (n *Node) Tick(ctx context.Context) {
 		s.mu.RLock()
 		due := s.dirty() && (len(s.buf) >= n.opt.FlushCount || n.now().Sub(s.dirtySince) >= n.opt.FlushAge)
 		s.mu.RUnlock()
-		if due {
+		switch {
+		case due:
+			// Flush runs maintenance, including the rewrite.
 			if err := s.Flush(ctx); err != nil {
 				n.log().Warn("flush failed", "space", s.uri, "err", err)
+			}
+		case s.rewriteDue():
+			if err := s.rewriteIdle(ctx); err != nil {
+				n.log().Warn("rewrite failed", "space", s.uri, "err", err)
 			}
 		}
 	}
