@@ -169,17 +169,22 @@ func matchedTerms(pq *text.Query, h spacestore.Hit, idf []float64) ([]termMatch,
 			}
 		}
 	}
-	// Common words (low IDF) match nearly everything and say little about
-	// why this memory was found: show terms below the floor only when
-	// nothing else matched, strongest first.
+	// Common words (low IDF) and question or filler words match many
+	// memories and say little about why this one was found. Leave them
+	// out, strongest term first, unless nothing else matched: then the
+	// strongest term still explains the hit.
 	sort.SliceStable(hits, func(a, b int) bool { return hits[a].w > hits[b].w })
 	terms := []termMatch{}
 	var spans []fieldSpan
-	for i, x := range hits {
-		if i == 0 || x.w >= minTermIDF {
+	for _, x := range hits {
+		if x.w >= minTermIDF && !fillerWords[x.m.Term] {
 			terms = append(terms, x.m)
 			spans = append(spans, x.spans...)
 		}
+	}
+	if len(terms) == 0 && len(hits) > 0 {
+		terms = append(terms, hits[0].m)
+		spans = append(spans, hits[0].spans...)
 	}
 	return terms, spans
 }
@@ -188,6 +193,19 @@ func matchedTerms(pq *text.Query, h spacestore.Hit, idf []float64) ([]termMatch,
 // word that appears in two thirds of a space's memories. It's an absolute
 // floor, so one rare word in the query doesn't hide the others.
 const minTermIDF = 0.4
+
+// fillerWords are question and pronoun words that make natural-language
+// queries read well but rarely say why a memory matched, and are not common
+// enough in a small space for the IDF floor to catch. They only affect the
+// explanation: they are still searched and scored like any other term.
+var fillerWords = map[string]bool{
+	"what": true, "which": true, "who": true, "whom": true, "whose": true,
+	"when": true, "where": true, "why": true, "how": true,
+	"i": true, "we": true, "you": true, "it": true, "they": true,
+	"do": true, "does": true, "did": true, "can": true, "could": true,
+	"should": true, "would": true, "will": true, "was": true, "were": true,
+	"are": true, "be": true, "been": true, "have": true, "has": true, "had": true,
+}
 
 // snippet picks the field with the most matches and a window of it around
 // the first one, with the matches in the window highlighted.
