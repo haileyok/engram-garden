@@ -59,7 +59,7 @@ const snippetBytes = 200
 // results, the query terms it contains (per query token, the exact form if
 // present, else the stem, else the identifier's parts), and a snippet
 // around them.
-func explain(out []memoryView, hits []spacestore.Hit, query, mode string) {
+func explain(out []memoryView, hits []spacestore.Hit, query, mode string, idf []float64) {
 	pq := text.ParseQuery(query)
 	vrank := ranksBy(hits, func(h spacestore.Hit) (float64, bool) { return h.Similarity, h.HasSimilarity })
 	krank := ranksBy(hits, func(h spacestore.Hit) (float64, bool) { return h.Keyword, h.Keyword > 0 })
@@ -71,7 +71,7 @@ func explain(out []memoryView, hits []spacestore.Hit, query, mode string) {
 		if h.HasSimilarity {
 			m.Vector = &vectorMatch{Rank: vrank[i], Similarity: int(max(0, min(1, h.Similarity)) * 1000)}
 		}
-		terms, spans := matchedTerms(&pq, h)
+		terms, spans := matchedTerms(&pq, h, idf)
 		if h.Keyword > 0 {
 			m.Keyword = &keywordMatch{Rank: krank[i], Score: int(math.Round(h.Keyword * 100)), Terms: terms}
 			m.Snippet = snippet(h, spans)
@@ -107,7 +107,7 @@ type fieldSpan struct {
 }
 
 // matchedTerms finds which query terms the memory contains, and where.
-func matchedTerms(pq *text.Query, h spacestore.Hit) ([]termMatch, []fieldSpan) {
+func matchedTerms(pq *text.Query, h spacestore.Hit, idf []float64) ([]termMatch, []fieldSpan) {
 	type occ struct {
 		field text.Field
 		spans []fieldSpan
@@ -141,32 +141,56 @@ func matchedTerms(pq *text.Query, h spacestore.Hit) ([]termMatch, []fieldSpan) {
 	}
 	scan(h.Source, text.FieldSource, 0)
 
-	var terms []termMatch
-	var spans []fieldSpan
-	add := func(term, kind string) bool {
-		o := found[term]
+	type hit struct {
+		m     termMatch
+		spans []fieldSpan
+		w     float64
+	}
+	var hits []hit
+	add := func(i int, kind string) bool {
+		o := found[pq.Terms[i]]
 		if o == nil {
 			return false
 		}
-		terms = append(terms, termMatch{Term: term, Kind: kind, Field: o.field.String()})
-		spans = append(spans, o.spans...)
+		w := 1.0
+		if i < len(idf) {
+			w = idf[i]
+		}
+		hits = append(hits, hit{termMatch{Term: pq.Terms[i], Kind: kind, Field: o.field.String()}, o.spans, w})
 		return true
 	}
 	for _, g := range pq.Groups {
-		if add(pq.Terms[g.Exact], "exact") || g.Stem >= 0 && add(pq.Terms[g.Stem], "stem") {
+		if add(g.Exact, "exact") || g.Stem >= 0 && add(g.Stem, "stem") {
 			continue
 		}
 		for _, p := range g.Parts {
-			if !add(pq.Terms[p.Term], "part") && p.Stem >= 0 {
-				add(pq.Terms[p.Stem], "stem")
+			if !add(p.Term, "part") && p.Stem >= 0 {
+				add(p.Stem, "stem")
 			}
 		}
 	}
-	if terms == nil {
-		terms = []termMatch{}
+	// Common words (low IDF) match nearly everything and say little about
+	// why this memory was found: keep terms with at least a quarter of the
+	// strongest matched term's weight, strongest first.
+	top := 0.0
+	for _, x := range hits {
+		top = max(top, x.w)
+	}
+	sort.SliceStable(hits, func(a, b int) bool { return hits[a].w > hits[b].w })
+	terms := []termMatch{}
+	var spans []fieldSpan
+	for _, x := range hits {
+		if x.w >= minTermShare*top {
+			terms = append(terms, x.m)
+			spans = append(spans, x.spans...)
+		}
 	}
 	return terms, spans
 }
+
+// minTermShare is the least weight, relative to the strongest matched
+// query term, for a term to be shown as a match.
+const minTermShare = 0.25
 
 // snippet picks the field with the most matches and a window of it around
 // the first one, with the matches in the window highlighted.

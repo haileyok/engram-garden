@@ -557,7 +557,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		out[i] = view(spaceURI, m, m.HasSimilarity)
 	}
 	if ran != "vector" {
-		explain(out, res.Hits, text, ran)
+		explain(out, res.Hits, text, ran, res.TermIDF)
 	}
 	body := map[string]any{"memories": out, "mode": ran}
 	if res.Approximate {
