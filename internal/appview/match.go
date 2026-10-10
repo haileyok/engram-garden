@@ -170,17 +170,13 @@ func matchedTerms(pq *text.Query, h spacestore.Hit, idf []float64) ([]termMatch,
 		}
 	}
 	// Common words (low IDF) match nearly everything and say little about
-	// why this memory was found: keep terms with at least a quarter of the
-	// strongest matched term's weight, strongest first.
-	top := 0.0
-	for _, x := range hits {
-		top = max(top, x.w)
-	}
+	// why this memory was found: show terms below the floor only when
+	// nothing else matched, strongest first.
 	sort.SliceStable(hits, func(a, b int) bool { return hits[a].w > hits[b].w })
 	terms := []termMatch{}
 	var spans []fieldSpan
-	for _, x := range hits {
-		if x.w >= minTermShare*top {
+	for i, x := range hits {
+		if i == 0 || x.w >= minTermIDF {
 			terms = append(terms, x.m)
 			spans = append(spans, x.spans...)
 		}
@@ -188,9 +184,10 @@ func matchedTerms(pq *text.Query, h spacestore.Hit, idf []float64) ([]termMatch,
 	return terms, spans
 }
 
-// minTermShare is the least weight, relative to the strongest matched
-// query term, for a term to be shown as a match.
-const minTermShare = 0.25
+// minTermIDF is the least IDF for a term to be shown as a match: about a
+// word that appears in two thirds of a space's memories. It's an absolute
+// floor, so one rare word in the query doesn't hide the others.
+const minTermIDF = 0.4
 
 // snippet picks the field with the most matches and a window of it around
 // the first one, with the matches in the window highlighted.
