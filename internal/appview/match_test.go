@@ -26,15 +26,15 @@ func matchedWords(t *testing.T, query, body string, weight map[string]float64) [
 	return out
 }
 
-// Common words are left out of a result's matched terms, whatever else the
-// result matched, and the rest come strongest first.
+// Common words and question words are left out of a result's matched terms,
+// whatever else the result matched, and the rest come strongest first.
 func TestMatchedTermsSkipCommonWords(t *testing.T) {
 	t.Parallel()
 	weight := map[string]float64{"what": 1.9, "deploy": 0.7, "engram": 0.5, "is": 0.2, "the": 0.01, "for": 0.3}
 	const query = "what is the deploy process for engram"
 
 	got := matchedWords(t, query, "What is the deploy process for engram? It is a compose pull.", weight)
-	if want := []string{"what", "deploy", "engram"}; !slices.Equal(got, want) {
+	if want := []string{"deploy", "engram"}; !slices.Equal(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 	// A result without the strongest word has the same floor.
@@ -60,13 +60,27 @@ func TestMatchedTermsKeepStrongestCommonWord(t *testing.T) {
 	}
 }
 
-// Without weights (a vector-only search) every contained term is shown.
+// A question word is left out of the explanation even when it is rare in
+// the space, but it is the explanation when it is all that matched.
+func TestMatchedTermsFillerWords(t *testing.T) {
+	t.Parallel()
+	weight := map[string]float64{"we": 2.6, "how": 1.6, "web": 0.9, "deploy": 0.7}
+	got := matchedWords(t, "how do we deploy the web image", "how we deploy the web", weight)
+	if want := []string{"web", "deploy"}; !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	got = matchedWords(t, "how do we deploy", "we know how", weight)
+	if want := []string{"we"}; !slices.Equal(got, want) {
+		t.Fatalf("only filler matched: got %v, want %v", got, want)
+	}
+}
+
+// Without weights (every term weighs the same) only question words are
+// left out.
 func TestMatchedTermsUnweighted(t *testing.T) {
 	t.Parallel()
 	got := matchedWords(t, "what is the for", "what is the point of it for", nil)
-	for _, w := range []string{"what", "is", "the", "for"} {
-		if !slices.Contains(got, w) {
-			t.Fatalf("%q missing from %v", w, got)
-		}
+	if want := []string{"is", "the", "for"}; !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
 	}
 }

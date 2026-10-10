@@ -162,9 +162,12 @@ what lets a query for "space uri" find the identifier.
   opaque tokens, CJK bigrams), not the number of terms emitted. Identifier-
   heavy text is then not penalized as "long" for emitting parts and stems,
   and length doesn't change when expansion rules change.
-- **No stopword list.** Common words get a low IDF. A stopword list would
-  break queries like `the Who`. Their cost is bounded by
-  [query limits](#limits-and-budgets), not by pretending they're free.
+- **No stopword list in search.** Common words get a low IDF. A stopword
+  list would break queries like `the Who`. Their cost is bounded by
+  [query limits](#limits-and-budgets), not by pretending they're free. (The
+  match explanation does skip common and question words, but only when
+  showing terms, never when searching or scoring; see
+  [Why each result matched](#why-each-result-matched).)
 
 ### Versioning
 
@@ -667,9 +670,14 @@ scaled integers, like the existing `similarity` (cosine × 1000):
 ```
 
 - `keyword.score` is the BM25 score × 100. `kind` is how the memory's term
-  matched (`exact`, `stem`, `part`). `terms` lists exactly the terms that
-  contributed to the score, the winning alternative of each query token, so
-  the explanation reproduces the score.
+  matched (`exact`, `stem`, `part`). `terms` lists the terms that
+  contributed to the score, the winning alternative of each query token,
+  strongest first. It leaves out words that say little about why the memory
+  matched: terms whose IDF is under 0.4 (about a word in two thirds of the
+  space's memories), and question and pronoun words such as `what`, `how`,
+  `we` and `did`. If every matched term is left out, the strongest one is
+  kept. The explanation therefore doesn't reproduce the score; the ranking
+  is unaffected.
 - `vector` is absent in keyword mode, and for a keyword-only candidate
   whose vector side ran late. `keyword` is absent when no query term
   occurs.
