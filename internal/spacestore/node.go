@@ -126,12 +126,15 @@ type Node struct {
 
 	mu     sync.Mutex
 	spaces map[string]*Space
+	closed bool // under mu: Close has begun, so no new loads start
 	loads  singleflight.Group
-	remote counter
+	// loading counts space loads in progress, which carry on after their
+	// callers give up; Close waits for them.
+	loading sync.WaitGroup
+	remote  counter
 
 	flushing sync.Map // *Space -> struct{}: a background flush is queued
 	bg       sync.WaitGroup
-	closed   chan struct{}
 }
 
 // New starts a node.
@@ -140,7 +143,7 @@ func New(opt Options) (*Node, error) {
 		return nil, errors.New("spacestore: Blob is required")
 	}
 	opt.defaults()
-	n := &Node{opt: opt, spaces: map[string]*Space{}, closed: make(chan struct{})}
+	n := &Node{opt: opt, spaces: map[string]*Space{}}
 	if opt.CacheDir != "" {
 		n.cache = newDiskCache(opt.CacheDir, opt.CacheBytes)
 	}
@@ -179,6 +182,16 @@ func (n *Node) space(ctx context.Context, spaceURI string) (*Space, error) {
 		return s, nil
 	}
 	ch := n.loads.DoChan(spaceURI, func() (any, error) {
+		// Counted under mu, so Close either waits for this load or it
+		// never starts.
+		n.mu.Lock()
+		if n.closed {
+			n.mu.Unlock()
+			return nil, ErrClosed
+		}
+		n.loading.Add(1)
+		n.mu.Unlock()
+		defer n.loading.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		start := time.Now()
@@ -461,9 +474,15 @@ func (n *Node) Run(ctx context.Context, every time.Duration) {
 	}
 }
 
-// Close flushes every dirty space and waits for background work.
+// Close waits for background work, including space loads whose callers
+// gave up, then flushes every dirty space. Loads asked for afterwards
+// return ErrClosed.
 func (n *Node) Close(ctx context.Context) error {
 	defer liveNodes.Delete(n)
+	n.mu.Lock()
+	n.closed = true
+	n.mu.Unlock()
+	n.loading.Wait()
 	n.bg.Wait()
 	n.mu.Lock()
 	spaces := make([]*Space, 0, len(n.spaces))

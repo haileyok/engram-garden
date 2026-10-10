@@ -534,6 +534,54 @@ func TestFencing(t *testing.T) {
 	}
 }
 
+// heldBlob holds List calls, which a space load starts with, until
+// released.
+type heldBlob struct {
+	blob.Store
+	listing chan struct{} // receives once per List call
+	release chan struct{}
+}
+
+func (h *heldBlob) List(ctx context.Context, prefix string) ([]blob.Object, error) {
+	h.listing <- struct{}{}
+	<-h.release
+	return h.Store.List(ctx, prefix)
+}
+
+// A load carries on after its caller gives up; Close waits for it, and no
+// load starts after Close.
+func TestCloseWaitsForLoads(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	held := &heldBlob{Store: f.blob, listing: make(chan struct{}, 1), release: make(chan struct{})}
+	f.blob = held
+	n := f.node()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	gaveUp := make(chan error, 1)
+	go func() { gaveUp <- n.Flush(ctx, testSpace) }()
+	<-held.listing // the load is under way
+	cancel()
+	if err := <-gaveUp; !errors.Is(err, context.Canceled) {
+		t.Fatalf("caller: %v", err)
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- n.Close(context.Background()) }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned while a load was running: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(held.release)
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Flush(context.Background(), "at://did:plc:other/space/garden.engram.space/x"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("load after Close: %v", err)
+	}
+}
+
 // slowBlob delays range reads above a size while enabled.
 type slowBlob struct {
 	blob.Store

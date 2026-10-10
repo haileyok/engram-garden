@@ -33,6 +33,8 @@ var (
 	// ErrKeywordIndexBuilding answers a keyword-only search of a space whose
 	// segments don't all have a keyword index yet.
 	ErrKeywordIndexBuilding = errors.New("the space's keyword index is still being built")
+	// ErrClosed reports a space asked for after the node began closing.
+	ErrClosed = errors.New("the store is closed")
 	// ErrOverLimit reports changes held back by a per-space limit.
 	ErrOverLimit = errors.New("space is over a limit; some memories were not indexed")
 	// ErrRateLimited reports too many searches for one space.
