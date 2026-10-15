@@ -17,6 +17,7 @@ import (
 	"github.com/bluesky-social/indigo/atproto/identity"
 
 	"github.com/haileyok/engram-garden/internal/agent"
+	"github.com/haileyok/engram-garden/internal/coord"
 	"github.com/haileyok/engram-garden/internal/embed"
 )
 
@@ -41,6 +42,17 @@ type cli struct {
 	// scopes, without saving the account. It returns the scopes granted, and
 	// end revokes the sign-in.
 	signInFor func(ctx context.Context, handle string, scopes []string, lines <-chan string) (api *atclient.APIClient, granted []string, end func(), err error)
+	// keySignInFor signs a key account in for one task, asking only for
+	// scopes; end revokes the sign-in.
+	keySignInFor func(ctx context.Context, a agent.Account, scopes []string) (api *atclient.APIClient, granted []string, end func(), err error)
+	// rotationKeys looks up a DID's PLC rotation keys.
+	rotationKeys coord.RotationKeys
+	// newAccount creates an account that signs in with a key (default:
+	// agent.CreateKeyAccount).
+	newAccount func(ctx context.Context, host string, in agent.NewAccount) (string, error)
+	// childrenDir is where spawned agents' files go (default: "agents"
+	// beside the settings file).
+	childrenDir string
 	// dir resolves handles and DIDs (default: the public directory).
 	dir identity.Directory
 	// revoke ends an earlier OAuth sign-in after signing in again.
@@ -143,7 +155,9 @@ Pairing an agent account with its operator (public records; OAuth accounts
 sign in once more, for just that record):
   engram agent declare --operator <handle|DID>   as the agent: name its operator
   engram agent operate <agent handle|DID>        as the operator: claim the agent back
-  engram agent verify <agent handle|DID>         check both records name each other
+  engram agent verify <agent handle|DID>         check its chain of operators, up to a person
+  engram agent spawn <handle> [--invite code] [--recovery-key k]   create an agent you operate:
+                                                 no password, it signs in with its own key
 
 Add --json to any command for machine-readable output. MCP clients can run
 engram-mcp, which uses the same settings.

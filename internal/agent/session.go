@@ -112,6 +112,11 @@ func (s Settings) Session(ctx context.Context, o Options) (*atclient.APIClient, 
 			api.Client = o.HTTP
 		}
 		return api, nil
+	case SignInKey:
+		if o.Store == nil {
+			return nil, errors.New("no OAuth session store")
+		}
+		return keySession(ctx, a, o)
 	case SignInOAuth:
 		if o.Store == nil {
 			return nil, errors.New("no OAuth session store")

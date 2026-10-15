@@ -27,9 +27,14 @@ type agentOut struct {
 	Verified bool `json:"verified"`
 	// Problem is why they don't, when they don't.
 	Problem string `json:"problem,omitempty"`
+	// Chain (verify) is the agent and the agents operating it, nearest
+	// first; Operator is then the person at the top, and RecoveryKey the
+	// rotation key they all have first.
+	Chain       []string `json:"chain,omitempty"`
+	RecoveryKey string   `json:"recoveryKey,omitempty"`
 }
 
-const agentUsage = "engram agent declare --operator <handle|DID> [--description d] [--as handle] | operate <agent> [--as handle] | verify <agent>"
+const agentUsage = "engram agent declare --operator <handle|DID> [--description d] [--as handle] | operate <agent> [--as handle] | verify <agent> | spawn <handle> [--invite code] [--recovery-key did:key]"
 
 // cmdAgent pairs an agent account with its operator: the agent's public
 // declaration names the operator, and the operator's public operated record
@@ -45,6 +50,8 @@ func (c *cli) cmdAgent(ctx context.Context, args []string) error {
 		return c.cmdAgentOperate(ctx, args[1:])
 	case "verify":
 		return c.cmdAgentVerify(ctx, args[1:])
+	case "spawn":
+		return c.cmdAgentSpawn(ctx, args[1:])
 	}
 	return usageError{fmt.Errorf("unknown subcommand %q: %s", args[0], agentUsage)}
 }
@@ -149,13 +156,14 @@ func (c *cli) cmdAgentVerify(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	op, err := coord.VerifyOperator(ctx, c.directory(), nil, agentDID)
+	ch, err := coord.VerifyChain(ctx, c.directory(), nil, c.rotationKeys, agentDID, maxChain)
 	if err != nil {
 		return err
 	}
-	out := agentOut{Agent: agentDID, Operator: op, Verified: true}
+	out := agentOut{Agent: agentDID, Operator: ch.Operator, Verified: true, Chain: ch.Agents, RecoveryKey: ch.RecoveryKey}
 	c.print(out, func(w io.Writer) {
-		fmt.Fprintf(w, "%s is operated by %s (both records name each other).\n", agentDID, op)
+		fmt.Fprintf(w, "%s, operated by %s: every link names the next both ways.\n", strings.Join(ch.Agents, " → "), ch.Operator)
+		fmt.Fprintf(w, "Each agent's first rotation key is %s.\n", ch.RecoveryKey)
 	})
 	return nil
 }
@@ -176,17 +184,26 @@ func (c *cli) publicSession(ctx context.Context, as string, scopes []string, col
 	if as == "" {
 		return nil, nil, usageError{errors.New("no account signed in: name it with --as <handle>")}
 	}
-	if acct.SignIn == agent.SignInPassword && (as == acct.Handle || as == acct.DID) {
+	self := as == acct.Handle || as == acct.DID
+	if acct.SignIn == agent.SignInPassword && self {
 		sp, err := c.open(ctx, s)
 		if err != nil {
 			return nil, nil, err
 		}
 		return sp.Client.Session, func() {}, nil
 	}
-	if c.signInFor == nil {
+	var api *atclient.APIClient
+	var granted []string
+	var end func()
+	switch {
+	case acct.SignIn == agent.SignInKey && self:
+		// A key account signs in for the task itself: no browser.
+		api, granted, end, err = c.keySignInFor(ctx, acct, scopes)
+	case c.signInFor == nil:
 		return nil, nil, errors.New("signing in isn't available here")
+	default:
+		api, granted, end, err = c.signInFor(ctx, as, scopes, c.lineInput())
 	}
-	api, granted, end, err := c.signInFor(ctx, as, scopes, c.lineInput())
 	if err != nil {
 		return nil, nil, err
 	}
