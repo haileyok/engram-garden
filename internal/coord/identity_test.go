@@ -28,14 +28,18 @@ func TestVerifyOperator(t *testing.T) {
 		t.Fatal("verified a declaration the operator doesn't claim back")
 	}
 	// The operator claims a different agent.
-	if err := Operate(ctx, n.Session(op), stranger.DID); err != nil {
+	if _, err := Operate(ctx, n.Session(op), stranger.DID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := VerifyOperator(ctx, n.Dir, nil, agent.DID); err == nil {
 		t.Fatal("verified with the wrong operated record")
 	}
-	if err := Operate(ctx, n.Session(op), agent.DID); err != nil {
-		t.Fatal(err)
+	if created, err := Operate(ctx, n.Session(op), agent.DID); err != nil || !created {
+		t.Fatalf("operate: created=%v err=%v", created, err)
+	}
+	// Claiming it again adds nothing.
+	if created, err := Operate(ctx, n.Session(op), agent.DID); err != nil || created {
+		t.Fatalf("operate again: created=%v err=%v", created, err)
 	}
 	got, err := VerifyOperator(ctx, n.Dir, nil, agent.DID)
 	if err != nil {
@@ -50,6 +54,26 @@ func TestVerifyOperator(t *testing.T) {
 	}
 	if _, err := VerifyOperator(ctx, n.Dir, nil, stranger.DID); err == nil {
 		t.Fatal("verified an operator who never claimed the agent")
+	}
+}
+
+func TestPublicRecordScopes(t *testing.T) {
+	t.Parallel()
+	if !GrantsRepoWrite(DeclareScopes, DeclarationCollection, "create", "update") {
+		t.Error("DeclareScopes can't write a declaration")
+	}
+	if GrantsRepoWrite(DeclareScopes, OperatedCollection, "create") || GrantsRepoWrite(DeclareScopes, "app.bsky.feed.post", "create") {
+		t.Error("DeclareScopes reach other collections")
+	}
+	if !GrantsRepoWrite(OperateScopes, OperatedCollection, "create") || GrantsRepoWrite(OperateScopes, OperatedCollection, "delete") {
+		t.Error("OperateScopes should create operated records and nothing else")
+	}
+	if GrantsRepoWrite([]string{"atproto"}, DeclarationCollection, "create") {
+		t.Error("the bare atproto scope can't write records")
+	}
+	// What a server grants may combine collections in one scope.
+	if !GrantsRepoWrite([]string{"atproto", "repo?collection=" + DeclarationCollection + "&collection=app.bsky.feed.post&action=create&action=update"}, DeclarationCollection, "create", "update") {
+		t.Error("a combined repo scope wasn't understood")
 	}
 }
 

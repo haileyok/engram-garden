@@ -3,6 +3,7 @@ package coord
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -92,7 +93,12 @@ func TestHandoffFromAnOfflineDeviceWaitsForTheLease(t *testing.T) {
 	ctx := context.Background()
 	laptop := f.researcher
 	phone := f.device(t, laptop, "phone")
-	if _, err := laptop.Acquire(ctx, 80*time.Millisecond, false); err != nil {
+	// Both devices read one clock, moved by hand.
+	var mu sync.Mutex
+	now := time.Now()
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	laptop.Now, phone.Now = clock, clock
+	if _, err := laptop.Acquire(ctx, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	if st, err := phone.Acquire(ctx, time.Hour, true); err != nil || st != LeasePending {
@@ -101,7 +107,9 @@ func TestHandoffFromAnOfflineDeviceWaitsForTheLease(t *testing.T) {
 	if ok, _ := phone.Active(ctx); ok {
 		t.Fatal("active before the old lease ended")
 	}
-	time.Sleep(150 * time.Millisecond)
+	mu.Lock()
+	now = now.Add(2 * time.Minute)
+	mu.Unlock()
 	if ok, err := phone.Active(ctx); err != nil || !ok {
 		t.Fatalf("active=%v err=%v after the old lease ended", ok, err)
 	}
@@ -117,10 +125,16 @@ func TestExpiredLeaseCanBeTakenWithoutHandoff(t *testing.T) {
 	ctx := context.Background()
 	laptop := f.researcher
 	phone := f.device(t, laptop, "phone")
-	if _, err := laptop.Acquire(ctx, 50*time.Millisecond, false); err != nil {
+	var mu sync.Mutex
+	now := time.Now()
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	laptop.Now, phone.Now = clock, clock
+	if _, err := laptop.Acquire(ctx, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	now = now.Add(2 * time.Minute)
+	mu.Unlock()
 	st, err := phone.Acquire(ctx, time.Hour, false)
 	if err != nil || st != LeaseActive {
 		t.Fatalf("state %v err %v", st, err)

@@ -68,7 +68,11 @@ func (o Options) dir() identity.Directory {
 // callback address. Refreshing a session needs the address it signed in
 // with, since the client's ID names it.
 func OAuthApp(callback string, o Options) *oauth.ClientApp {
-	cfg := oauth.NewLocalhostConfig(callback, Scopes)
+	return oauthApp(callback, Scopes, o)
+}
+
+func oauthApp(callback string, scopes []string, o Options) *oauth.ClientApp {
+	cfg := oauth.NewLocalhostConfig(callback, scopes)
 	cfg.UserAgent = "engram-cli"
 	app := oauth.NewClientApp(&cfg, o.Store)
 	app.Dir = o.dir()
@@ -224,33 +228,9 @@ type Prompt struct {
 // LoginOAuth signs in as handle through the account's authorization server,
 // returning the account to save.
 func LoginOAuth(ctx context.Context, handle string, o Options, p Prompt) (Account, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	app, sess, callback, err := authorize(ctx, handle, Scopes, o, p)
 	if err != nil {
 		return Account{}, err
-	}
-	defer ln.Close()
-	callback := fmt.Sprintf("http://127.0.0.1:%d/callback", ln.Addr().(*net.TCPAddr).Port)
-	app := OAuthApp(callback, o)
-	redirect, err := app.StartAuthFlow(ctx, handle)
-	if err != nil {
-		return Account{}, fmt.Errorf("starting to sign in as %s: %w", handle, err)
-	}
-	fmt.Fprintf(p.Out, "Sign in as %s and approve access:\n\n  %s\n\n", handle, redirect)
-	if p.Browser == nil || p.Browser(redirect) != nil {
-		fmt.Fprintln(p.Out, "Open that address in a browser.")
-	}
-	fmt.Fprintln(p.Out, "If the browser is on another machine, it ends on a page that won't load; paste that page's address here.")
-	q, err := waitForCallback(ctx, ln, p.Lines)
-	if err != nil {
-		return Account{}, err
-	}
-	sess, err := app.ProcessCallback(ctx, q)
-	if err != nil {
-		var ce *oauth.AuthRequestCallbackError
-		if errors.As(err, &ce) && ce.ErrorCode == "access_denied" {
-			return Account{}, errors.New("you declined, so the agent isn't signed in")
-		}
-		return Account{}, fmt.Errorf("finishing sign-in: %w", err)
 	}
 	if !grantsMemories(sess.Scopes) {
 		_ = app.Logout(ctx, sess.AccountDID, sess.SessionID)
@@ -260,6 +240,62 @@ func LoginOAuth(ctx context.Context, handle string, o Options, p Prompt) (Accoun
 		Handle: handle, DID: sess.AccountDID.String(), SignIn: SignInOAuth,
 		SessionID: sess.SessionID, Callback: callback, SignedInAt: time.Now().UTC(),
 	}, nil
+}
+
+// authorize runs an OAuth sign-in as handle asking for scopes: a loopback
+// callback, the browser (or an address pasted back), and the callback.
+func authorize(ctx context.Context, handle string, scopes []string, o Options, p Prompt) (*oauth.ClientApp, *oauth.ClientSessionData, string, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, nil, "", err
+	}
+	defer ln.Close()
+	callback := fmt.Sprintf("http://127.0.0.1:%d/callback", ln.Addr().(*net.TCPAddr).Port)
+	app := oauthApp(callback, scopes, o)
+	redirect, err := app.StartAuthFlow(ctx, handle)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("starting to sign in as %s: %w", handle, err)
+	}
+	fmt.Fprintf(p.Out, "Sign in as %s and approve access:\n\n  %s\n\n", handle, redirect)
+	if p.Browser == nil || p.Browser(redirect) != nil {
+		fmt.Fprintln(p.Out, "Open that address in a browser.")
+	}
+	fmt.Fprintln(p.Out, "If the browser is on another machine, it ends on a page that won't load; paste that page's address here.")
+	q, err := waitForCallback(ctx, ln, p.Lines)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	sess, err := app.ProcessCallback(ctx, q)
+	if err != nil {
+		var ce *oauth.AuthRequestCallbackError
+		if errors.As(err, &ce) && ce.ErrorCode == "access_denied" {
+			return nil, nil, "", errors.New("you declined, so nothing was signed in")
+		}
+		return nil, nil, "", fmt.Errorf("finishing sign-in: %w", err)
+	}
+	return app, sess, callback, nil
+}
+
+// SignInFor signs in as handle through OAuth for one task, asking only for
+// scopes. Nothing is saved to the settings: end revokes the sign-in. It
+// returns the scopes the server granted, which the caller checks.
+func SignInFor(ctx context.Context, handle string, scopes []string, o Options, p Prompt) (*atclient.APIClient, []string, func(), error) {
+	app, data, _, err := authorize(ctx, handle, scopes, o, p)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	end := func() {
+		// Revoking is best effort: the session is forgotten either way.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		_ = app.Logout(ctx, data.AccountDID, data.SessionID)
+	}
+	sess, err := app.ResumeSession(ctx, data.AccountDID, data.SessionID)
+	if err != nil {
+		end()
+		return nil, nil, nil, err
+	}
+	return sess.APIClient(), data.Scopes, end, nil
 }
 
 // grantsMemories reports whether the granted scopes let the agent read

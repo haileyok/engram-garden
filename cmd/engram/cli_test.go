@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bluesky-social/indigo/atproto/atclient"
+
 	"github.com/haileyok/engram-garden/internal/agent"
 	"github.com/haileyok/engram-garden/internal/appview"
 	"github.com/haileyok/engram-garden/internal/blob"
@@ -135,6 +137,13 @@ type agentCLI struct {
 	pasted []string
 	// others are more spaces' worlds, by space URI.
 	others map[string]*world
+	// signInsFor are the scopes one-time sign-ins asked for, as which
+	// handles; ended counts the ones ended. granted, when set, is what the
+	// server grants instead of what was asked.
+	signInsFor    [][]string
+	signInHandles []string
+	ended         int
+	granted       []string
 }
 
 // join puts the agent in another world's space too (it still has to add the
@@ -199,6 +208,17 @@ func (a *agentCLI) run(args ...string) (int, string, string) {
 			a.n++
 			return agent.Account{Handle: handle, DID: did, SignIn: agent.SignInOAuth, SessionID: fmt.Sprintf("s%d", a.n), Callback: "http://127.0.0.1:1/callback", SignedInAt: time.Now()}, nil
 		},
+		signInFor: func(_ context.Context, handle string, scopes []string, _ <-chan string) (*atclient.APIClient, []string, func(), error) {
+			a.signInsFor = append(a.signInsFor, scopes)
+			a.signInHandles = append(a.signInHandles, handle)
+			granted := scopes
+			if a.granted != nil {
+				granted = a.granted
+			}
+			acct := a.w.net.AccountByDID("did:plc:" + strings.TrimSuffix(handle, ".test"))
+			return a.w.net.Session(acct), granted, func() { a.ended++ }, nil
+		},
+		dir:        a.w.net.Dir,
 		readSecret: func(string) (string, error) { return "typed-password", nil },
 		revoke: func(_ context.Context, acct agent.Account) error {
 			a.revoked = append(a.revoked, acct.SessionID)

@@ -13,6 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bluesky-social/indigo/atproto/atclient"
+	"github.com/bluesky-social/indigo/atproto/identity"
+
 	"github.com/haileyok/engram-garden/internal/agent"
 	"github.com/haileyok/engram-garden/internal/embed"
 )
@@ -34,6 +37,12 @@ type cli struct {
 	// readSecret reads a password without echoing it, from a terminal; nil
 	// when stdin isn't one, so the password is read as a line.
 	readSecret func(prompt string) (string, error)
+	// signInFor signs in through OAuth for one task, asking only for
+	// scopes, without saving the account. It returns the scopes granted, and
+	// end revokes the sign-in.
+	signInFor func(ctx context.Context, handle string, scopes []string, lines <-chan string) (api *atclient.APIClient, granted []string, end func(), err error)
+	// dir resolves handles and DIDs (default: the public directory).
+	dir identity.Directory
 	// revoke ends an earlier OAuth sign-in after signing in again.
 	revoke func(ctx context.Context, a agent.Account) error
 	// pull fetches an embedding model (`ollama pull`); nil when unavailable.
@@ -130,6 +139,12 @@ Use (--space <name|URI> picks a space; otherwise the default):
   engram forget <uri>                                delete one of your own memories
   engram status                                      account, spaces, models and sign-in
 
+Pairing an agent account with its operator (public records; OAuth accounts
+sign in once more, for just that record):
+  engram agent declare --operator <handle|DID>   as the agent: name its operator
+  engram agent operate <agent handle|DID>        as the operator: claim the agent back
+  engram agent verify <agent handle|DID>         check both records name each other
+
 Add --json to any command for machine-readable output. MCP clients can run
 engram-mcp, which uses the same settings.
 
@@ -169,6 +184,7 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		"list": c.cmdList, "get": c.cmdGet, "forget": c.cmdForget, "status": c.cmdStatus,
 		"spaces": c.cmdSpaces, "use": c.cmdUse,
 		"create": c.cmdCreate, "members": c.cmdMembers, "model": c.cmdModel, "index": c.cmdIndex,
+		"agent": c.cmdAgent,
 	}
 	cmd, ok := cmds[rest[0]]
 	if !ok {

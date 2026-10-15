@@ -78,10 +78,12 @@ func TestExpiredLeaseLetsAnotherClaim(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 	task := f.task(t, Task{Title: "t"})
-	if _, err := f.researcher.Claim(ctx, task, 50*time.Millisecond); err != nil {
+	// Claim times come from the PDS's record keys, so this uses the real
+	// clock: a lease long enough to survive a loaded machine, then a wait.
+	if _, err := f.researcher.Claim(ctx, task, 400*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(120 * time.Millisecond)
+	time.Sleep(600 * time.Millisecond)
 	st, err := f.writer.Claim(ctx, task, time.Hour)
 	if err != nil {
 		t.Fatal(err)

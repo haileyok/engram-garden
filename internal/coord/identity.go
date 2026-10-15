@@ -13,6 +13,7 @@ import (
 	"github.com/bluesky-social/indigo/atproto/atclient"
 	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/bluesky-social/indigo/atproto/syntax"
+	"github.com/haileyok/cocoon/oauth/scopes"
 
 	"github.com/haileyok/engram-garden/internal/spaceclient"
 )
@@ -49,18 +50,72 @@ func Declare(ctx context.Context, session *atclient.APIClient, operator, descrip
 	return nil
 }
 
+// DeclareScopes and OperateScopes are the OAuth scopes for a one-time
+// sign-in that writes an agent's declaration, or an operator's operated
+// record, and nothing else.
+var (
+	DeclareScopes = []string{"atproto", "repo:" + DeclarationCollection + "?action=create&action=update"}
+	OperateScopes = []string{"atproto", "repo:" + OperatedCollection + "?action=create"}
+)
+
+// GrantsRepoWrite reports whether granted scopes allow every action on a
+// collection in the account's public repo. Servers may rewrite scopes when
+// they issue them, so this reads what each one means.
+func GrantsRepoWrite(granted []string, collection string, actions ...string) bool {
+	for _, action := range actions {
+		ok := false
+		for _, g := range granted {
+			if s, err := scopes.Parse(g); err == nil && s.AllowsRepoWrite(collection, action) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // Operate writes an operator's public record that it runs an agent
-// (session is the operator's).
-func Operate(ctx context.Context, session *atclient.APIClient, agent string) error {
+// (session is the operator's), unless there is one already. It reports
+// whether it wrote one.
+func Operate(ctx context.Context, session *atclient.APIClient, agent string) (bool, error) {
 	if _, err := syntax.ParseDID(agent); err != nil {
-		return fmt.Errorf("agent: %w", err)
+		return false, fmt.Errorf("agent: %w", err)
+	}
+	me := session.AccountDID.String()
+	cursor := ""
+	for {
+		params := map[string]any{"repo": me, "collection": OperatedCollection, "limit": 100}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		var out struct {
+			Records []struct {
+				Value Operated `json:"value"`
+			} `json:"records"`
+			Cursor string `json:"cursor"`
+		}
+		if err := session.Get(ctx, "com.atproto.repo.listRecords", params, &out); err != nil {
+			return false, fmt.Errorf("reading operated records: %w", err)
+		}
+		for _, r := range out.Records {
+			if r.Value.Agent == agent {
+				return false, nil
+			}
+		}
+		if out.Cursor == "" || len(out.Records) == 0 {
+			break
+		}
+		cursor = out.Cursor
 	}
 	o := Operated{Type: OperatedCollection, Agent: agent, CreatedAt: formatTime(time.Now())}
-	body := map[string]any{"repo": session.AccountDID.String(), "collection": OperatedCollection, "record": o}
+	body := map[string]any{"repo": me, "collection": OperatedCollection, "record": o}
 	if err := session.Post(ctx, "com.atproto.repo.createRecord", body, nil); err != nil {
-		return fmt.Errorf("writing operated record: %w", err)
+		return false, fmt.Errorf("writing operated record: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 // VerifyOperator checks an agent's operator both ways: the agent's

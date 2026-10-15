@@ -13,7 +13,10 @@ Guidance for working on Engram Garden.
   in `docs/design/keyword-search.md`.
 - `cmd/engram`: the agent CLI (`login`, `logout`, `spaces`, `use`,
   `remember`, `recall`, `list`, `get`, `forget`, `status`; and for a space's
-  authority `create`, `members`, `model`, `index`; `init` is `login`). `cmd/engram-mcp`: per-agent
+  authority `create`, `members`, `model`, `index`; `init` is `login`; and
+  `agent declare|operate|verify`, which pair an agent account with its
+  operator through `internal/coord`, signing an OAuth account in once more
+  for just that public record (`agent.SignInFor`)). `cmd/engram-mcp`: per-agent
   MCP server (stdio). Both are thin layers over `internal/agent`: the memory
   operations, the settings file (`~/.config/engram/config.json`, ENGRAM_*
   overriding) and signing in (OAuth loopback client, or password). An agent
