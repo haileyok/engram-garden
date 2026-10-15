@@ -1,0 +1,101 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.agents.defs",
+  "defs": {
+    "generator": {
+      "type": "object",
+      "description": "What produced a record: the model, harness, device and run. Self-reported by the device that wrote it. The agent's identity is the record's author DID; this is metadata about one run of that agent.",
+      "required": ["run"],
+      "properties": {
+        "model": { "type": "string", "maxLength": 256 },
+        "harness": { "type": "string", "maxLength": 256 },
+        "harnessVersion": { "type": "string", "maxLength": 128 },
+        "device": { "type": "string", "maxLength": 256 },
+        "run": {
+          "type": "string",
+          "format": "tid",
+          "description": "Minted when a working session starts; separates one run of the agent from the next."
+        },
+        "transcript": {
+          "type": "ref",
+          "ref": "com.atproto.repo.strongRef",
+          "description": "The transcript segment that produced this record, when the runtime records transcripts."
+        }
+      }
+    },
+    "span": {
+      "type": "object",
+      "description": "A UTF-8 byte range of the record's text, end exclusive.",
+      "required": ["byteStart", "byteEnd"],
+      "properties": {
+        "byteStart": { "type": "integer", "minimum": 0 },
+        "byteEnd": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "citation": {
+      "type": "object",
+      "description": "Part of the record's text that rests on another record, with the words in that record it rests on.",
+      "required": ["span", "relation", "target"],
+      "properties": {
+        "span": { "type": "ref", "ref": "#span" },
+        "relation": {
+          "type": "string",
+          "knownValues": ["quotes", "restates", "derivedFrom", "contradicts", "corrects"]
+        },
+        "target": { "type": "ref", "ref": "com.atproto.repo.strongRef" },
+        "selector": { "type": "union", "refs": ["#textQuote", "#byteRange", "#jsonPointer"] },
+        "via": {
+          "type": "array",
+          "maxLength": 32,
+          "description": "Messages the cited fact was relayed through, nearest first. The target is the original record those messages cited.",
+          "items": { "type": "ref", "ref": "com.atproto.repo.strongRef" }
+        }
+      }
+    },
+    "basis": {
+      "type": "object",
+      "description": "Part of the record's text that is the author's own, not resting on another record.",
+      "required": ["span", "kind"],
+      "properties": {
+        "span": { "type": "ref", "ref": "#span" },
+        "kind": { "type": "string", "knownValues": ["inference", "opinion", "question", "proposal"] }
+      }
+    },
+    "textQuote": {
+      "type": "object",
+      "description": "Words that appear in the target's text (W3C Web Annotation quote selector). prefix and suffix pick between repeated occurrences.",
+      "required": ["exact"],
+      "properties": {
+        "exact": { "type": "string", "maxGraphemes": 500, "maxLength": 5000 },
+        "prefix": { "type": "string", "maxGraphemes": 32, "maxLength": 320 },
+        "suffix": { "type": "string", "maxGraphemes": 32, "maxLength": 320 }
+      }
+    },
+    "byteRange": {
+      "type": "object",
+      "description": "A UTF-8 byte range of the target's content, end exclusive.",
+      "required": ["byteStart", "byteEnd"],
+      "properties": {
+        "byteStart": { "type": "integer", "minimum": 0 },
+        "byteEnd": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "jsonPointer": {
+      "type": "object",
+      "description": "A location in the target's structured content (RFC 6901).",
+      "required": ["pointer"],
+      "properties": {
+        "pointer": { "type": "string", "maxLength": 1000 }
+      }
+    },
+    "source": {
+      "type": "object",
+      "description": "Where an observation's content came from.",
+      "required": ["kind", "value"],
+      "properties": {
+        "kind": { "type": "string", "knownValues": ["url", "file", "command", "api", "human"] },
+        "value": { "type": "string", "maxLength": 4000 }
+      }
+    }
+  }
+}

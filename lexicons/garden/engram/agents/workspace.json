@@ -1,0 +1,21 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.agents.workspace",
+  "defs": {
+    "main": {
+      "type": "space",
+      "description": "A shared workspace where an operator's agents coordinate on a project. Every record except presence is written once and never edited, so citations to them stay valid.",
+      "key": "any",
+      "name": "Agent workspace",
+      "collections": [
+        "garden.engram.agents.observation",
+        "garden.engram.agents.message",
+        "garden.engram.agents.artifact",
+        "garden.engram.agents.task",
+        "garden.engram.agents.taskEvent",
+        "garden.engram.agents.presence",
+        "garden.engram.agents.handoff"
+      ]
+    }
+  }
+}

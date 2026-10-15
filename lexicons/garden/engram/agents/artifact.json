@@ -1,0 +1,29 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.agents.artifact",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "description": "Work an agent produced: a draft, a patch, a summary. A revision is a new artifact with previous set.",
+      "record": {
+        "type": "object",
+        "required": ["title", "generator", "createdAt"],
+        "properties": {
+          "title": { "type": "string", "maxLength": 1000, "maxGraphemes": 300 },
+          "content": { "type": "blob" },
+          "text": { "type": "string", "maxLength": 100000, "maxGraphemes": 30000, "description": "The artifact as text, or its start, for quoting." },
+          "task": { "type": "ref", "ref": "com.atproto.repo.strongRef" },
+          "previous": { "type": "ref", "ref": "com.atproto.repo.strongRef" },
+          "derivedFrom": {
+            "type": "array",
+            "maxLength": 256,
+            "items": { "type": "ref", "ref": "garden.engram.agents.defs#citation" }
+          },
+          "generator": { "type": "ref", "ref": "garden.engram.agents.defs#generator" },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

@@ -32,8 +32,11 @@ type Account struct {
 	DID string
 	Key *atcrypto.PrivateKeyK256
 
-	records  map[string]space.SerializedRecord // path -> record
-	raw      map[string]json.RawMessage        // path -> record JSON
+	records map[string]space.SerializedRecord // path -> record
+	raw     map[string]json.RawMessage        // path -> record JSON
+	// public is the account's public repo (com.atproto.repo.*): path ->
+	// record, with no commits or sync.
+	public   map[string]publicRecord
 	ops      []op
 	rev      string
 	spaceRev string
@@ -81,6 +84,12 @@ func New(t testing.TB) *Net { return NewSpace(t, "authority", "memory") }
 // different space URIs.
 func NewSpace(t testing.TB, authority, skey string) *Net {
 	t.Helper()
+	return NewSpaceOfType(t, "garden.engram.space", authority, skey)
+}
+
+// NewSpaceOfType is NewSpace for a space of another type.
+func NewSpaceOfType(t testing.TB, spaceType, authority, skey string) *Net {
+	t.Helper()
 	n := &Net{
 		T:             t,
 		accounts:      map[string]*Account{},
@@ -94,7 +103,7 @@ func NewSpace(t testing.TB, authority, skey string) *Net {
 	n.Server = httptest.NewServer(http.HandlerFunc(n.serve))
 	t.Cleanup(n.Server.Close)
 	n.Authority = n.NewAccount("did:plc:" + authority)
-	n.Space = "at://" + n.Authority.DID + "/space/garden.engram.space/" + skey
+	n.Space = "at://" + n.Authority.DID + "/space/" + spaceType + "/" + skey
 	return n
 }
 
@@ -109,7 +118,7 @@ func (n *Net) NewAccount(did string) *Account {
 	if err != nil {
 		n.T.Fatal(err)
 	}
-	a := &Account{DID: did, Key: key, records: map[string]space.SerializedRecord{}, raw: map[string]json.RawMessage{}, listed: true}
+	a := &Account{DID: did, Key: key, records: map[string]space.SerializedRecord{}, raw: map[string]json.RawMessage{}, public: map[string]publicRecord{}, listed: true}
 	n.mu.Lock()
 	n.accounts[did] = a
 	n.mu.Unlock()
@@ -376,6 +385,9 @@ func (n *Net) serve(w http.ResponseWriter, r *http.Request) {
 
 func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *xerr) {
 	q := r.URL.Query()
+	if strings.HasPrefix(nsid, "com.atproto.repo.") {
+		return n.routePublic(r, nsid)
+	}
 	switch nsid {
 	case "com.atproto.space.getDelegationToken":
 		a := n.account(r.Header.Get("X-Test-Did"))
@@ -527,14 +539,18 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		if body.Space != n.Space || body.Repo != a.DID {
 			return nil, &xerr{400, "InvalidRequest", "can only write your own repo in the test space"}
 		}
+		n.mu.Lock()
+		_, exists := a.records[space.FormatRecordPath(body.Collection, body.Rkey)]
+		n.mu.Unlock()
 		if nsid == "com.atproto.space.deleteRecord" {
-			n.mu.Lock()
-			_, ok := a.records[space.FormatRecordPath(body.Collection, body.Rkey)]
-			n.mu.Unlock()
-			if ok {
+			if exists {
 				n.Delete(a, body.Collection, body.Rkey)
 			}
 			return map[string]any{}, nil
+		}
+		// As in Cocoon, create never replaces a record.
+		if nsid == "com.atproto.space.createRecord" && body.Rkey != "" && exists {
+			return nil, &xerr{400, "RecordAlreadyExists", "Record already exists: " + body.Collection + "/" + body.Rkey}
 		}
 		if body.Rkey == "" {
 			n.mu.Lock()

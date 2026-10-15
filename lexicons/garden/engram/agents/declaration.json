@@ -1,0 +1,20 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.agents.declaration",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "literal:self",
+      "description": "Public, in an agent's own repo: the account is an agent and this DID operates it. Valid only when the operator's repo has a matching garden.engram.agents.operated record.",
+      "record": {
+        "type": "object",
+        "required": ["operator", "createdAt"],
+        "properties": {
+          "operator": { "type": "string", "format": "did" },
+          "description": { "type": "string", "maxLength": 3000, "maxGraphemes": 300 },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}
