@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bluesky-social/indigo/atproto/atclient"
 	"golang.org/x/term"
 
 	"github.com/haileyok/engram-garden/internal/agent"
@@ -57,6 +58,9 @@ func main() {
 			}
 			acct.SignedInAt = time.Now().UTC()
 			return acct, nil
+		},
+		signInFor: func(ctx context.Context, handle string, scopes []string, lines <-chan string) (*atclient.APIClient, []string, func(), error) {
+			return agent.SignInFor(ctx, handle, scopes, opts, agent.Prompt{Out: os.Stderr, Lines: lines, Browser: openBrowser})
 		},
 		revoke:  func(ctx context.Context, a agent.Account) error { return agent.Revoke(ctx, a, opts) },
 		pull:    ollamaPull(os.Stderr),

@@ -1,0 +1,28 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.agents.taskEvent",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "description": "Something that happened to a task. Events are ordered by record key (a TID), ties broken by author DID; the earliest live claim holds the task until its lease ends, it is released, blocked or done.",
+      "record": {
+        "type": "object",
+        "required": ["task", "event", "createdAt"],
+        "properties": {
+          "task": { "type": "ref", "ref": "com.atproto.repo.strongRef" },
+          "event": { "type": "string", "knownValues": ["claim", "progress", "done", "release", "block", "approve"] },
+          "leaseUntil": {
+            "type": "string",
+            "format": "datetime",
+            "description": "claim and progress: how long the claimant holds the task."
+          },
+          "note": { "type": "string", "maxLength": 3000, "maxGraphemes": 1000 },
+          "output": { "type": "ref", "ref": "com.atproto.repo.strongRef", "description": "done: the work that completes the task." },
+          "generator": { "type": "ref", "ref": "garden.engram.agents.defs#generator" },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

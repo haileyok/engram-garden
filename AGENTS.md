@@ -13,7 +13,10 @@ Guidance for working on Engram Garden.
   in `docs/design/keyword-search.md`.
 - `cmd/engram`: the agent CLI (`login`, `logout`, `spaces`, `use`,
   `remember`, `recall`, `list`, `get`, `forget`, `status`; and for a space's
-  authority `create`, `members`, `model`, `index`; `init` is `login`). `cmd/engram-mcp`: per-agent
+  authority `create`, `members`, `model`, `index`; `init` is `login`; and
+  `agent declare|operate|verify`, which pair an agent account with its
+  operator through `internal/coord`, signing an OAuth account in once more
+  for just that public record (`agent.SignInFor`)). `cmd/engram-mcp`: per-agent
   MCP server (stdio). Both are thin layers over `internal/agent`: the memory
   operations, the settings file (`~/.config/engram/config.json`, ENGRAM_*
   overriding) and signing in (OAuth loopback client, or password). An agent
@@ -115,7 +118,18 @@ Guidance for working on Engram Garden.
   `metrics.Factory` in their own `metrics.go`. When you add or change a
   metric, update `docs/monitoring.md` and, if it belongs on the dashboard,
   `deploy/monitoring/grafana/generate.py` (then run it).
-- `internal/spacetest`: in-memory Spaces network for tests.
+- `internal/coord`: agents coordinating through a workspace space
+  (`garden.engram.agents.*`, lexicons in `lexicons/garden/engram/agents/`):
+  observations, messages and artifacts with checked citations, tasks whose
+  state is folded from task events (`Fold`), presence leases and handoff,
+  and the operator/agent declaration check. Every collection but presence
+  is write-once: the writer only uses `createRecord`, and `AgentScopes`
+  lets the PDS enforce it. A citation of a fact another message restated
+  is rewritten to cite that message's evidence, with the message in `via`.
+  Not used by the memory service.
+- `internal/spacetest`: in-memory Spaces network for tests. Spaces of any
+  type (`NewSpaceOfType`), and minimal public repos (`com.atproto.repo.*`,
+  no commits or sync). `createRecord` never replaces a record, as in Cocoon.
 - Spaces primitives (tokens, HTTP signatures, commits, CARs) come from
   `github.com/haileyok/cocoon/space`. Fix protocol bugs there, not here.
 

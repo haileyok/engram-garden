@@ -16,6 +16,10 @@
 # publish (Cloudflare, for engram.garden):
 #   name  _lexicon.engram.garden
 #   value did=<the account's DID>
+# The agent coordination lexicons (garden.engram.agents.*, in
+# lexicons/garden/engram/agents) are one level deeper, so they need their own
+# record with the same value:
+#   name  _lexicon.agents.engram.garden
 #
 # Usage:
 #   GOAT_USERNAME=hailey.at GOAT_PASSWORD=<app password> scripts/publish-lexicons.sh
@@ -29,6 +33,10 @@ cd "$(dirname "$0")/.."
 DOMAIN=engram.garden
 LEXICONS=lexicons/garden/engram
 SPACE_NSID=garden.engram.space
+# Each lexicon directory, and the domain whose TXT record names its authority.
+LEXICON_DIRS=("$LEXICONS" "$LEXICONS/agents")
+LEXICON_DOMAINS=("$DOMAIN" "agents.$DOMAIN")
+SPACE_TYPES=("$SPACE_NSID" garden.engram.agents.workspace)
 DID=${LEXICON_DID:-did:plc:oisofpd7lj26yvgiivf3lxsi} # hailey.at
 DRY_RUN=0
 [[ ${1:-} == --dry-run ]] && DRY_RUN=1
@@ -40,29 +48,33 @@ for tool in goat jq curl; do
   command -v "$tool" >/dev/null || die "$tool isn't installed"
 done
 
-# 1. The TXT record names the account that will publish.
-# It asks the domain's own nameserver, so a "not found" cached by the
-# resolver on this machine can't hold it up.
+# 1. The TXT records name the account that will publish.
+# They're asked of the zone's own nameserver, so a "not found" cached by the
+# resolver on this machine can't hold them up.
 txt_records() {
+  local name=$1
   if command -v dig >/dev/null; then
     local ns
     ns=$(dig +short NS "$DOMAIN" | head -1)
-    dig +short TXT "_lexicon.$DOMAIN" ${ns:+@"$ns"}
+    dig +short TXT "$name" ${ns:+@"$ns"}
   else
-    curl -fsS "https://dns.google/resolve?name=_lexicon.$DOMAIN&type=TXT" | jq -r '.Answer[]?.data'
+    curl -fsS "https://dns.google/resolve?name=$name&type=TXT" | jq -r '.Answer[]?.data'
   fi
 }
-say "Checking _lexicon.$DOMAIN"
-if ! txt_records | tr -d '"' | grep -qx "did=$DID"; then
-  say "  not set to did=$DID yet. Found: $(txt_records | tr '\n' ' ')"
-  if ((DRY_RUN)); then
-    say "  (dry run: carrying on)"
+for d in "${LEXICON_DOMAINS[@]}"; do
+  name=_lexicon.$d
+  say "Checking $name"
+  if ! txt_records "$name" | tr -d '"' | grep -qx "did=$DID"; then
+    say "  not set to did=$DID yet. Found: $(txt_records "$name" | tr '\n' ' ')"
+    if ((DRY_RUN)); then
+      say "  (dry run: carrying on)"
+    else
+      die "the nameserver for $DOMAIN has no TXT record $name. In the DNS dashboard for $DOMAIN add a TXT record with Name ${name%.$DOMAIN} (the zone's name is added for you) and Content did=$DID, then run this again"
+    fi
   else
-    die "the nameserver for $DOMAIN has no TXT record _lexicon.$DOMAIN. In the DNS dashboard for $DOMAIN add a TXT record with Name _lexicon (the zone's name is added for you) and Content did=$DID, then run this again"
+    say "  ok: did=$DID"
   fi
-else
-  say "  ok: did=$DID"
-fi
+done
 
 # 2. Sign in as that account.
 if ((DRY_RUN)); then
@@ -107,7 +119,10 @@ goat_saved() {
 # refuses to run once garden.engram.space has been published
 # ("unexpected schema type: space"), which would make this script fail on every
 # run after the first.
-space_uri="at://$DID/com.atproto.lexicon.schema/$SPACE_NSID"
+files=()
+for dir in "${LEXICON_DIRS[@]}"; do
+  files+=("$dir"/*.json)
+done
 # normalize prints a record without its $type and without goat's wrapper, keys
 # in a fixed order, so what is published can be compared with a lexicon file.
 normalize() {
@@ -116,8 +131,8 @@ normalize() {
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 n_created=0 n_updated=0 n_unchanged=0
-say "Publishing $(ls "$LEXICONS"/*.json | wc -l | tr -d ' ') lexicons"
-for f in "$LEXICONS"/*.json; do
+say "Publishing ${#files[@]} lexicons"
+for f in "${files[@]}"; do
   nsid=$(jq -r .id "$f")
   if ((DRY_RUN)); then
     say "  would publish $nsid (written only if it differs from what is there)"
@@ -147,12 +162,15 @@ if ((DRY_RUN)); then
 else
   say "Checking that every lexicon can be read back"
   missing=()
-  for f in "$LEXICONS"/*.json; do
+  for f in "${files[@]}"; do
     nsid=$(jq -r .id "$f")
     goat_saved record get "at://$DID/com.atproto.lexicon.schema/$nsid" >/dev/null 2>&1 || missing+=("$nsid")
   done
   ((${#missing[@]} == 0)) || die "not published: ${missing[*]}"
-  got=$(goat_saved record get "$space_uri")
-  [[ $(jq -r '.value.defs.main.type // .defs.main.type' <<<"$got") == space ]] || die "$space_uri didn't come back as a space type"
-  say "ok: servers can now find every garden.engram lexicon, including $SPACE_NSID"
+  for t in "${SPACE_TYPES[@]}"; do
+    space_uri="at://$DID/com.atproto.lexicon.schema/$t"
+    got=$(goat_saved record get "$space_uri")
+    [[ $(jq -r '.value.defs.main.type // .defs.main.type' <<<"$got") == space ]] || die "$space_uri didn't come back as a space type"
+  done
+  say "ok: servers can now find every garden.engram lexicon, including the space types ${SPACE_TYPES[*]}"
 fi

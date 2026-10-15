@@ -1,0 +1,21 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.agents.handoff",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "description": "Written by a run that has stopped because another run took over the agent. Its record key is the new run's TID, so each handoff is acknowledged at most once. Never edited.",
+      "record": {
+        "type": "object",
+        "required": ["fromRun", "toRun", "createdAt"],
+        "properties": {
+          "fromRun": { "type": "string", "format": "tid" },
+          "toRun": { "type": "string", "format": "tid" },
+          "generator": { "type": "ref", "ref": "garden.engram.agents.defs#generator" },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

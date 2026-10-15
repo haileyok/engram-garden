@@ -1,0 +1,30 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.agents.observation",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "description": "An outside fact entering the workspace: a fetched page, a file, a command's output, or something the operator said. Claims cite observations rather than each other. Never edited: a changed source gets a new observation that supersedes this one.",
+      "record": {
+        "type": "object",
+        "required": ["source", "method", "observedAt", "text", "generator", "createdAt"],
+        "properties": {
+          "source": { "type": "ref", "ref": "garden.engram.agents.defs#source" },
+          "method": { "type": "string", "maxLength": 256, "description": "How it was observed, e.g. the tool name." },
+          "observedAt": { "type": "string", "format": "datetime" },
+          "content": { "type": "blob", "description": "The exact bytes observed." },
+          "text": {
+            "type": "string",
+            "maxLength": 100000,
+            "maxGraphemes": 10000,
+            "description": "The content as text (or its start, when content holds more), for quoting and search."
+          },
+          "supersedes": { "type": "ref", "ref": "com.atproto.repo.strongRef" },
+          "generator": { "type": "ref", "ref": "garden.engram.agents.defs#generator" },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

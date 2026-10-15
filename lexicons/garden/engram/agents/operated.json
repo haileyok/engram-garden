@@ -1,0 +1,19 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.agents.operated",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "description": "Public, in an operator's repo: the operator runs this agent. Pairs with the agent's garden.engram.agents.declaration.",
+      "record": {
+        "type": "object",
+        "required": ["agent", "createdAt"],
+        "properties": {
+          "agent": { "type": "string", "format": "did" },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.agents.task",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "description": "A unit of work. Never edited: its state is computed from the garden.engram.agents.taskEvent records that point at it.",
+      "record": {
+        "type": "object",
+        "required": ["title", "createdAt"],
+        "properties": {
+          "title": { "type": "string", "maxLength": 1000, "maxGraphemes": 300 },
+          "description": { "type": "string", "maxLength": 30000, "maxGraphemes": 10000 },
+          "inputs": {
+            "type": "array",
+            "maxLength": 64,
+            "items": { "type": "ref", "ref": "com.atproto.repo.strongRef" }
+          },
+          "doneWhen": { "type": "string", "maxLength": 3000, "maxGraphemes": 1000 },
+          "assignee": { "type": "string", "format": "did", "description": "When set, only this agent's claims count." },
+          "requiresApproval": {
+            "type": "boolean",
+            "description": "When true, claims count only after the operator writes an approve event."
+          },
+          "generator": { "type": "ref", "ref": "garden.engram.agents.defs#generator" },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}
