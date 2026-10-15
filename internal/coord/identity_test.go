@@ -2,6 +2,7 @@ package coord
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/haileyok/cocoon/oauth/scopes"
@@ -54,6 +55,75 @@ func TestVerifyOperator(t *testing.T) {
 	}
 	if _, err := VerifyOperator(ctx, n.Dir, nil, stranger.DID); err == nil {
 		t.Fatal("verified an operator who never claimed the agent")
+	}
+}
+
+func TestVerifyChain(t *testing.T) {
+	t.Parallel()
+	n := spacetest.NewSpaceOfType(t, SpaceType, "operator", "proj")
+	ctx := context.Background()
+	op := n.Authority // a person: no declaration
+	a := n.NewAccount("did:plc:agenta")
+	c := n.NewAccount("did:plc:childc")
+	g := n.NewAccount("did:plc:grandg")
+	pair := func(agent, operator *spacetest.Account) {
+		t.Helper()
+		if err := Declare(ctx, n.Session(agent), operator.DID, ""); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Operate(ctx, n.Session(operator), agent.DID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pair(a, op)
+	pair(c, a)
+	pair(g, c)
+	const opKey = "did:key:zQ3shOperatorsOfflineKey"
+	keys := map[string][]string{
+		a.DID: {opKey, "did:key:zPDS"},
+		c.DID: {opKey, "did:key:zPDS"},
+		g.DID: {opKey, "did:key:zPDS"},
+	}
+	rotation := func(_ context.Context, did string) ([]string, error) { return keys[did], nil }
+
+	ch, err := VerifyChain(ctx, n.Dir, nil, rotation, g.DID, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(ch.Agents, ",") != g.DID+","+c.DID+","+a.DID || ch.Operator != op.DID || ch.RecoveryKey != opKey {
+		t.Fatalf("chain %+v", ch)
+	}
+	// A person's own chain is just themselves: not an agent.
+	if _, err := VerifyChain(ctx, n.Dir, nil, rotation, op.DID, 8); err == nil {
+		t.Fatal("verified a person as an agent")
+	}
+	// Too deep.
+	if _, err := VerifyChain(ctx, n.Dir, nil, rotation, g.DID, 2); err == nil || !strings.Contains(err.Error(), "deep") {
+		t.Fatalf("depth limit: %v", err)
+	}
+	// An agent created without the operator's key first breaks the chain.
+	keys[c.DID] = []string{"did:key:zPDS"}
+	if _, err := VerifyChain(ctx, n.Dir, nil, rotation, g.DID, 8); err == nil || !strings.Contains(err.Error(), c.DID) {
+		t.Fatalf("missing recovery key: %v", err)
+	}
+	keys[c.DID] = []string{opKey}
+	// A broken link anywhere breaks the chain: g declares c, but c no
+	// longer claims it.
+	h := n.NewAccount("did:plc:orphanh")
+	keys[h.DID] = []string{opKey}
+	if err := Declare(ctx, n.Session(h), c.DID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyChain(ctx, n.Dir, nil, rotation, h.DID, 8); err == nil {
+		t.Fatal("verified an agent its operator doesn't claim")
+	}
+	// A cycle.
+	x, y := n.NewAccount("did:plc:cyclex"), n.NewAccount("did:plc:cycley")
+	keys[x.DID], keys[y.DID] = []string{opKey}, []string{opKey}
+	pair(x, y)
+	pair(y, x)
+	if _, err := VerifyChain(ctx, n.Dir, nil, rotation, x.DID, 8); err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("cycle: %v", err)
 	}
 }
 

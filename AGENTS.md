@@ -14,9 +14,15 @@ Guidance for working on Engram Garden.
 - `cmd/engram`: the agent CLI (`login`, `logout`, `spaces`, `use`,
   `remember`, `recall`, `list`, `get`, `forget`, `status`; and for a space's
   authority `create`, `members`, `model`, `index`; `init` is `login`; and
-  `agent declare|operate|verify`, which pair an agent account with its
+  `agent declare|operate|verify|spawn`, which pair an agent account with its
   operator through `internal/coord`, signing an OAuth account in once more
-  for just that public record (`agent.SignInFor`)). `cmd/engram-mcp`: per-agent
+  for just that public record (`agent.SignInFor`); `spawn` creates an agent
+  operated by the account signed in, and `verify` walks the chain of
+  operators up to a person (`coord.VerifyChain`)). An account can also sign
+  in with a key (`agent.SignInKey`, `keyauth.go`): no password or browser,
+  the JWT bearer grant against Cocoon, sessions saved and refreshed like
+  OAuth ones. See `docs/design/agent-spawning.md`. The Python client doesn't
+  sign in with keys yet. `cmd/engram-mcp`: per-agent
   MCP server (stdio). Both are thin layers over `internal/agent`: the memory
   operations, the settings file (`~/.config/engram/config.json`, ENGRAM_*
   overriding) and signing in (OAuth loopback client, or password). An agent

@@ -162,6 +162,121 @@ func VerifyOperator(ctx context.Context, dir identity.Directory, hc *http.Client
 	}
 }
 
+// Chain is an agent's operators, up to a person.
+type Chain struct {
+	// Agents are the agent and the agents operating it, nearest first.
+	Agents []string
+	// Operator is the person at the top: a DID with no declaration.
+	Operator string
+	// RecoveryKey is the first rotation key every agent in the chain shares,
+	// the one that can take any of them back.
+	RecoveryKey string
+}
+
+// RotationKeys looks up a DID's PLC rotation keys, highest priority first.
+type RotationKeys func(ctx context.Context, did string) ([]string, error)
+
+// PLCRotationKeys reads rotation keys from a PLC directory (e.g.
+// https://plc.directory).
+func PLCRotationKeys(directory string, hc *http.Client) RotationKeys {
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	return func(ctx context.Context, did string) ([]string, error) {
+		if !strings.HasPrefix(did, "did:plc:") {
+			return nil, fmt.Errorf("%s isn't a did:plc, so it has no rotation keys to check", did)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(directory, "/")+"/"+did+"/data", nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := hc.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("PLC data for %s: %s", did, resp.Status)
+		}
+		var out struct {
+			RotationKeys []string `json:"rotationKeys"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return nil, err
+		}
+		return out.RotationKeys, nil
+	}
+}
+
+// IsAgent reports whether a DID publishes an agent declaration (a person
+// doesn't). It doesn't check the declaration: see VerifyChain.
+func IsAgent(ctx context.Context, dir identity.Directory, hc *http.Client, did string) (bool, error) {
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	return hasDeclaration(ctx, dir, hc, did)
+}
+
+// hasDeclaration reports whether a DID publishes an agent declaration.
+func hasDeclaration(ctx context.Context, dir identity.Directory, hc *http.Client, did string) (bool, error) {
+	var decl struct {
+		Value Declaration `json:"value"`
+	}
+	err := getPublic(ctx, dir, hc, did, "com.atproto.repo.getRecord", url.Values{"collection": {DeclarationCollection}, "rkey": {SelfRkey}}, &decl)
+	if spaceclient.IsError(err, "RecordNotFound") {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// VerifyChain follows an agent's operators up to a person, checking each
+// link both ways (VerifyOperator), and that every agent in the chain has
+// the same first PLC rotation key, so the person's recovery key reaches all
+// of them. It fails on a cycle or past maxDepth agents.
+func VerifyChain(ctx context.Context, dir identity.Directory, hc *http.Client, rotation RotationKeys, agent string, maxDepth int) (Chain, error) {
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	var ch Chain
+	seen := map[string]bool{}
+	cur := agent
+	for {
+		if seen[cur] {
+			return ch, fmt.Errorf("the chain of operators has a cycle at %s", cur)
+		}
+		seen[cur] = true
+		if len(ch.Agents) == maxDepth {
+			return ch, fmt.Errorf("the chain of operators is more than %d agents deep", maxDepth)
+		}
+		op, err := VerifyOperator(ctx, dir, hc, cur)
+		if err != nil {
+			return ch, err
+		}
+		ch.Agents = append(ch.Agents, cur)
+		keys, err := rotation(ctx, cur)
+		if err != nil {
+			return ch, err
+		}
+		if len(keys) == 0 {
+			return ch, fmt.Errorf("%s has no rotation keys", cur)
+		}
+		if ch.RecoveryKey == "" {
+			ch.RecoveryKey = keys[0]
+		} else if keys[0] != ch.RecoveryKey {
+			return ch, fmt.Errorf("%s's first rotation key is %s, not %s like the rest of its chain", cur, keys[0], ch.RecoveryKey)
+		}
+		agentOp, err := hasDeclaration(ctx, dir, hc, op)
+		if err != nil {
+			return ch, fmt.Errorf("reading %s's declaration: %w", op, err)
+		}
+		if !agentOp {
+			ch.Operator = op
+			return ch, nil
+		}
+		cur = op
+	}
+}
+
 // getPublic reads from a DID's public repo on its PDS, without auth.
 func getPublic(ctx context.Context, dir identity.Directory, hc *http.Client, did, nsid string, params url.Values, out any) error {
 	d, err := syntax.ParseDID(did)

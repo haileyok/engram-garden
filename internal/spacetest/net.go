@@ -70,6 +70,12 @@ type Net struct {
 	extra map[string]map[string]bool
 	clock *syntax.TIDClock
 	calls map[string]int
+	// invites, when set, are createAccount's invite codes and their uses
+	// left; rotation and signInKeys are accounts' PLC rotation keys and
+	// sign-in keys.
+	invites    map[string]int
+	rotation   map[string][]string
+	signInKeys map[string][]string
 
 	// Tamper knobs.
 	CorruptCommits bool // sign commits over the wrong contents
@@ -98,6 +104,8 @@ func NewSpaceOfType(t testing.TB, spaceType, authority, skey string) *Net {
 		extra:         map[string]map[string]bool{},
 		clock:         syntax.NewTIDClock(0),
 		calls:         map[string]int{},
+		rotation:      map[string][]string{},
+		signInKeys:    map[string][]string{},
 	}
 	n.Dir = identity.NewMockDirectory()
 	n.Server = httptest.NewServer(http.HandlerFunc(n.serve))
@@ -121,6 +129,9 @@ func (n *Net) NewAccount(did string) *Account {
 	a := &Account{DID: did, Key: key, records: map[string]space.SerializedRecord{}, raw: map[string]json.RawMessage{}, public: map[string]publicRecord{}, listed: true}
 	n.mu.Lock()
 	n.accounts[did] = a
+	if n.rotation[did] == nil {
+		n.rotation[did] = []string{pdsRotationKey}
+	}
 	n.mu.Unlock()
 	n.Dir.Insert(identity.Identity{
 		DID:      syntax.DID(did),
@@ -387,6 +398,9 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 	q := r.URL.Query()
 	if strings.HasPrefix(nsid, "com.atproto.repo.") {
 		return n.routePublic(r, nsid)
+	}
+	if nsid == "com.atproto.server.createAccount" {
+		return n.createAccount(r)
 	}
 	switch nsid {
 	case "com.atproto.space.getDelegationToken":

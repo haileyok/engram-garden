@@ -21,6 +21,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/haileyok/engram-garden/internal/agent"
+	"github.com/haileyok/engram-garden/internal/coord"
 	"github.com/haileyok/engram-garden/internal/oauthfile"
 )
 
@@ -62,9 +63,14 @@ func main() {
 		signInFor: func(ctx context.Context, handle string, scopes []string, lines <-chan string) (*atclient.APIClient, []string, func(), error) {
 			return agent.SignInFor(ctx, handle, scopes, opts, agent.Prompt{Out: os.Stderr, Lines: lines, Browser: openBrowser})
 		},
-		revoke:  func(ctx context.Context, a agent.Account) error { return agent.Revoke(ctx, a, opts) },
-		pull:    ollamaPull(os.Stderr),
-		browser: openBrowser,
+		keySignInFor: func(ctx context.Context, a agent.Account, scopes []string) (*atclient.APIClient, []string, func(), error) {
+			return agent.KeySignInFor(ctx, a, scopes, opts)
+		},
+		rotationKeys: coord.PLCRotationKeys(plcURL(), opts.HTTP),
+		childrenDir:  filepath.Join(dir, "agents"),
+		revoke:       func(ctx context.Context, a agent.Account) error { return agent.Revoke(ctx, a, opts) },
+		pull:         ollamaPull(os.Stderr),
+		browser:      openBrowser,
 	}
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		c.readSecret = func(prompt string) (string, error) {
@@ -75,6 +81,15 @@ func main() {
 		}
 	}
 	os.Exit(c.run(ctx, os.Args[1:]))
+}
+
+// plcURL is the PLC directory agents' rotation keys are read from:
+// $ENGRAM_PLC_URL, else plc.directory.
+func plcURL() string {
+	if u := os.Getenv("ENGRAM_PLC_URL"); u != "" {
+		return u
+	}
+	return "https://plc.directory"
 }
 
 // openBrowser opens a URL in the desktop's browser, if there is one.

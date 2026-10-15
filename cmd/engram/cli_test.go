@@ -144,6 +144,11 @@ type agentCLI struct {
 	signInHandles []string
 	ended         int
 	granted       []string
+	// keySignIns are the scopes key sign-ins asked for; keyEnded counts
+	// the ones ended. children is where spawned agents' files go.
+	keySignIns [][]string
+	keyEnded   int
+	children   string
 }
 
 // join puts the agent in another world's space too (it still has to add the
@@ -156,7 +161,7 @@ func (a *agentCLI) join(w *world) {
 }
 
 func (w *world) agent(t *testing.T) *agentCLI {
-	return &agentCLI{t: t, w: w, path: filepath.Join(t.TempDir(), "engram", "config.json"),
+	return &agentCLI{t: t, w: w, path: filepath.Join(t.TempDir(), "engram", "config.json"), children: filepath.Join(t.TempDir(), "agents"),
 		env: map[string]string{"ENGRAM_APPVIEW_URL": w.url, "ENGRAM_APPVIEW_DID": serviceDID, "ENGRAM_EMBED_PROVIDER": "hashing"}}
 }
 
@@ -218,8 +223,20 @@ func (a *agentCLI) run(args ...string) (int, string, string) {
 			acct := a.w.net.AccountByDID("did:plc:" + strings.TrimSuffix(handle, ".test"))
 			return a.w.net.Session(acct), granted, func() { a.ended++ }, nil
 		},
-		dir:        a.w.net.Dir,
-		readSecret: func(string) (string, error) { return "typed-password", nil },
+		keySignInFor: func(_ context.Context, acct agent.Account, scopes []string) (*atclient.APIClient, []string, func(), error) {
+			if acct.SignIn != agent.SignInKey || acct.KeyFile == "" {
+				a.t.Fatalf("key sign-in for a non-key account %+v", acct)
+			}
+			if _, err := agent.LoadSignInKey(acct.KeyFile); err != nil {
+				return nil, nil, nil, err
+			}
+			a.keySignIns = append(a.keySignIns, scopes)
+			return a.w.net.Session(a.w.net.AccountByDID(acct.DID)), scopes, func() { a.keyEnded++ }, nil
+		},
+		rotationKeys: func(_ context.Context, did string) ([]string, error) { return a.w.net.RotationKeys(did), nil },
+		childrenDir:  a.children,
+		dir:          a.w.net.Dir,
+		readSecret:   func(string) (string, error) { return "typed-password", nil },
 		revoke: func(_ context.Context, acct agent.Account) error {
 			a.revoked = append(a.revoked, acct.SessionID)
 			return nil

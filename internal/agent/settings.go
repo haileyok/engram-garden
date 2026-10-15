@@ -205,9 +205,11 @@ func (s Settings) Resolve(nameOrURI string) (SpaceEntry, error) {
 type Account struct {
 	Handle string `json:"handle,omitempty"`
 	DID    string `json:"did,omitempty"`
-	// SignIn is SignInOAuth or SignInPassword.
+	// SignIn is SignInOAuth, SignInKey or SignInPassword.
 	SignIn   string `json:"signIn,omitempty"`
 	Password string `json:"password,omitempty"`
+	// KeyFile is the sign-in key's file (key sign-in).
+	KeyFile string `json:"keyFile,omitempty"`
 	// PDSHost skips resolving the account's PDS (password sign-in).
 	PDSHost string `json:"pdsHost,omitempty"`
 	// SessionID names the OAuth session, and Callback the loopback address
@@ -384,6 +386,10 @@ func (s Settings) CheckAccount() error {
 	case SignInOAuth:
 		if s.Account.DID == "" || s.Account.SessionID == "" || s.Account.Callback == "" {
 			return errors.New("not signed in: run `engram login`")
+		}
+	case SignInKey:
+		if s.Account.DID == "" || s.Account.KeyFile == "" {
+			return errors.New("key sign-in needs the account's DID and its key file")
 		}
 	default:
 		return errors.New("not signed in: run `engram login` (or set ENGRAM_IDENTIFIER and ENGRAM_PASSWORD)")
