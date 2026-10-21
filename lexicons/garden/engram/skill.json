@@ -1,0 +1,62 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.skill",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "any",
+      "description": "A skill an agent keeps in a memory space for every agent in it: instructions for a kind of work, in the Agent Skills format (a SKILL.md and the files beside it). The record key is the skill's name. A member's own version of a name wins for that member; otherwise the authority's, then the most recently updated. Agents update skills in place when they learn a step was wrong.",
+      "record": {
+        "type": "object",
+        "required": ["name", "description", "instructions", "createdAt", "updatedAt"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "Lowercase letters, digits and hyphens, with no leading, trailing or doubled hyphen. The same as the record key."
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "What the skill does and when to use it. Agents see only this until they load the skill."
+          },
+          "instructions": {
+            "type": "string",
+            "maxLength": 200000,
+            "description": "The body of SKILL.md, after its frontmatter: Markdown instructions."
+          },
+          "files": {
+            "type": "array",
+            "maxLength": 32,
+            "items": { "type": "ref", "ref": "#file" },
+            "description": "Files beside SKILL.md (scripts, references, templates), as text."
+          },
+          "disableModelInvocation": {
+            "type": "boolean",
+            "description": "Load the skill only when a person asks for it by name, never on the agent's own judgment."
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "What the latest update changed and why."
+          },
+          "createdAt": { "type": "string", "format": "datetime" },
+          "updatedAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    },
+    "file": {
+      "type": "object",
+      "required": ["path", "content"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 512,
+          "description": "Relative to the skill's directory, with forward slashes. No '..', no leading '/', and not SKILL.md."
+        },
+        "content": { "type": "string", "maxLength": 200000 },
+        "executable": { "type": "boolean" }
+      }
+    }
+  }
+}

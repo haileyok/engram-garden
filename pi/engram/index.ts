@@ -17,6 +17,9 @@
  */
 
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
@@ -50,11 +53,24 @@ import {
 	spacesSummary,
 } from "./format.ts";
 import { errorText, McpServer } from "./mcp.ts";
+import {
+	cachedSkills,
+	dirHash,
+	dirtySkills,
+	markSaved,
+	readSkillDir,
+	replaceSkill,
+	type Skill,
+	skillDirOf,
+	skillsCacheDir,
+	validSkillName,
+	writeSkills,
+} from "./skills.ts";
 
 const run = promisify(execFile);
 
 /** Tools this extension wraps itself; engram-mcp's others pass through. */
-const WRAPPED = new Set(["remember", "recall", "get_memory", "list_memories", "forget"]);
+const WRAPPED = new Set(["remember", "recall", "get_memory", "list_memories", "forget", "save_skill"]);
 const CHUNK_CHARS = 80_000;
 
 interface RecallDetails {
@@ -201,6 +217,121 @@ export default function engram(pi: ExtensionAPI) {
 		}
 	}
 
+	// ---- skills -------------------------------------------------------------
+
+	const skillsDir = skillsCacheDir();
+	let skillsSynced: Promise<void> = Promise.resolve();
+	let syncing = false;
+
+	/**
+	 * syncSettled waits a while for a sync that's running. An edit made while
+	 * one still runs stays on disk unsaved (a sync never overwrites it), for
+	 * the next edit or /engram skills push.
+	 */
+	async function syncSettled(): Promise<boolean> {
+		const wait = Number(process.env.PI_ENGRAM_SYNC_WAIT_MS) || 10_000; // tests shorten it
+		await Promise.race([skillsSynced, new Promise((r) => setTimeout(r, wait).unref())]);
+		return !syncing;
+	}
+	const stillSyncing = "[engram] Skills are still being fetched from Engram, so this change wasn't saved yet; it stays on disk, and /engram skills push saves it.";
+
+	/** syncSkills writes the spaces' skills into the cache pi loads them from. */
+	async function syncSkills(ctx: ExtensionContext, hadCache: boolean, report = false) {
+		const id = session;
+		const out = await need().call<{ skills: Skill[]; note?: string }>("list_skills", { content: true });
+		if (id !== session) return;
+		// Settings order is precedence: the first space with a name wins.
+		const { changed, kept } = writeSkills(skillsDir, out.skills);
+		if (!ctx.hasUI) return;
+		if (changed && hadCache)
+			ctx.ui.notify(`engram: skills changed in Engram (${out.skills.length} in all); /reload to load them`, "info");
+		else if (report)
+			ctx.ui.notify(`engram: ${out.skills.length} skills, ${changed ? "updated" : "already up to date"}${out.note ? ` (${out.note})` : ""}`, "info");
+		if (kept.length)
+			ctx.ui.notify(
+				`engram: ${kept.join(", ")} changed here but not in Engram, so left as is; /engram skills push saves them`,
+				"warning",
+			);
+	}
+
+	pi.on("resources_discover", async () => {
+		// The first time, there's no cache yet: wait a little for it.
+		if (!existsSync(skillsDir))
+			await Promise.race([skillsSynced, new Promise((r) => setTimeout(r, 8000).unref())]);
+		return existsSync(skillsDir) ? { skillPaths: [skillsDir] } : undefined;
+	});
+
+	/** saveAfterBash saves skills a shell command in the skills directory changed. */
+	async function saveAfterBash(event: { input: Record<string, unknown>; content: any[]; details?: unknown; structuredContent?: any }) {
+		const cmd = String(event.input.command ?? "");
+		if (!cmd.includes(skillsDir) && !cmd.includes("pi-engram/skills")) return;
+		if (!(await syncSettled())) return dirtySkills(skillsDir).length ? appended(event, stillSyncing) : undefined;
+		const lines: string[] = [];
+		for (const name of dirtySkills(skillsDir)) {
+			try {
+				const out = await saveSkillDir(join(skillsDir, name));
+				lines.push(`[engram] ${out.created ? "Added" : "Saved"} skill ${name} for every agent in its space (${out.uri}).`);
+			} catch (err) {
+				lines.push(`[engram] Skill ${name} changed, but wasn't saved to Engram: ${errorText(err)}`);
+			}
+		}
+		if (!lines.length) return;
+		return appended(event, lines.join("\n"));
+	}
+
+	/** appended is a tool result with a line added, keeping its details and structured content. */
+	function appended(event: { content: any[]; details?: unknown; structuredContent?: any }, line: string) {
+		return {
+			content: [...event.content, { type: "text" as const, text: `\n${line}` }],
+			details: event.details,
+			structuredContent: event.structuredContent,
+		};
+	}
+
+	/** saveSkillDir saves a skill directory in the cache to Engram. */
+	async function saveSkillDir(dir: string, note?: string) {
+		const before = dirHash(dir);
+		const s = readSkillDir(dir);
+		const name = dir.split("/").pop()!;
+		if (s.name !== name) throw new Error(`the frontmatter's name (${s.name || "none"}) must be the directory's name, ${name}`);
+		if ([s.description, s.instructions, ...(s.files ?? []).map((f) => f.content)].some(looksSecret))
+			throw new Error("it looks like it contains a credential, and every agent in the space reads skills: take the secret out");
+		const known = cachedSkills(skillsDir).find((k) => k.name === name);
+		const args: Record<string, unknown> = {
+			name,
+			description: s.description,
+			instructions: s.instructions,
+			files: s.files ?? [],
+			disableModelInvocation: !!s.disableModelInvocation,
+		};
+		if (note) args.note = note;
+		if (known?.space) args.space = known.space;
+		const out = await need().call<{ uri: string; created: boolean; note?: string; space?: string }>("save_skill", args);
+		markSaved(skillsDir, name, { space: out.space, uri: out.uri }, before);
+		return out;
+	}
+
+	// Edits to the cached skills are edits to the shared ones.
+	pi.on("tool_result", async (event, ctx) => {
+		if (event.toolName === "bash" && !event.isError && server) return saveAfterBash(event);
+		if ((event.toolName !== "edit" && event.toolName !== "write") || event.isError || !server) return;
+		const raw = String(event.input.path ?? event.input.file_path ?? "");
+		if (!raw) return;
+		const abs = resolve(ctx.cwd, raw.startsWith("~/") ? join(homedir(), raw.slice(2)) : raw);
+		const dir = skillDirOf(abs, skillsDir);
+		if (!dir || !existsSync(join(dir, "SKILL.md"))) return;
+		// Let a sync that's running finish first; it leaves edited skills alone.
+		if (!(await syncSettled())) return appended(event, stillSyncing);
+		let line: string;
+		try {
+			const out = await saveSkillDir(dir);
+			line = `[engram] ${out.created ? "Added" : "Saved"} skill ${dir.split("/").pop()} for every agent in its space (${out.uri}).${out.note ? ` ${out.note}` : ""}`;
+		} catch (err) {
+			line = `[engram] The file changed, but the skill wasn't saved to Engram: ${errorText(err)}`;
+		}
+		return appended(event, line);
+	});
+
 	// ---- lifecycle --------------------------------------------------------
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -221,6 +352,19 @@ export default function engram(pi: ExtensionAPI) {
 		projectReady = detectProject(ctx.cwd).then((p) => {
 			if (id === session) project = p;
 		});
+		const hadCache = existsSync(skillsDir);
+		syncing = true;
+		skillsSynced = server
+			.start()
+			.then(() => syncSkills(ctx, hadCache))
+			.catch((err) => {
+				// A failed start is reported below; anything else here.
+				if (id === session && ctx.hasUI && server?.handshakeDone)
+					ctx.ui.notify(`engram: skills not ${hadCache ? "updated" : "loaded"}: ${errorText(err)}`, "warning");
+			})
+			.finally(() => {
+				if (id === session) syncing = false;
+			});
 		void server
 			.start()
 			.then(() => Promise.all([refreshSpaces(ctx), registerOtherTools()]))
@@ -272,6 +416,9 @@ export default function engram(pi: ExtensionAPI) {
 			parts.push(
 				"Call remember, as soon as you learn them, for decisions and their reasons, the person's preferences and corrections, gotchas, and milestones such as merges and deploys.",
 			);
+		parts.push(
+			`Skills kept in Engram are in ${skillsDir} and listed with your other skills. Every agent in their space uses them, and you should improve them: when a skill's steps turned out wrong, out of date or incomplete, fix its SKILL.md (or files) there with edit or write, and the change is saved to Engram. To make a new shared skill, write ${skillsDir}/<name>/SKILL.md (frontmatter with name and description, then instructions), or call save_skill.`,
+		);
 		parts.push("Everyone in a space can read what's stored there: never store secrets or credentials.");
 		return parts.join("\n\n");
 	}
@@ -721,6 +868,62 @@ export default function engram(pi: ExtensionAPI) {
 		renderCall: (args, theme) => title(theme, "forget", args.uri),
 	});
 
+	pi.registerTool({
+		name: "save_skill",
+		label: "Save skill",
+		description:
+			"Create or update a shared skill in Engram: instructions for a kind of work that every agent in the space loads. Give the whole new instructions (Markdown, without frontmatter), not a diff. Files are kept unless you pass them. Prefer editing the skill's SKILL.md in the skills directory, which saves too; use this to create one with a note, or for skills you can't edit there.",
+		promptSnippet: "Create or update a shared skill (instructions every agent in the space uses)",
+		parameters: Type.Object({
+			name: Type.String({ description: "Lowercase letters, digits and hyphens, such as attie-deploy" }),
+			description: Type.String({ description: "What the skill does and when to use it; agents see only this until they load it" }),
+			instructions: Type.String({ description: "The whole instructions, in Markdown" }),
+			files: Type.Optional(
+				Type.Array(
+					Type.Object({
+						path: Type.String({ description: "Relative to the skill's directory" }),
+						content: Type.String(),
+						executable: Type.Optional(Type.Boolean()),
+					}),
+					{ description: "Files beside SKILL.md, as text; omit to keep the current ones" },
+				),
+			),
+			note: Type.Optional(Type.String({ description: "What this version changes and why" })),
+			space: Type.Optional(Type.String({ description: "The space, by name or URI (default: where the skill is, else the default space)" })),
+		}),
+		async execute(_id, params, signal) {
+			if (!validSkillName(params.name))
+				throw new Error("A skill's name is lowercase letters, digits and single hyphens, at most 64 characters.");
+			const blob = [params.instructions, params.description, params.note ?? "", ...(params.files ?? []).map((f) => f.content)];
+			if (blob.some(looksSecret))
+				throw new Error("This looks like it contains a credential. Skills are readable by every agent in the space: leave the secret out.");
+			const args: Record<string, unknown> = { ...params };
+			if (!args.space) {
+				const known = cachedSkills(skillsDir).find((k) => k.name === params.name);
+				if (known?.space) args.space = known.space;
+			}
+			const out = await need().call<{ uri: string; created: boolean; note?: string; space?: string }>("save_skill", args, signal);
+			// Keep the copy on disk in step, so reading it shows the new version
+			// now, unless it has changes of its own not in Engram.
+			let kept = false;
+			try {
+				const full = await need().call<{ skill: Skill }>("get_skill", { name: params.name, space: out.space ?? args.space ?? "" }, signal);
+				kept = !replaceSkill(skillsDir, full.skill);
+			} catch {}
+			return {
+				content: text(
+					`${out.created ? "Added" : "Saved"} skill ${params.name}: ${out.uri}${out.note ? `\nNote: ${out.note}` : ""}${out.created ? `\nIt's in ${join(skillsDir, params.name)}; pi lists it after /reload.` : ""}${kept ? `\nThe copy in ${join(skillsDir, params.name)} has changes of its own that aren't in Engram, so it was left as is: save them with /engram skills push, or redo them in this skill.` : ""}`,
+				),
+				details: { uri: out.uri, name: params.name, note: out.note },
+			};
+		},
+		renderCall: (args, theme) => title(theme, "save_skill", `${args.name}${args.note ? ` — ${shorten(args.note, 80)}` : ""}`),
+		renderResult: (result, _o, theme) => {
+			const d = result.details as { note?: string } | undefined;
+			return new Text(d?.note ? theme.fg("warning", d.note) : theme.fg("success", "✓ saved"), 0, 0);
+		},
+	});
+
 	// ---- /engram ------------------------------------------------------------
 
 	const subcommands = [
@@ -729,6 +932,7 @@ export default function engram(pi: ExtensionAPI) {
 		{ value: "recall", label: "recall", description: "Search memories yourself: /engram recall <query>" },
 		{ value: "capture", label: "capture", description: "Capture memories from the conversation now" },
 		{ value: "review", label: "review", description: "Look over (and forget) memories captured in this session" },
+		{ value: "skills", label: "skills", description: "The skills from Engram; skills sync fetches them, skills push saves local changes" },
 		{ value: "restart", label: "restart", description: "Restart engram-mcp" },
 	];
 
@@ -760,7 +964,7 @@ export default function engram(pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("engram", {
-		description: "Engram memory: status, spaces, recall, capture, review, restart",
+		description: "Engram memory: status, spaces, recall, capture, review, skills, restart",
 		getArgumentCompletions: (prefix) => {
 			const p = prefix.trim();
 			if (p.includes(" ")) return null;
@@ -827,6 +1031,41 @@ export default function engram(pi: ExtensionAPI) {
 							ms.push({ uri: m.uri, text: m.text, tags: m.tags, author: "", createdAt: r.at });
 					}
 					await showMemories(ctx, "Memories captured in this session", ms, true);
+					return;
+				}
+				case "skills": {
+					if (arg === "push") {
+						const dirty = dirtySkills(skillsDir);
+						if (!dirty.length) return ctx.ui.notify("engram: no skills changed here that aren't in Engram", "info");
+						for (const name of dirty) {
+							try {
+								const out = await saveSkillDir(join(skillsDir, name));
+								ctx.ui.notify(`engram: saved ${name} (${out.uri})`, "info");
+							} catch (err) {
+								ctx.ui.notify(`engram: ${name} not saved: ${errorText(err)}`, "error");
+							}
+						}
+						return;
+					}
+					if (arg === "sync") {
+						try {
+							await syncSkills(ctx, true, true);
+						} catch (err) {
+							ctx.ui.notify(`engram: ${errorText(err)}`, "error");
+						}
+						return;
+					}
+					const ks = cachedSkills(skillsDir);
+					const dirty = new Set(dirtySkills(skillsDir));
+					ctx.ui.notify(
+						ks.length
+							? [
+									`Skills from Engram, in ${skillsDir}:`,
+									...ks.map((k) => `  ${k.name}  (${k.space}${k.author ? `, ${k.author}` : ""})${dirty.has(k.name) ? "  changed here, not saved" : ""}`),
+								].join("\n")
+							: `No skills from Engram yet. Add one: write ${skillsDir}/<name>/SKILL.md, or engram skill put <dir>.`,
+						"info",
+					);
 					return;
 				}
 				case "restart": {

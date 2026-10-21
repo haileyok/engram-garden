@@ -12,7 +12,7 @@ from typing import Any
 
 import httpx
 
-from . import lex
+from . import lex, skills
 from .agent import Agent, ForgetOut, GetOut, MemoriesOut, Memory, RememberOut
 from .embed import HashingProvider, OpenAIProvider, Provider
 from .errors import EngramError, SettingsError, SignInExpiredError, explain
@@ -25,6 +25,19 @@ from .spaceclient import Client
 
 #: How long after a memory is stored to wait for the check that the appview can read its space.
 INDEXING_CHECK_WAIT = 2.0
+
+
+@dataclass
+class ListSkillsOut:
+    skills: list[skills.SkillInfo]
+    #: Spaces whose skills couldn't be read.
+    note: str = ""
+
+    def to_dict(self, content: bool = True) -> dict[str, Any]:
+        d: dict[str, Any] = {"skills": [s.to_dict(content) for s in self.skills]}
+        if self.note:
+            d["note"] = self.note
+        return d
 
 
 def space_of_uri(uri: str) -> str:
@@ -286,6 +299,103 @@ class Spaces(ManageMixin):
         """Delete one of the agent's own memories, by URI."""
         a, _ = self.agent(space_of_uri(uri))
         return await a.forget(uri)
+
+    # ---- skills ----
+
+    async def list_skills(self, space: str = "", content: bool = False) -> ListSkillsOut:
+        """The skills in every space the agent uses (or one), one version per name in each space. Without
+        content, only names and descriptions are filled in."""
+        st = self._settings()
+        entries = [st.resolve(space)] if space else list(st.spaces)
+
+        async def one(e: SpaceEntry) -> tuple[list[skills.SkillInfo], list[str]]:
+            a, _ = self.agent(e.uri)
+            return await a.skills()
+
+        results = await asyncio.gather(*(one(e) for e in entries), return_exceptions=True)
+        out = ListSkillsOut(skills=[])
+        notes = []
+        failed = 0
+        for e, res in zip(entries, results, strict=True):
+            if isinstance(res, BaseException):
+                notes.append(f"couldn't read skills in {e.name}: {res}")
+                failed += 1
+                continue
+            found, unreadable = res
+            if unreadable:
+                notes.append(
+                    f"couldn't read {', '.join(unreadable)}'s skills in {e.name}, so their versions are missing"
+                )
+            for sk in found:
+                sk.space = e.name
+                if not content:
+                    sk.skill.instructions = ""
+                    sk.skill.files = []
+                out.skills.append(sk)
+        if entries and failed == len(entries):
+            raise EngramError("; ".join(notes))
+        out.note = "; ".join(notes)
+        return out
+
+    async def get_skill(self, name: str, space: str = "") -> skills.SkillInfo:
+        """One skill, in full (from the first space that has it, unless space)."""
+        for sk in (await self.list_skills(space, content=True)).skills:
+            if sk.name == name:
+                return sk
+        raise EngramError(f"no skill named {name}" + (f" in {space}" if space else ""))
+
+    async def save_skill(
+        self,
+        name: str,
+        description: str,
+        instructions: str,
+        files: list[skills.SkillFile] | None = None,
+        disable_model_invocation: bool | None = None,
+        note: str = "",
+        space: str = "",
+    ) -> skills.SaveSkillOut:
+        """Write the agent's own version of a skill. Without a space, it goes where the agent's version
+        already is, else to the default space."""
+        target = space
+        others: list[skills.SkillInfo] = []
+        try:
+            listed = await self.list_skills(space)
+        except EngramError:
+            listed = ListSkillsOut(skills=[])
+        me = self.client.did
+        for sk in listed.skills:
+            if sk.name != name:
+                continue
+            if not target and sk.author == me:
+                target = sk.space
+            if sk.author != me:
+                others.append(sk)
+        a, e = self.agent(target)
+        out = await a.save_skill(
+            name, description, instructions, files=files, disable_model_invocation=disable_model_invocation, note=note
+        )
+        out.space = e.name
+        for o in others:
+            if o.space == e.name:
+                out.note = (
+                    f"{o.author} also keeps a skill named {name} here; "
+                    "yours is what you'll use, theirs is what they use"
+                )
+        return out
+
+    async def delete_skill(self, name: str, space: str = "") -> str:
+        """Delete the agent's own version of a skill; returns its URI."""
+        target = space
+        if not target:
+            me = self.client.did
+            for sk in (await self.list_skills()).skills:
+                if sk.name == name and sk.author == me:
+                    target = sk.space
+                    break
+            if not target:
+                raise EngramError(f"you have no skill named {name}; you can only delete your own")
+        a, _ = self.agent(target)
+        return await a.delete_skill(name)
 
     # ---- list_spaces ----
 

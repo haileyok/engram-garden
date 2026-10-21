@@ -2,7 +2,7 @@
 // the model on a prompt, and what capturing stores.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -48,6 +48,7 @@ async function harness(settings: Record<string, unknown> = {}): Promise<Harness>
 		JSON.stringify({ command: process.execPath, args: [fake], env: { FAKE_MEMORIES: JSON.stringify(seeded) }, ...settings }),
 	);
 	process.env.PI_CODING_AGENT_DIR = dir;
+	process.env.XDG_CACHE_HOME = join(dir, "cache");
 	const { default: engram } = await import("../engram/index.ts");
 
 	const h: Harness = {
@@ -535,6 +536,167 @@ test("the first prompt waits for a slow engram-mcp start", async () => {
 		const [res] = await h.emit("before_agent_start", startEvent("how do attie deploys to pop1 work, which workflow?"));
 		assert.ok(res?.message, "recalled after the start, not given up at recallTimeoutMs");
 	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+const seededSkills = [
+	{
+		name: "attie-deploy",
+		description: "Deploy Attie to pop1.",
+		instructions: "# Deploy\n\nDispatch the workflow.\n",
+		files: [{ path: "scripts/check.sh", content: "#!/bin/sh\n", executable: true }],
+		space: "attie",
+		author: "did:plc:a",
+		uri: "at://x/attie-deploy",
+	},
+];
+
+test("skills from Engram are written where pi loads them, and edits there are saved", async () => {
+	const h = await harness({ env: { FAKE_MEMORIES: "[]", FAKE_SKILLS: JSON.stringify(seededSkills) } });
+	try {
+		await h.emit("session_start", { type: "session_start" });
+		const [found] = await h.emit("resources_discover", { type: "resources_discover", cwd: h.ctx.cwd, reason: "startup" });
+		const dir = found.skillPaths[0];
+		assert.match(dir, /pi-engram\/skills$/);
+		const skillMd = join(dir, "attie-deploy", "SKILL.md");
+		assert.match(readFileSync(skillMd, "utf8"), /^---\nname: attie-deploy\ndescription: "Deploy Attie to pop1."\n---\n\n# Deploy/);
+
+		// The system prompt says where they are.
+		const ev = startEvent("go");
+		await h.emit("before_agent_start", ev);
+		assert.ok(ev.systemPromptOptions.sections.memory.includes(dir));
+
+		// The agent fixes a step with edit: it's saved, in the skill's own space.
+		writeFileSync(skillMd, readFileSync(skillMd, "utf8").replace("Dispatch the workflow.", "Dispatch the workflow, then check Argo."));
+		const [res] = await h.emit("tool_result", {
+			type: "tool_result", toolName: "edit", toolCallId: "t", input: { path: skillMd }, content: [{ type: "text", text: "edited" }], isError: false,
+		});
+		assert.match(res.content.at(-1).text, /\[engram\] Saved skill attie-deploy/);
+		const stored = await h.tools.get("engram_debug_skills").execute("d", {}, undefined, undefined, h.ctx);
+		const s = (stored.structuredContent as any).skills.find((k: any) => k.name === "attie-deploy");
+		assert.match(s.instructions, /check Argo/);
+		assert.equal(s.space, "attie");
+		assert.equal(s.files.length, 1, "files sent along");
+
+		// A new skill written into the directory is added; a name that doesn't
+		// match its directory is reported, not saved.
+		const fresh = join(dir, "create-pr", "SKILL.md");
+		mkdirSync(join(dir, "create-pr"));
+		writeFileSync(fresh, "---\nname: create-pr\ndescription: Open a draft PR with gh.\n---\n\nUse gh.\n");
+		const [added] = await h.emit("tool_result", { type: "tool_result", toolName: "write", toolCallId: "t2", input: { path: fresh }, content: [], isError: false });
+		assert.match(added.content.at(-1).text, /Added skill create-pr/);
+		writeFileSync(fresh, "---\nname: other\ndescription: d\n---\nx\n");
+		const [bad] = await h.emit("tool_result", { type: "tool_result", toolName: "write", toolCallId: "t3", input: { path: fresh }, content: [], isError: false });
+		assert.match(bad.content.at(-1).text, /wasn't saved to Engram: the frontmatter's name \(other\)/);
+
+		// Edits elsewhere are left alone.
+		const [other] = await h.emit("tool_result", { type: "tool_result", toolName: "edit", toolCallId: "t4", input: { path: join(h.ctx.cwd, "x.ts") }, content: [], isError: false });
+		assert.equal(other, undefined);
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("save_skill saves and refreshes the copy on disk", async () => {
+	const h = await harness({ env: { FAKE_MEMORIES: "[]", FAKE_SKILLS: JSON.stringify(seededSkills) } });
+	try {
+		await h.emit("session_start", { type: "session_start" });
+		const [found] = await h.emit("resources_discover", { type: "resources_discover", cwd: h.ctx.cwd, reason: "startup" });
+		const out = await h.tools.get("save_skill").execute(
+			"s", { name: "attie-deploy", description: "Deploy Attie.", instructions: "# Deploy v2", note: "rewrote it" }, undefined, undefined, h.ctx,
+		);
+		assert.match(out.content[0].text, /^Saved skill attie-deploy/);
+		assert.match(readFileSync(join(found.skillPaths[0], "attie-deploy", "SKILL.md"), "utf8"), /# Deploy v2/);
+		await assert.rejects(
+			h.tools.get("save_skill").execute("s2", { name: "x", description: "d", instructions: "token=abcdefgh12345678" }, undefined, undefined, h.ctx),
+			/credential/,
+		);
+		await assert.rejects(
+			h.tools.get("save_skill").execute("s3", { name: "Bad", description: "d", instructions: "i" }, undefined, undefined, h.ctx),
+			/lowercase/,
+		);
+		await assert.rejects(
+			h.tools.get("save_skill").execute("s4", { name: "x", description: "d", instructions: "i", note: "token=abcdefgh12345678" }, undefined, undefined, h.ctx),
+			/credential/,
+		);
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("an edit that can't be saved is kept on disk, and push saves it later", async () => {
+	const h = await harness({ env: { FAKE_MEMORIES: "[]", FAKE_SKILLS: JSON.stringify(seededSkills) } });
+	try {
+		await h.emit("session_start", { type: "session_start" });
+		const [found] = await h.emit("resources_discover", { type: "resources_discover", cwd: h.ctx.cwd, reason: "startup" });
+		const md = join(found.skillPaths[0], "attie-deploy", "SKILL.md");
+		writeFileSync(md, readFileSync(md, "utf8").replace("Dispatch the workflow.", "Dispatch it with token=abcdefgh12345678."));
+		const [res] = await h.emit("tool_result", { type: "tool_result", toolName: "edit", toolCallId: "t", input: { path: md }, content: [], isError: false });
+		assert.match(res.content.at(-1).text, /wasn't saved to Engram: it looks like it contains a credential/);
+
+		// A new session syncs: the unsaved edit stays, with a warning.
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+		h.notes.length = 0;
+		await h.emit("session_start", { type: "session_start" });
+		await h.emit("resources_discover", { type: "resources_discover", cwd: h.ctx.cwd, reason: "startup" });
+		await waitFor(() => h.notes.some((n) => /attie-deploy changed here but not in Engram/.test(n)));
+		assert.match(readFileSync(md, "utf8"), /token=/);
+
+		// Take the secret out by hand (not through edit), then push.
+		writeFileSync(md, readFileSync(md, "utf8").replace(" with token=abcdefgh12345678", ", then check Argo"));
+		await h.commands.get("engram").handler("skills push", h.ctx);
+		assert.ok(h.notes.some((n) => /saved attie-deploy/.test(n)));
+		await h.commands.get("engram").handler("skills", h.ctx);
+		assert.ok(!h.notes.at(-1)!.includes("changed here, not saved"));
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("skills changed by a shell command in the skills directory are saved", async () => {
+	const h = await harness({ env: { FAKE_MEMORIES: "[]", FAKE_SKILLS: JSON.stringify(seededSkills) } });
+	try {
+		await h.emit("session_start", { type: "session_start" });
+		const [found] = await h.emit("resources_discover", { type: "resources_discover", cwd: h.ctx.cwd, reason: "startup" });
+		const md = join(found.skillPaths[0], "attie-deploy", "SKILL.md");
+		writeFileSync(md, readFileSync(md, "utf8").replace("Dispatch the workflow.", "Dispatch it (sed edit)."));
+		const [res] = await h.emit("tool_result", {
+			type: "tool_result", toolName: "bash", toolCallId: "b", input: { command: `sed -i s/x/y/ ${md}` }, content: [],
+			details: { exitCode: 0 }, structuredContent: { exitCode: 0 }, isError: false,
+		});
+		assert.match(res.content.at(-1).text, /\[engram\] Saved skill attie-deploy/);
+		assert.deepEqual(res.details, { exitCode: 0 }, "details kept");
+		assert.deepEqual(res.structuredContent, { exitCode: 0 }, "structured content kept");
+		const [none] = await h.emit("tool_result", { type: "tool_result", toolName: "bash", toolCallId: "b2", input: { command: "ls" }, content: [], isError: false });
+		assert.equal(none, undefined);
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("an edit while a slow sync runs stays on disk, unsaved, and isn't marked saved", async () => {
+	const h = await harness({ env: { FAKE_MEMORIES: "[]", FAKE_SKILLS: JSON.stringify(seededSkills) } });
+	try {
+		// A first session leaves a cache.
+		await h.emit("session_start", { type: "session_start" });
+		const [found] = await h.emit("resources_discover", { type: "resources_discover", cwd: h.ctx.cwd, reason: "startup" });
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+		const md = join(found.skillPaths[0], "attie-deploy", "SKILL.md");
+
+		// The next one's sync is slow; an edit lands meanwhile.
+		process.env.PI_ENGRAM_SYNC_WAIT_MS = "100";
+		const settings = JSON.parse(readFileSync(join(process.env.PI_CODING_AGENT_DIR!, "engram.json"), "utf8"));
+		settings.env.FAKE_SLOW_LIST = "1500";
+		writeFileSync(join(process.env.PI_CODING_AGENT_DIR!, "engram.json"), JSON.stringify(settings));
+		await h.emit("session_start", { type: "session_start" });
+		writeFileSync(md, readFileSync(md, "utf8").replace("Dispatch the workflow.", "Dispatch it, mid-sync."));
+		const [res] = await h.emit("tool_result", { type: "tool_result", toolName: "edit", toolCallId: "t", input: { path: md }, content: [], isError: false });
+		assert.match(res.content.at(-1).text, /still being fetched/);
+		await waitFor(() => h.notes.some((n) => /attie-deploy changed here but not in Engram/.test(n)), 8000);
+		assert.match(readFileSync(md, "utf8"), /mid-sync/);
+	} finally {
+		delete process.env.PI_ENGRAM_SYNC_WAIT_MS;
 		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
 	}
 });

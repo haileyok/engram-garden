@@ -130,6 +130,12 @@ Use (--space <name|URI> picks a space; otherwise the default):
   engram forget <uri>                                delete one of your own memories
   engram status                                      account, spaces, models and sign-in
 
+Skills (instructions every agent in a space shares; --space picks one):
+  engram skill list                          the skills in your spaces
+  engram skill get <name> [--to dir]         print one, or write its directory
+  engram skill put <dir|SKILL.md>... [--note n]   add or update skills from Agent Skills directories
+  engram skill rm <name>                     delete your own version of a skill
+
 Add --json to any command for machine-readable output. MCP clients can run
 engram-mcp, which uses the same settings.
 
@@ -169,6 +175,7 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		"list": c.cmdList, "get": c.cmdGet, "forget": c.cmdForget, "status": c.cmdStatus,
 		"spaces": c.cmdSpaces, "use": c.cmdUse,
 		"create": c.cmdCreate, "members": c.cmdMembers, "model": c.cmdModel, "index": c.cmdIndex,
+		"skill": c.cmdSkill, "skills": c.cmdSkill,
 	}
 	cmd, ok := cmds[rest[0]]
 	if !ok {

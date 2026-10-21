@@ -559,3 +559,56 @@ func TestSpaceTheAppviewCantRead(t *testing.T) {
 		t.Fatalf("recall after the grant: %+v", found)
 	}
 }
+
+// TestSkillTools: one agent saves a skill, another lists and reads it, and
+// the second's own version wins for it.
+func TestSkillTools(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t, true)
+	alice := connect(t, w.tools(t, "did:plc:alice", embed.HashingProvider{}))
+	bob := connect(t, w.tools(t, "did:plc:bob", embed.HashingProvider{}))
+
+	var saved agent.SaveSkillOut
+	if msg := call(t, alice, "save_skill", map[string]any{
+		"name": "attie-deploy", "description": "Deploy Attie to pop1. Use for any Attie deploy.",
+		"instructions": "# Deploy\n\nDispatch the Deploy Attie workflow.",
+		"files":        []map[string]any{{"path": "scripts/check.sh", "content": "#!/bin/sh\n", "executable": true}},
+	}, &saved); msg != "" {
+		t.Fatal(msg)
+	}
+	if !saved.Created {
+		t.Fatalf("save: %+v", saved)
+	}
+
+	var list agent.ListSkillsOut
+	if msg := call(t, bob, "list_skills", nil, &list); msg != "" {
+		t.Fatal(msg)
+	}
+	if len(list.Skills) != 1 || list.Skills[0].Name != "attie-deploy" || list.Skills[0].Instructions != "" || list.Skills[0].Space == "" {
+		t.Fatalf("list: %+v", list)
+	}
+	var got agent.GetSkillOut
+	if msg := call(t, bob, "get_skill", map[string]any{"name": "attie-deploy"}, &got); msg != "" {
+		t.Fatal(msg)
+	}
+	if !strings.Contains(got.Skill.Instructions, "Deploy Attie workflow") || len(got.Skill.Files) != 1 {
+		t.Fatalf("get: %+v", got)
+	}
+
+	// Bob fixes a step: his own version, which wins for him.
+	var bobSaved agent.SaveSkillOut
+	if msg := call(t, bob, "save_skill", map[string]any{
+		"name": "attie-deploy", "description": "Deploy Attie to pop1.", "instructions": "# Deploy\n\nDispatch it, then check Argo.", "note": "added the Argo check",
+	}, &bobSaved); msg != "" {
+		t.Fatal(msg)
+	}
+	if !strings.Contains(bobSaved.Note, "did:plc:alice also keeps") {
+		t.Fatalf("no note about alice's version: %+v", bobSaved)
+	}
+	if msg := call(t, bob, "get_skill", map[string]any{"name": "attie-deploy"}, &got); msg != "" || !strings.Contains(got.Skill.Instructions, "Argo") {
+		t.Fatalf("bob gets %q (%s)", got.Skill.Instructions, msg)
+	}
+	if msg := call(t, alice, "delete_skill", map[string]any{"name": "nope"}, nil); !strings.Contains(msg, "no skill named nope") {
+		t.Fatalf("delete missing: %q", msg)
+	}
+}

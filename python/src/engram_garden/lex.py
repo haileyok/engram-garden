@@ -14,6 +14,10 @@ from . import vec
 SPACE_TYPE = "garden.engram.space"
 MEMORY_COLLECTION = "garden.engram.memory"
 CONFIG_COLLECTION = "garden.engram.config"
+#: Skills, keyed by name.
+SKILL_COLLECTION = "garden.engram.skill"
+#: Where agents' working sessions stand, keyed by the harness's session ID.
+SESSION_COLLECTION = "garden.engram.session"
 #: The config record's key in the authority's repo.
 CONFIG_RKEY = "self"
 #: Bounds the text sent to an embedding model, to stay inside common models' input limits.

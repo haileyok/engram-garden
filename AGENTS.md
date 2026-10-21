@@ -45,6 +45,11 @@ Guidance for working on Engram Garden.
 - `internal/oauthfile`: OAuth sessions as files, for the web app and the CLI.
 - `flake.nix` packages the agent tools. When `go.mod` changes, update
   `vendorHash`: build with a wrong one and use the hash Nix reports.
+- Skills (`docs/design/skills.md`): `garden.engram.skill` records in members' own repos, read directly
+  from members' PDSs with the space credential (not indexed). `internal/agent/skills.go`,
+  `internal/skillfile` (SKILL.md and skill directories), the MCP tools `list_skills`, `get_skill`,
+  `save_skill`, `delete_skill`, `engram skill`, `python/src/engram_garden/skills.py`, and
+  `pi/engram/skills.ts` (the pi package keeps them on disk for pi and saves edits back).
 - `internal/lex`: record formats: the space's config, the vectors memories
   carry (`f16le`), the query vector encoding, and the text that gets embedded.
 - `internal/embed`: OpenAI-compatible embedding client, the provider that
@@ -171,6 +176,8 @@ make pi-test        # the pi package
   matching changes. Don't write a position anywhere else.
 - Segment and manifest objects are immutable: write new ones, never
   overwrite.
+- A new record type a space holds goes in `lexicons/garden/engram/space.json`'s collections and in
+  `agent.Scopes`, and needs `scripts/publish-lexicons.sh` run before agents can write it.
 - Database migrations are append-only: once a numbered file in
   `internal/control/migrations/` has been released, add a new one instead of
   editing it.

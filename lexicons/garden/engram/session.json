@@ -1,0 +1,36 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.session",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "any",
+      "description": "Where an agent's working session stands, so it can be picked up later, on another machine or by another agent. The record key is the harness's session ID. Rewritten as the session goes on; not searched as a memory.",
+      "record": {
+        "type": "object",
+        "required": ["title", "summary", "updatedAt"],
+        "properties": {
+          "title": { "type": "string", "maxLength": 200, "description": "A short name for the work." },
+          "summary": {
+            "type": "string",
+            "maxLength": 50000,
+            "description": "Markdown: the goal, what's done, what's in progress, decisions, and the next steps."
+          },
+          "status": {
+            "type": "string",
+            "knownValues": ["active", "ended"],
+            "description": "Whether the session was still going when this was written."
+          },
+          "repo": { "type": "string", "maxLength": 2000, "description": "The repository, as its remote URL." },
+          "branch": { "type": "string", "maxLength": 256 },
+          "cwd": { "type": "string", "maxLength": 2000, "description": "The working directory, on the machine." },
+          "machine": { "type": "string", "maxLength": 256, "description": "The machine's host name." },
+          "harness": { "type": "string", "maxLength": 64, "description": "The agent harness, such as pi." },
+          "model": { "type": "string", "maxLength": 256 },
+          "startedAt": { "type": "string", "format": "datetime" },
+          "updatedAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

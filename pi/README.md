@@ -22,9 +22,17 @@ server the model has to remember to use.
   name. A session entry records how far each branch has been read, so
   nothing is read twice. Only saved interactive sessions are captured, not
   `pi -p --no-session` runs such as subagents.
+- **Skills.** The skills kept in your spaces (see
+  `docs/design/skills.md`) are written to `~/.cache/pi-engram/skills` at
+  session start and loaded by pi like any other skills. When the agent
+  edits or writes a file there, the skill is saved back to Engram for every
+  agent in its space; a new directory with a `SKILL.md` becomes a new
+  shared skill. `save_skill` does the same as a tool. Skills changed
+  elsewhere load after `/reload`.
 - **`/engram`** shows the state (`status`), the spaces (`spaces`), searches
   (`recall <query>`), captures now (`capture`), lets you read and forget
-  what was captured (`review`), and restarts engram-mcp (`restart`). The
+  what was captured (`review`), lists the skills (`skills`, or
+  `skills sync` to fetch them now), and restarts engram-mcp (`restart`). The
   footer shows the default space, and warns when a space isn't indexed.
 
 The memory work stays in Go: the extension runs `engram-mcp` as a child

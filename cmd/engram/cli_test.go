@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -647,5 +648,57 @@ func TestSpaceTheAppviewCantRead(t *testing.T) {
 	}
 	if code, out, _ := a.run("status"); code != 0 {
 		t.Fatalf("status after the grant: %d %s", code, out)
+	}
+}
+
+// TestSkillCommands: one agent puts skill directories, another lists, reads
+// and exports them.
+func TestSkillCommands(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	alice, bob := w.agent(t), w.agent(t)
+	alice.mustRun("init", "--space", w.net.Space, "--handle", "alice.test")
+	bob.mustRun("init", "--space", w.net.Space, "--handle", "bob.test")
+
+	dir := filepath.Join(t.TempDir(), "code-review")
+	_ = os.MkdirAll(filepath.Join(dir, "scripts"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: code-review\ndescription: Review a change with two models. Use after finishing work.\n---\n\n# Review\n\nAsk two models.\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "scripts", "run.sh"), []byte("#!/bin/sh\n"), 0o755)
+	lone := filepath.Join(t.TempDir(), "SKILL.md")
+	_ = os.WriteFile(lone, []byte("---\nname: create-pr\ndescription: Open a draft PR with gh.\n---\nUse gh.\n"), 0o644)
+
+	if out := alice.mustRun("skill", "put", dir, lone); !strings.Contains(out, "Added code-review") || !strings.Contains(out, "Added create-pr") {
+		t.Fatalf("put: %s", out)
+	}
+	if out := bob.mustRun("skill", "list"); !strings.Contains(out, "code-review") || !strings.Contains(out, "by did:plc:alice") || !strings.Contains(out, "Open a draft PR") {
+		t.Fatalf("list: %s", out)
+	}
+	if out := bob.mustRun("skill", "get", "code-review"); !strings.Contains(out, "name: code-review") || !strings.Contains(out, "----- scripts/run.sh -----") {
+		t.Fatalf("get: %s", out)
+	}
+	to := filepath.Join(t.TempDir(), "out")
+	bob.mustRun("skill", "get", "code-review", "--to", to)
+	if fi, err := os.Stat(filepath.Join(to, "scripts", "run.sh")); err != nil || fi.Mode()&0o111 == 0 {
+		t.Fatalf("exported script: %v %v", fi, err)
+	}
+
+	// Updating from the directory again, with a note.
+	_ = os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: code-review\ndescription: Review a change.\n---\n\nAsk three models.\n"), 0o644)
+	if out := alice.mustRun("skill", "put", dir, "--note", "three is better"); !strings.Contains(out, "Updated code-review") {
+		t.Fatalf("update: %s", out)
+	}
+	var got agent.GetSkillOut
+	if err := json.Unmarshal([]byte(bob.mustRun("skill", "get", "code-review", "--json")), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Skill.Note != "three is better" || !strings.Contains(got.Skill.Instructions, "three models") || len(got.Skill.Files) != 1 {
+		t.Fatalf("after update: %+v", got.Skill)
+	}
+	if code, _, errOut := bob.run("skill", "rm", "code-review"); code != 1 || !strings.Contains(errOut, "only delete your own") {
+		t.Fatalf("bob rm: %d %s", code, errOut)
+	}
+	alice.mustRun("skill", "rm", "create-pr")
+	if out := bob.mustRun("skill", "list"); strings.Contains(out, "create-pr") {
+		t.Fatalf("after rm: %s", out)
 	}
 }

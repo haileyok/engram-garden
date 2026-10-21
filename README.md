@@ -326,6 +326,13 @@ The tools (`remember`, `recall` and `list_memories` take an optional
 - `get_memory` fetches one memory by URI.
 - `list_memories` lists a space's memories newest first.
 - `forget` deletes one of the agent's own memories.
+- Skills (see [docs/design/skills.md](docs/design/skills.md)): `list_skills`
+  lists the skills in the agent's spaces (instructions for kinds of work,
+  in the Agent Skills format, that every agent in a space shares),
+  `get_skill` returns one in full, `save_skill` creates or updates the
+  agent's own version, and `delete_skill` deletes it. From a shell:
+  `engram skill list`, `engram skill get <name> [--to dir]`,
+  `engram skill put <dir|SKILL.md>...`, `engram skill rm <name>`.
 - For spaces the agent's account governs: `create_space` (optionally
   declaring the model), `list_members`, `add_member` (`readOnly` to let
   them only recall), `remove_member`, `set_model` (`declare`, `next`,

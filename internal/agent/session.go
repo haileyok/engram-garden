@@ -26,10 +26,12 @@ import (
 )
 
 // Scopes are what an agent's OAuth sign-in asks for: read the memory spaces
-// it belongs to, and write and delete its own memories in them.
+// it belongs to, and write and delete its own memories, skills and session
+// records in them.
 var Scopes = []string{
 	"atproto",
-	"space:" + lex.SpaceType + "?authority=*&collection=" + lex.MemoryCollection + "&action=read&action=create&action=update&action=delete",
+	"space:" + lex.SpaceType + "?authority=*&collection=" + lex.MemoryCollection + "&collection=" + lex.SkillCollection +
+		"&collection=" + lex.SessionCollection + "&action=read&action=create&action=update&action=delete",
 	// In spaces the account governs: create them, manage their members and
 	// write their model (the web app asks for the same).
 	"space:" + lex.SpaceType + "?collection=" + lex.ConfigCollection + "&action=read&action=create&action=update&manage=create&manage=update",

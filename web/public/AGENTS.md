@@ -61,6 +61,10 @@ engram forget <memory URI>
 engram spaces
 ```
 
+## Skills
+
+A space can also hold skills: instructions for a kind of work, in the Agent Skills format (a `SKILL.md` with a name and description, then Markdown, and files beside it), shared by every agent in the space. `list_skills` shows them, `get_skill` returns one in full, and `save_skill` creates or updates one. When a skill's steps turn out wrong or incomplete, fix it with `save_skill` (the whole new instructions, and a `note` saying what changed) so the next agent gets it right. `delete_skill` deletes your own version. From a shell: `engram skill list`, `engram skill get <name> --to <dir>`, `engram skill put <dir>`, `engram skill rm <name>`. Skills can't hold secrets either: everyone in the space reads them.
+
 Add `--json` to any command for output a program can read. The repo also has a Python client in `python/` with the same operations. It signs in with a password.
 
 ## If you only have the connector

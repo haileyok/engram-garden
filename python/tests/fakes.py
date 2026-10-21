@@ -70,6 +70,8 @@ class World:
     refreshes: int = 0
     exchanges: int = 0
     spaces_created: list[dict[str, Any]] = field(default_factory=list)
+    #: Members whose PDS fails credentialed reads, as if it were down.
+    reject_member_reads: set[str] = field(default_factory=set)
     members: dict[str, dict[str, tuple[bool, bool]]] = field(default_factory=dict)
     _tokens: dict[str, str] = field(default_factory=dict)  # access jwt -> did
     _refresh: dict[str, str] = field(default_factory=dict)  # refresh jwt -> did
@@ -240,9 +242,18 @@ class World:
         return json_resp(200, {"credential": self._mint_credential(deleg[0], deleg[1], bound)})
 
     def _pds_credentialed(self, req: httpx.Request, nsid: str, q: httpx.QueryParams) -> httpx.Response:
-        checked = self._check_credentialed(req, None)
+        # A member's PDS checks the audience is that member; the space host, the authority.
+        checked = self._check_credentialed(req, q.get("repo"))
         if isinstance(checked, httpx.Response):
             return checked
+        if nsid == "com.atproto.space.listRepos":
+            sp = q["space"]
+            dids = sorted({r for (s2, r, _), recs in self.records.items() if s2 == sp and recs})
+            return json_resp(200, {"repos": [{"did": d} for d in dids]})
+        if nsid == "com.atproto.space.listRecords":
+            if q.get("repo") in self.reject_member_reads:
+                return xrpc_err(502, "UpstreamFailure", "that PDS is down")
+            return self._list_records(q)
         if nsid == "com.atproto.space.getRecord":
             key = (q["space"], q["repo"], q["collection"])
             if q["collection"] == lex.CONFIG_COLLECTION and self.config is not None:
@@ -287,24 +298,33 @@ class World:
             recs.pop(body["rkey"], None)
             return json_resp(200, {})
         if nsid == "com.atproto.space.listRecords":
-            recs = self.records.get((q["space"], q["repo"], q["collection"]), {})
-            limit = int(q.get("limit", "50"))
-            keys = sorted(recs)
-            start = keys.index(q["cursor"]) + 1 if "cursor" in q else 0
-            page = keys[start : start + limit]
-            # Like cocoon: list items name a record by collection and rkey, with no uri.
-            out: dict[str, Any] = {
-                "records": [
-                    {"collection": q["collection"], "rkey": k, "cid": "bafy-" + k, "value": recs[k]} for k in page
-                ]
-            }
-            if start + limit < len(keys):
-                out["cursor"] = page[-1]
-            return json_resp(200, out)
+            return self._list_records(q)
         if nsid == "com.atproto.space.getRecord":
             if q["collection"] == lex.CONFIG_COLLECTION and self.config is not None:
                 return json_resp(200, {"uri": "x", "value": self.config})
-            return xrpc_err(404, "RecordNotFound", "no such record")
+            rec = self.records.get((q["space"], q["repo"], q["collection"]), {}).get(q.get("rkey", ""))
+            if rec is None:
+                return xrpc_err(404, "RecordNotFound", "no such record")
+            return json_resp(200, {"uri": "x", "value": rec})
+        return self._pds_session_rest(did, acct, nsid, q, body)
+
+    def _list_records(self, q: httpx.QueryParams) -> httpx.Response:
+        recs = self.records.get((q["space"], q["repo"], q["collection"]), {})
+        limit = int(q.get("limit", "50"))
+        keys = sorted(recs)
+        start = keys.index(q["cursor"]) + 1 if "cursor" in q else 0
+        page = keys[start : start + limit]
+        # Like cocoon: list items name a record by collection and rkey, with no uri.
+        out: dict[str, Any] = {
+            "records": [{"collection": q["collection"], "rkey": k, "cid": "bafy-" + k, "value": recs[k]} for k in page]
+        }
+        if start + limit < len(keys):
+            out["cursor"] = page[-1]
+        return json_resp(200, out)
+
+    def _pds_session_rest(
+        self, did: str, acct: Account, nsid: str, q: httpx.QueryParams, body: dict[str, Any]
+    ) -> httpx.Response:
         if nsid == "com.atproto.space.listSpaces":
             return json_resp(200, {"spaces": [{"uri": u} for u in acct.member_of]})
         if nsid == "com.atproto.simplespace.createSpace":

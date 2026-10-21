@@ -58,8 +58,9 @@ from .settings import (
     config_path,
     load_settings,
 )
+from .skills import SaveSkillOut, Skill, SkillFile, SkillInfo, valid_skill_name
 from .space import Ref
 from .spaceclient import Client
-from .spaces import ListSpacesOut, SpaceInfo, Spaces, open_spaces, spaces_of
+from .spaces import ListSkillsOut, ListSpacesOut, SpaceInfo, Spaces, open_spaces, spaces_of
 
 __version__ = "0.1.0"

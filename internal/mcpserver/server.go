@@ -93,6 +93,28 @@ func NewServer(s *agent.Spaces, opts ...Option) *mcp.Server {
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), IdempotentHint: true},
 	}, handler(s.Forget))
 
+	// Skills: instructions for kinds of work, kept in the spaces.
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_skills",
+		Description: "List the skills in your memory spaces (or one): instructions for kinds of work that every agent in a space shares, in the Agent Skills format. Each has a name, a description saying when to use it, its space and author. Pass content to get each one's instructions and files too.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, handler(s.ListSkills))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "get_skill",
+		Description: "Fetch one skill by name, with its instructions and files. Follow its instructions when the task matches its description.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, handler(s.GetSkill))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "save_skill",
+		Description: "Create or update a skill in a memory space (where your version is, else the default space): give its name, description and the whole instructions. When a skill's steps turned out wrong or incomplete, fix it here so the next agent gets it right; say what changed in note. Files are kept unless you pass them. Every agent in the space can read it; never put secrets in a skill.",
+		Annotations: &mcp.ToolAnnotations{IdempotentHint: true},
+	}, handler(s.SaveSkill))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "delete_skill",
+		Description: "Delete your own version of a skill.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), IdempotentHint: true},
+	}, handler(s.DeleteSkill))
+
 	// Running spaces this account governs.
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "create_space",

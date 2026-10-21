@@ -368,6 +368,27 @@ class Agent:
             raise EngramError(f"deleting memory: {e}") from e
         return ForgetOut(deleted=uri)
 
+    # ---- skills (see skills.py) ----
+
+    async def skills(self) -> tuple[list[Any], list[str]]:
+        """The skills in the space, one version per name (list[skills.SkillInfo]), and the members whose
+        skills couldn't be read."""
+        from . import skills
+
+        return await skills.skills(self)
+
+    async def save_skill(self, name: str, description: str, instructions: str, **kw: Any) -> Any:
+        """Write the agent's own version of a skill (see skills.save_skill)."""
+        from . import skills
+
+        return await skills.save_skill(self, name, description, instructions, **kw)
+
+    async def delete_skill(self, name: str) -> str:
+        """Delete the agent's own version of a skill; returns its URI."""
+        from . import skills
+
+        return await skills.delete_skill(self, name)
+
     def parse_uri(self, uri: str) -> tuple[str, str, str]:
         """Split a space record URI into author, collection and rkey."""
         prefix = str(Ref.parse(self.space)) + "/"
