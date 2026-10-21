@@ -1,4 +1,4 @@
-.PHONY: build test test-real-bucket test-postgres lint fmt web web-test python-test python-lint
+.PHONY: build test test-real-bucket test-postgres lint fmt web web-test python-test python-lint pi-test
 
 build:
 	go build ./...
@@ -69,3 +69,8 @@ python-test:
 
 python-lint:
 	cd python && uv sync --extra dev && uv run ruff check . && uv run ruff format --check .
+
+# The pi package (pi/): typecheck and tests. npm installs only TypeScript and
+# pi's types; the package itself has no dependencies.
+pi-test:
+	cd pi && npm install --no-audit --no-fund && npm run typecheck && npm test

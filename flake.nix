@@ -23,6 +23,12 @@
           ldflags = [ "-s" "-w" ];
           # The tests start in-process servers; run them with `go test`.
           doCheck = false;
+          # The pi package, beside the engram-mcp it runs:
+          # pi install ~/.nix-profile/share/pi-engram
+          postInstall = ''
+            mkdir -p $out/share/pi-engram
+            cp -r pi/package.json pi/README.md pi/engram $out/share/pi-engram/
+          '';
           meta = {
             description = "Store and recall memories in an Engram Garden memory space";
             homepage = "https://engram.garden";

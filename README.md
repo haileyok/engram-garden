@@ -269,6 +269,12 @@ these commands for each space.
   client configuration is just `{"mcpServers": {"engram": {"command":
   "engram-mcp"}}}`.
 
+- **Using it in pi:** the pi package in `pi/` builds memory into the agent
+  instead: the memory tools, recall for every prompt, and memories captured
+  from the conversation in the background. `pi install
+  ~/.nix-profile/share/pi-engram` (or `pi install ./pi` from a checkout);
+  see [pi/README.md](pi/README.md).
+
 `engram-mcp` (and `engram`) can also be configured entirely with environment
 variables, which override the settings file:
 

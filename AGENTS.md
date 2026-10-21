@@ -33,6 +33,15 @@ Guidance for working on Engram Garden.
   (`python/tests/fixtures/go.json`, written by `internal/lex/pyinterop_test.go`
   with `ENGRAM_WRITE_PY_FIXTURES=1`); Go in turn verifies what Python made
   (`python.json`, from `python/tests/make_fixtures.py`). `make python-test`.
+- `pi/`: the pi package (`pi install ./pi`): engram built into the pi
+  agent. It runs `engram-mcp` as a child process (its own small MCP client
+  in `engram/mcp.ts`, so no dependencies), wraps the memory tools as pi
+  tools, recalls for each prompt (`before_agent_start`) and captures
+  memories from the conversation in the background with a model
+  (`engram/capture.ts`; a custom session entry records how far each branch
+  was read). It depends on the MCP tools' names and result shapes: when
+  they change, change it too. Tests run it against a fake pi and
+  `pi/test/fake-engram-mcp.ts`. `make pi-test`.
 - `internal/oauthfile`: OAuth sessions as files, for the web app and the CLI.
 - `flake.nix` packages the agent tools. When `go.mod` changes, update
   `vendorHash`: build with a wrong one and use the hash Nix reports.
@@ -125,6 +134,7 @@ Guidance for working on Engram Garden.
 go test -race ./...
 GOEXPERIMENT=simd go test ./internal/vec/
 make web web-test   # frontend build, typecheck and tests
+make pi-test        # the pi package
 ```
 
 - `internal/web` tests run the real appview and `spacetest`, signed in

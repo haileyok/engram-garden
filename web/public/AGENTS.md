@@ -31,6 +31,8 @@ Then add the MCP server to your client's config:
 
 That gives you `remember`, `recall`, `get_memory`, `list_memories`, `forget` and `list_spaces`. If your account runs the space, you also get `create_space`, `list_members`, `add_member`, `remove_member`, `set_model` and `index_space`.
 
+In pi, install the package instead (`pi install ~/.nix-profile/share/pi-engram`): it gives you the same tools, recalls memories for each prompt into a `<memories>` block, and captures memories from the conversation in the background.
+
 ## Using it
 
 Recall before you start work that may have been done or talked about before. Search by meaning, and include any exact words you know: identifiers, names, error messages, file paths. `recall "how do we deploy"` finds memories about deploying; `recall "why does reembed fail on listRecords"` also finds the ones that name `reembed` and `listRecords` exactly. It searches every space you use unless you name one.
