@@ -68,9 +68,15 @@ export class McpServer {
 	private pending = new Map<number, Pending>();
 	private buf = "";
 	private closed = false;
+	private handshook = false;
 
 	constructor(opts: ServerOptions) {
 		this.opts = opts;
+	}
+
+	/** handshakeDone is true once the handshake is done and the process still runs. */
+	get handshakeDone(): boolean {
+		return this.handshook && this.running;
 	}
 
 	get running(): boolean {
@@ -96,6 +102,7 @@ export class McpServer {
 			env: { ...process.env, ...this.opts.env },
 		});
 		this.proc = proc;
+		this.handshook = false;
 		this.buf = "";
 		const exited = new Promise<never>((_, reject) => {
 			proc.once("error", (err) => reject(new Error(`can't run ${this.opts.command}: ${err.message}`)));
@@ -135,6 +142,7 @@ export class McpServer {
 		this.serverVersion = res.serverInfo?.version ?? "";
 		this.notify("notifications/initialized", {});
 		this.lastError = undefined;
+		this.handshook = true;
 	}
 
 	private stderrHint(): string {

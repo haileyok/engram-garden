@@ -527,3 +527,14 @@ test("after compaction, recalled memories can be added again", async () => {
 		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
 	}
 });
+
+test("the first prompt waits for a slow engram-mcp start", async () => {
+	const h = await harness({ recallMinSimilarity: 300, recallTimeoutMs: 500, env: { FAKE_MEMORIES: JSON.stringify(seeded), FAKE_SLOW_START: "1500" } });
+	try {
+		await h.emit("session_start", { type: "session_start" });
+		const [res] = await h.emit("before_agent_start", startEvent("how do attie deploys to pop1 work, which workflow?"));
+		assert.ok(res?.message, "recalled after the start, not given up at recallTimeoutMs");
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});

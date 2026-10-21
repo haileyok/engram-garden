@@ -24,6 +24,8 @@ export interface Config {
 	recallMaxGap: number;
 	/** Give up on recalling for a prompt after this long. */
 	recallTimeoutMs: number;
+	/** How long the first prompt may wait for engram-mcp to start (about 3s). */
+	recallStartTimeoutMs: number;
 	/** Prompts shorter than this ("go ahead", "yes") aren't searched. */
 	recallMinPromptChars: number;
 	/** Each recalled memory is shortened to this many characters. */
@@ -58,6 +60,7 @@ export const defaults: Config = {
 	recallMinSimilarity: 650,
 	recallMaxGap: 80,
 	recallTimeoutMs: 4000,
+	recallStartTimeoutMs: 10_000,
 	recallMinPromptChars: 12,
 	recallMaxChars: 700,
 	autoCapture: true,

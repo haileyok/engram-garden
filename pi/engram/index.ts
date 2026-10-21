@@ -110,6 +110,7 @@ export default function engram(pi: ExtensionAPI) {
 	let server: McpServer | undefined;
 	let spaces: ListSpacesOut | undefined;
 	let project: Project = {};
+	let projectReady: Promise<void> = Promise.resolve();
 	let session = 0; // bumped per session, so late work from an old one is dropped
 	let warnedDuplicate = false;
 	let warnedModel = false;
@@ -217,7 +218,7 @@ export default function engram(pi: ExtensionAPI) {
 		}
 		server = new McpServer({ command: cfg.command, args: cfg.args, env: cfg.env });
 		status(ctx);
-		void detectProject(ctx.cwd).then((p) => {
+		projectReady = detectProject(ctx.cwd).then((p) => {
 			if (id === session) project = p;
 		});
 		void server
@@ -308,6 +309,17 @@ export default function engram(pi: ExtensionAPI) {
 		status(ctx);
 		let out: MemoriesOut;
 		try {
+			// engram-mcp takes a few seconds to sign in and read the spaces. The
+			// first prompt is when memories help most, so it waits for that,
+			// unless starting has already failed.
+			if (!server.handshakeDone && !server.lastError)
+				await Promise.race([
+					server.start(),
+					new Promise((_, reject) =>
+						setTimeout(() => reject(new Error("slow start")), cfg!.recallStartTimeoutMs).unref(),
+					),
+				]);
+			await projectReady;
 			const signal = AbortSignal.any([AbortSignal.timeout(cfg.recallTimeoutMs), captureAbort.signal]);
 			out = await server.call<MemoriesOut>(
 				"recall",

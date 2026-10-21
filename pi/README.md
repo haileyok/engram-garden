@@ -11,7 +11,8 @@ server the model has to remember to use.
 - **Auto-recall.** Each prompt is searched for before the model sees it.
   Memories clearly about it (similarity at least 650, and within 80 of the
   best match) are added to the conversation in a `<memories>` block, once
-  per branch. Searching never holds a prompt up for more than four seconds.
+  per branch. Searching never holds a prompt up for more than four seconds, except that
+  the first one waits for engram-mcp to start (about three seconds).
 - **Auto-capture.** When the agent goes idle with enough new conversation
   (about 24k characters), before compaction, and when the session ends, the
   stretch not read yet goes to a model with one question: what here would a
@@ -63,6 +64,7 @@ the extension warns while both are there. The memory paragraphs in
   "recallMinSimilarity": 650,
   "recallMaxGap": 80,
   "recallTimeoutMs": 4000,
+  "recallStartTimeoutMs": 10000,
   "recallMinPromptChars": 12,
   "recallMaxChars": 700,
 
