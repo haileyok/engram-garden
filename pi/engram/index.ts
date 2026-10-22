@@ -592,13 +592,20 @@ export default function engram(pi: ExtensionAPI) {
 	 * ask puts one question to the memory model, with no reasoning (pi sends
 	 * the model's "off" level when none is asked for), and returns its answer.
 	 */
-	async function ask(ctx: ExtensionContext, system: string, user: string, signal: AbortSignal, maxTokens = 2048): Promise<string> {
+	async function ask(
+		ctx: ExtensionContext,
+		system: string,
+		user: string,
+		signal: AbortSignal,
+		maxTokens = 2048,
+		reasoning?: "low",
+	): Promise<string> {
 		const model = memoryModel(ctx);
 		if (!model) throw new Error("no model for the memory work");
 		const res = await ctx.modelRegistry.complete(
 			model,
 			{ systemPrompt: system, messages: [{ role: "user", content: text(user), timestamp: Date.now() }] },
-			{ maxTokens, signal, cacheRetention: "none" } as any,
+			{ maxTokens, signal, cacheRetention: "none", ...(reasoning ? { reasoning } : {}) } as any,
 		);
 		if (res.stopReason !== "stop") throw new Error(res.errorMessage || `the model stopped early (${res.stopReason})`);
 		return res.content
@@ -614,7 +621,18 @@ export default function engram(pi: ExtensionAPI) {
 		space?: string;
 	}
 	type Stored =
-		| { action: "stored"; uri: string; text: string; tags: string[]; replaced: string[]; kept: string[]; problems: string[]; note?: string }
+		| {
+				action: "stored";
+				uri: string;
+				text: string;
+				tags: string[];
+				replaced: string[];
+				kept: string[];
+				problems: string[];
+				note?: string;
+				/** Why it was stored as written, when a comparison could have merged or skipped it. */
+				why?: string;
+		  }
 		| { action: "skipped"; existing: Memory[] };
 
 	/**
@@ -657,16 +675,17 @@ export default function engram(pi: ExtensionAPI) {
 	async function storeConsolidated(ctx: ExtensionContext, m: StoreIn, signal: AbortSignal, quickSkip: boolean): Promise<Stored> {
 		const srv = need();
 		const space = await targetSpace(m.space, signal);
-		const plain = async (): Promise<Stored> => {
+		const plain = async (why?: string): Promise<Stored> => {
 			const args: Record<string, unknown> = { text: m.text, tags: m.tags };
 			if (m.source) args.source = m.source;
 			if (m.space || space) args.space = m.space || space;
 			const out = await srv.call<{ uri: string; note?: string }>("remember", args, signal);
-			return { action: "stored", uri: out.uri, text: m.text, tags: m.tags, replaced: [], kept: [], problems: [], note: out.note };
+			return { action: "stored", uri: out.uri, text: m.text, tags: m.tags, replaced: [], kept: [], problems: [], note: out.note, why };
 		};
 		// Without knowing the space, comparing would mean searching all of them,
 		// and merging across them: store it as it is.
-		if ((!cfg!.consolidate && !quickSkip) || !space) return plain();
+		if (!cfg!.consolidate && !quickSkip) return plain();
+		if (!space) return plain("couldn't tell which space it goes to, so it wasn't compared");
 		let near: Memory[];
 		try {
 			near = (await srv.call<MemoriesOut>("recall", { query: m.text, limit: 5, mode: "vector", space }, signal)).memories.filter(
@@ -674,40 +693,57 @@ export default function engram(pi: ExtensionAPI) {
 			);
 		} catch (err) {
 			if (signal.aborted) throw err;
-			return plain();
+			return plain(`couldn't search for similar memories: ${errorText(err)}`);
 		}
 		if (quickSkip) {
 			const same = near.filter((x) => (x.similarity ?? 0) >= cfg!.captureDedupeSimilarity);
 			if (same.length) return { action: "skipped", existing: same };
 		}
-		if (!cfg!.consolidate || !near.length || !memoryModel(ctx)) return plain();
+		if (!cfg!.consolidate || !near.length) return plain();
+		if (!memoryModel(ctx)) return plain("no model to compare it with similar memories");
 		let decision: Decision;
 		try {
 			const timed = AbortSignal.any([signal, AbortSignal.timeout(cfg!.consolidateTimeoutMs)]);
 			const numbered = near.map((x, i) => ({ id: i, text: x.text, createdAt: x.createdAt, space: x.space }));
-			const answer = await ask(ctx, CONSOLIDATE_PROMPT, consolidatePrompt(m.text, numbered, new Date().toISOString().slice(0, 10)), timed);
+			// A little reasoning: without it the small model's choice between skip,
+			// new and merge varies from one call to the next.
+			const answer = await ask(
+				ctx,
+				CONSOLIDATE_PROMPT,
+				consolidatePrompt(m.text, numbered, new Date().toISOString().slice(0, 10)),
+				timed,
+				8192,
+				"low",
+			);
 			decision = parseDecision(answer, numbered.map((x) => x.id));
 		} catch (err) {
 			if (signal.aborted) throw err;
-			return plain();
+			return plain(`comparing it with similar memories failed: ${errorText(err)}`);
 		}
 		if (decision.action === "skip") return { action: "skipped", existing: decision.existing.map((i) => near[i]) };
-		if (decision.action === "new" || looksSecret(decision.text)) return plain();
+		if (decision.action === "new") return plain();
+		if (looksSecret(decision.text)) return plain("the merged text looked like it held a secret");
 		// A "merge" that comes back as one old memory word for word added nothing.
 		// It's a skip if the old memory has everything the new one names;
 		// otherwise the model may have dropped the new fact, so store it as written.
 		const unchanged = decision.replaces.map((i) => near[i]).find((o) => sameMemory(decision.text, o.text));
-		if (unchanged) return ungrounded(m.text, unchanged.text).length ? plain() : { action: "skipped", existing: [unchanged] };
+		if (unchanged)
+			return ungrounded(m.text, unchanged.text).length
+				? plain("the merge left out what the new memory names")
+				: { action: "skipped", existing: [unchanged] };
 
 		// A merge forgets only the memories whose facts it kept.
 		const body = decision.text;
 		// A merge may name only what the memories it combines (or today's date) do.
-		if (ungrounded(body, [m.text, ...decision.replaces.map((i) => `${near[i].text}\n${near[i].createdAt ?? ""}`), new Date().toISOString()].join("\n")).length)
-			return plain();
+		const madeUp = ungrounded(
+			body,
+			[m.text, ...decision.replaces.map((i) => `${near[i].text}\n${near[i].createdAt ?? ""}`), new Date().toISOString()].join("\n"),
+		);
+		if (madeUp.length) return plain(`the merge named things none of the memories do (${madeUp.join(", ")})`);
 		const chosen = decision.replaces.map((i) => near[i]);
 		const olds = chosen.filter((o) => keepsFacts(body, o.text));
 		const kept = chosen.filter((o) => !olds.includes(o)).map((o) => o.uri);
-		if (!olds.length) return plain();
+		if (!olds.length) return plain("the merge would have lost facts from the memories it replaced");
 		const tags = memoryTags([...m.tags, ...olds.flatMap((o) => o.tags ?? [])]);
 		const sources = [...new Set([m.source, ...olds.map((o) => o.source)].filter((x): x is string => !!x))];
 		const args: Record<string, unknown> = { text: body, tags };
@@ -1051,6 +1087,7 @@ export default function engram(pi: ExtensionAPI) {
 					`Merged with ${r.replaced.length} older ${r.replaced.length === 1 ? "memory" : "memories"} it updates, now forgotten (${r.replaced.join(", ")}). Stored text:\n${r.text}`,
 				);
 			if (r.kept.length) lines.push(`Kept, though similar: ${r.kept.join(", ")}`);
+			if (r.why) lines.push(`Stored as written: ${r.why}.`);
 			for (const p of r.problems) lines.push(`Note: ${p}`);
 			if (r.note) lines.push(`Note: ${r.note}`);
 			return {

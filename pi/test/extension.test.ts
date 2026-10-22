@@ -39,6 +39,7 @@ interface Harness {
 	completions: Array<string | ((signal: AbortSignal) => Promise<any>)>;
 	prompts: string[];
 	systems: string[];
+	options: any[];
 	queries: string[];
 	addMessage(role: string, content: string): void;
 }
@@ -63,6 +64,7 @@ async function harness(settings: Record<string, unknown> = {}): Promise<Harness>
 		completions: [],
 		prompts: [],
 		systems: [],
+		options: [],
 		queries: [],
 		ctx: undefined,
 		addMessage: () => {},
@@ -101,6 +103,7 @@ async function harness(settings: Record<string, unknown> = {}): Promise<Harness>
 			complete: async (_model: any, context: any, opts: any) => {
 				h.prompts.push(context.messages[0].content[0].text);
 				h.systems.push(context.systemPrompt ?? "");
+				h.options.push(opts);
 				const next = h.completions.shift() ?? '{"memories": []}';
 				if (typeof next === "function") return next(opts.signal);
 				return { stopReason: "stop", content: [{ type: "text", text: next }] };
@@ -991,6 +994,24 @@ test("an unchanged merge that leaves out a new identifier stores the memory inst
 		assert.match(out.content[0].text, /^Remembered: /);
 		const all = (await h.tools.get("list_memories").execute("l", {}, undefined, undefined, h.ctx)).details.memories;
 		assert.equal(all.length, 2);
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("consolidation reasons briefly, reads ids, and says why it stored as written", async () => {
+	const h = await harness({ consolidateMinSimilarity: 300, env: { FAKE_MEMORIES: JSON.stringify([mine("at://m/mine1", deployFact)]) } });
+	try {
+		await start(h);
+		h.completions.push('{"action": "skip", "ids": [0]}');
+		const skipped = await h.tools.get("remember").execute("r1", { text: deployFact }, undefined, undefined, h.ctx);
+		assert.match(skipped.content[0].text, /^Not stored/);
+		assert.equal(h.options.at(-1).reasoning, "low");
+		assert.match(h.systems.at(-1)!, /"ids": \[<ids>\]/);
+
+		h.completions.push(async () => ({ stopReason: "error", content: [], errorMessage: "503: inference audit sink unavailable" }));
+		const out = await h.tools.get("remember").execute("r2", { text: "Attie pop2 deploys use the Deploy Attie workflow since 2026-10-21." }, undefined, undefined, h.ctx);
+		assert.match(out.content[0].text, /Stored as written: comparing it with similar memories failed: 503: inference audit sink unavailable\./);
 	} finally {
 		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
 	}

@@ -87,11 +87,11 @@ export const CONSOLIDATE_PROMPT = `A memory is about to be stored in a long-term
 - "new": it's about something the existing ones don't cover. It's stored as written.
 - "merge": it adds to or updates one to three existing memories about the same thing (a later status, a correction, more detail). Write one memory that replaces them and the new one: keep every fact that is still true and useful from all of them, with its identifiers (paths, PR and issue numbers, commits, versions, URLs) and dates, drop only what the newer information makes wrong (an old "not deployed yet" once it's deployed), and say when things happened. The replaced memories are deleted, so anything you leave out is lost: when in doubt, keep it, or choose "new". Merge only when the new memory adds or corrects a fact; don't touch dates or claims the new memory doesn't change, and never add an identifier, path, commit or date that none of them contains. Merge only memories about the same subject; different deploys, projects or decisions stay separate.
 
-For "skip", list the ids that already say it. For "merge", list the ids it replaces.
+"ids" names existing memories by their id: for "skip", the ones that already say it (at least one); for "merge", the ones the merged memory replaces; for "new", none.
 
 ${DATA_NOTE}
 
-Answer with JSON only: {"action": "skip" | "new" | "merge", "replaces": [<ids>], "text": "<the merged memory, for merge>"}`;
+Answer with JSON only: {"action": "skip" | "new" | "merge", "ids": [<ids>], "text": "<the merged memory, for merge>"}`;
 
 export function consolidatePrompt(memory: string, existing: Numbered[], date: string): string {
 	return [`Today is ${date}.`, `The new memory:\n${memory}`, `Existing memories:\n${listing(existing, 6000)}`].join("\n\n");
@@ -106,7 +106,8 @@ export type Decision = { action: "skip"; existing: number[] } | { action: "new" 
 export function parseDecision(answer: string, ids: number[]): Decision {
 	const v = jsonOf(answer);
 	const allowed = new Set(ids);
-	const replaces = Array.isArray(v?.replaces) ? [...new Set(v.replaces.map(Number).filter((n: number) => allowed.has(n)))] as number[] : [];
+	const raw = Array.isArray(v?.ids) ? v.ids : Array.isArray(v?.replaces) ? v.replaces : [];
+	const replaces = [...new Set(raw.map(Number).filter((n: number) => allowed.has(n)))] as number[];
 	switch (v?.action) {
 		case "skip":
 			// A skip that names nothing it was shown can't be checked: store it.
