@@ -267,3 +267,76 @@ func TestSharedSessionReadsNewTokens(t *testing.T) {
 		t.Fatalf("authorization headers: %q", seen)
 	}
 }
+
+// TestSharedSessionFollowsNewSignIn: when the person signs in again (engram
+// login) while a long-running process like engram-mcp holds the old
+// session, the old one is deleted; the process switches to the new one
+// the settings name instead of failing every request until restarted.
+func TestSharedSessionFollowsNewSignIn(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var seen []string
+	pds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"token":"t"}`))
+	}))
+	t.Cleanup(pds.Close)
+	dir := t.TempDir()
+	store := &oauthfile.FileStore{Dir: dir}
+	s, old := oauthSession(t, store, pds.URL, "first")
+
+	var cmu sync.Mutex
+	current := s.Account
+	opts := Options{Store: store, LockDir: dir, Current: func() (Account, error) {
+		cmu.Lock()
+		defer cmu.Unlock()
+		return current, nil
+	}}
+	api, err := s.Session(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func() error {
+		var out map[string]any
+		return api.Get(context.Background(), "com.atproto.space.getDelegationToken", map[string]any{"space": "x"}, &out)
+	}
+	if err := call(); err != nil {
+		t.Fatal(err)
+	}
+
+	// engram login: a new session, the old one deleted, the settings updated.
+	fresh := old
+	fresh.SessionID, fresh.AccessToken = "s2", "second"
+	if err := store.SaveSession(context.Background(), fresh); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteSession(context.Background(), old.AccountDID, old.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	cmu.Lock()
+	current.SessionID, current.Callback = "s2", "http://127.0.0.1:2/callback"
+	cmu.Unlock()
+
+	if err := call(); err != nil {
+		t.Fatalf("after signing in again: %v", err)
+	}
+	mu.Lock()
+	if len(seen) != 2 || !strings.HasSuffix(seen[1], " second") {
+		t.Fatalf("authorization headers: %q", seen)
+	}
+	mu.Unlock()
+
+	// Signed in as someone else: not followed, the old error stands.
+	if err := store.DeleteSession(context.Background(), fresh.AccountDID, fresh.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	cmu.Lock()
+	current = Account{DID: "did:plc:other", SignIn: SignInOAuth, SessionID: "s3", Callback: "http://127.0.0.1:3/callback"}
+	cmu.Unlock()
+	if err := call(); err == nil || !strings.Contains(err.Error(), "sign-in has expired") {
+		t.Fatalf("another account's sign-in was followed: %v", err)
+	}
+}

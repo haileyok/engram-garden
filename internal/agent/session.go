@@ -47,6 +47,11 @@ type Options struct {
 	LockDir string
 	HTTP    *http.Client
 	Log     *slog.Logger
+	// Current returns the account as the settings file has it now. A
+	// long-running process (engram-mcp) whose OAuth session is gone, because
+	// the person signed in again, switches to the account's new session.
+	// Nil means the session it opened with is the only one.
+	Current func() (Account, error)
 }
 
 // hashName names a file after some strings, without revealing them.
@@ -124,7 +129,7 @@ func (s Settings) Session(ctx context.Context, o Options) (*atclient.APIClient, 
 			return nil, Explain(fmt.Errorf("resuming the sign-in: %w", err))
 		}
 		api := sess.APIClient()
-		api.Auth = &sharedSession{app: app, did: did, sessionID: a.SessionID, lock: lockPath(o.LockDir, did, a.SessionID)}
+		api.Auth = &sharedSession{opts: o, app: app, did: did, sessionID: a.SessionID, lock: lockPath(o.LockDir, did, a.SessionID)}
 		return api, nil
 	}
 	return nil, s.Check()

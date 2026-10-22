@@ -67,7 +67,13 @@ func run(log *slog.Logger) error {
 	}
 	store := &oauthfile.FileStore{Dir: filepath.Join(dir, "oauth")}
 	store.Sweep() // sign-ins nobody finished
-	a, err := agent.Open(ctx, settings, agent.Options{Store: store, LockDir: store.Dir, HTTP: &http.Client{Timeout: time.Minute}, Log: log})
+	// When the person signs in again (engram login) while this runs, the old
+	// session is deleted: follow the one the settings file names now.
+	current := func() (agent.Account, error) {
+		s, err := agent.LoadSettings(filepath.Join(dir, "config.json"), os.Getenv)
+		return s.Account, err
+	}
+	a, err := agent.Open(ctx, settings, agent.Options{Store: store, LockDir: store.Dir, HTTP: &http.Client{Timeout: time.Minute}, Log: log, Current: current})
 	if err != nil {
 		return fmt.Errorf("signing in: %w", err)
 	}
