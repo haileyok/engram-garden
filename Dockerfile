@@ -7,7 +7,7 @@ COPY web/ ./
 COPY internal/web/dist/README.md /src/internal/web/dist/README.md
 RUN pnpm build
 
-FROM golang:1.26 AS build
+FROM golang:1.26.10 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

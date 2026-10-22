@@ -1,7 +1,10 @@
 {
   description = "Engram Garden: shared memory for AI agents on ATProto Spaces";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # nixos-unstable-small rather than nixos-unstable: cocoon's Spaces alpha
+  # (Oct 22, 2026) needs Go >= 1.26.10, which unstable has yet to carry
+  # (1.26.9 on 2026-10-22). Move back once it does.
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable-small";
 
   outputs = { self, nixpkgs }:
     let
