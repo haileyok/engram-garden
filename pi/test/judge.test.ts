@@ -91,3 +91,19 @@ test("ungrounded: today's date as the prompt gives it, flags, v both ways, no 'm
 	assert.deepEqual(ungrounded("pi 1.3.0", "upgraded to v1.3.0"), []);
 	assert.deepEqual(ungrounded("on 2026-05-21", "maybe 21 of them in 2026"), ["2026-05-21"]);
 });
+
+test("sameMemory spots a merge that changed nothing", async () => {
+	const { sameMemory } = await import("../engram/judge.ts");
+	const old = `Engram Garden prod deploy runbook (2026-10-09): build with git archive HEAD, bump compose.yaml, then docker compose up -d. ${"Verify with docker compose ps and the metrics. ".repeat(10)}`;
+	assert.ok(sameMemory(`  ${old.replace(/ /g, "\n")} `, old));
+	assert.ok(!sameMemory(old.replace(" and the metrics.", "."), old), "something dropped");
+	assert.ok(!sameMemory(`${old} Pop2 uses it since 2026-10-21.`, old), "a new fact got in");
+	assert.ok(!sameMemory(old.replace("2026-10-09", "2026-10-22"), old), "the date changed");
+	assert.ok(!sameMemory(old.replace("then docker compose up -d", "then do not run docker compose up -d"), old), "a negation got in");
+	assert.ok(!sameMemory("Alice manages Bob on the infra team.", "Bob manages Alice on the infra team."), "reordered");
+});
+
+test("sameMemory treats a case change as a change", async () => {
+	const { sameMemory } = await import("../engram/judge.ts");
+	assert.ok(!sameMemory("Config lives in /srv/app.", "Config lives in /srv/App."));
+});

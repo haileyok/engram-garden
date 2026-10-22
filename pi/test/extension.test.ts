@@ -967,3 +967,31 @@ test("a merge naming something none of its memories do is stored as written inst
 		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
 	}
 });
+
+test("a merge that returns the old memory unchanged is a skip", async () => {
+	const h = await harness({ consolidateMinSimilarity: 300, env: { FAKE_MEMORIES: JSON.stringify([mine("at://m/mine1", deployFact)]) } });
+	try {
+		await start(h);
+		h.completions.push(JSON.stringify({ action: "merge", replaces: [0], text: deployFact }));
+		const out = await h.tools.get("remember").execute("r", { text: "Attie pop1 deploys use the Deploy Attie workflow (PR #1201)." }, undefined, undefined, h.ctx);
+		assert.match(out.content[0].text, /^Not stored: a memory already says this/);
+		const all = (await h.tools.get("list_memories").execute("l", {}, undefined, undefined, h.ctx)).details.memories;
+		assert.deepEqual(all.map((m: any) => m.uri), ["at://m/mine1"]);
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("an unchanged merge that leaves out a new identifier stores the memory instead", async () => {
+	const h = await harness({ consolidateMinSimilarity: 300, env: { FAKE_MEMORIES: JSON.stringify([mine("at://m/mine1", deployFact)]) } });
+	try {
+		await start(h);
+		h.completions.push(JSON.stringify({ action: "merge", replaces: [0], text: deployFact }));
+		const out = await h.tools.get("remember").execute("r", { text: "Attie pop2 deploys use the Deploy Attie workflow too, since 2026-10-21." }, undefined, undefined, h.ctx);
+		assert.match(out.content[0].text, /^Remembered: /);
+		const all = (await h.tools.get("list_memories").execute("l", {}, undefined, undefined, h.ctx)).details.memories;
+		assert.equal(all.length, 2);
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});

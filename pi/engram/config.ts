@@ -103,7 +103,7 @@ export const defaults: Config = {
 	captureDedupeSimilarity: 860,
 	consolidate: true,
 	consolidateMinSimilarity: 720,
-	consolidateTimeoutMs: 8000,
+	consolidateTimeoutMs: 20000,
 };
 
 export function agentDir(): string {

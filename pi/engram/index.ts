@@ -63,6 +63,7 @@ import {
 	lastExchange,
 	parseDecision,
 	parseFilter,
+	sameMemory,
 	ungrounded,
 } from "./judge.ts";
 import { errorText, McpServer } from "./mcp.ts";
@@ -692,6 +693,11 @@ export default function engram(pi: ExtensionAPI) {
 		}
 		if (decision.action === "skip") return { action: "skipped", existing: decision.existing.map((i) => near[i]) };
 		if (decision.action === "new" || looksSecret(decision.text)) return plain();
+		// A "merge" that comes back as one old memory word for word added nothing.
+		// It's a skip if the old memory has everything the new one names;
+		// otherwise the model may have dropped the new fact, so store it as written.
+		const unchanged = decision.replaces.map((i) => near[i]).find((o) => sameMemory(decision.text, o.text));
+		if (unchanged) return ungrounded(m.text, unchanged.text).length ? plain() : { action: "skipped", existing: [unchanged] };
 
 		// A merge forgets only the memories whose facts it kept.
 		const body = decision.text;

@@ -112,7 +112,7 @@ the extension warns while both are there. The memory paragraphs in
 
   "consolidate": true,
   "consolidateMinSimilarity": 720,
-  "consolidateTimeoutMs": 8000
+  "consolidateTimeoutMs": 20000
 }
 ```
 

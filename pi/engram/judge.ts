@@ -220,6 +220,17 @@ function escape(s: string): string {
 	return s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 }
 
+/**
+ * sameMemory reports whether a merged text is the old memory word for word
+ * (ignoring only whitespace; case can matter in paths and names): the merge
+ * added nothing. Anything else,
+ * however small, may be a correction and stays a merge.
+ */
+export function sameMemory(merged: string, old: string): boolean {
+	const norm = (t: string) => t.replace(/\s+/g, " ").trim();
+	return norm(merged) === norm(old);
+}
+
 /** grounded reports whether an extract adds no identifier the memory doesn't have. */
 export function grounded(extract: string, memory: string): boolean {
 	return ungrounded(extract, memory).length === 0;
