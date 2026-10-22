@@ -1,6 +1,7 @@
 // Package spacetest runs an in-memory Spaces network for tests: one HTTP
 // server acting as every account's PDS and as the space authority, with
-// tokens, credentials, commits and CARs built by the real space package.
+// tokens, credentials, MAC'd commits and STAR archives built by the real
+// space package.
 package spacetest
 
 import (
@@ -31,6 +32,9 @@ import (
 type Account struct {
 	DID string
 	Key *atcrypto.PrivateKeyK256
+	// Kem is the account's #atproto_kem key: the repo host uses it to MAC the
+	// commits and records it serves about this account's repos.
+	Kem *atcrypto.PrivateKeyP256
 
 	records  map[string]space.SerializedRecord // path -> record
 	raw      map[string]json.RawMessage        // path -> record JSON
@@ -70,6 +74,7 @@ type Net struct {
 
 	// Tamper knobs.
 	CorruptCommits bool // sign commits over the wrong contents
+	BadMacs        bool // MAC responses with a secret the client doesn't hold
 	OmitValues     bool // leave values off listRepoOps entries
 }
 
@@ -105,21 +110,39 @@ func (n *Net) NewAccount(did string) *Account {
 	if err != nil {
 		n.T.Fatal(err)
 	}
-	pub, err := key.PublicKey()
+	kem, err := atcrypto.GeneratePrivateKeyP256()
 	if err != nil {
 		n.T.Fatal(err)
 	}
-	a := &Account{DID: did, Key: key, records: map[string]space.SerializedRecord{}, raw: map[string]json.RawMessage{}, listed: true}
+	a := &Account{DID: did, Key: key, Kem: kem, records: map[string]space.SerializedRecord{}, raw: map[string]json.RawMessage{}, listed: true}
 	n.mu.Lock()
 	n.accounts[did] = a
 	n.mu.Unlock()
+	n.publish(a)
+	return a
+}
+
+// publish writes the account's DID document: its #atproto signing key and its
+// #atproto_kem key, both at this network's PDS.
+func (n *Net) publish(a *Account) {
+	n.T.Helper()
+	pub, err := a.Key.PublicKey()
+	if err != nil {
+		n.T.Fatal(err)
+	}
+	kemPub, err := a.Kem.PublicKey()
+	if err != nil {
+		n.T.Fatal(err)
+	}
 	n.Dir.Insert(identity.Identity{
-		DID:      syntax.DID(did),
-		Handle:   syntax.HandleInvalid,
-		Keys:     map[string]identity.VerificationMethod{"atproto": {Type: "Multikey", PublicKeyMultibase: pub.Multibase()}},
+		DID:    syntax.DID(a.DID),
+		Handle: syntax.HandleInvalid,
+		Keys: map[string]identity.VerificationMethod{
+			"atproto":     {Type: "Multikey", PublicKeyMultibase: pub.Multibase()},
+			"atproto_kem": {Type: "Multikey", PublicKeyMultibase: kemPub.Multibase()},
+		},
 		Services: map[string]identity.ServiceEndpoint{"atproto_pds": {Type: "AtprotoPersonalDataServer", URL: n.Server.URL}},
 	})
-	return a
 }
 
 // AccountByDID returns a registered account.
@@ -139,16 +162,24 @@ func (n *Net) RotateKey(a *Account) {
 	if err != nil {
 		n.T.Fatal(err)
 	}
-	pub, _ := key.PublicKey()
 	n.mu.Lock()
 	a.Key = key
 	n.mu.Unlock()
-	n.Dir.Insert(identity.Identity{
-		DID:      syntax.DID(a.DID),
-		Handle:   syntax.HandleInvalid,
-		Keys:     map[string]identity.VerificationMethod{"atproto": {Type: "Multikey", PublicKeyMultibase: pub.Multibase()}},
-		Services: map[string]identity.ServiceEndpoint{"atproto_pds": {Type: "AtprotoPersonalDataServer", URL: n.Server.URL}},
-	})
+	n.publish(a)
+}
+
+// RotateKem gives an account a new #atproto_kem key and republishes its DID
+// doc, as a rotation does.
+func (n *Net) RotateKem(a *Account) {
+	n.T.Helper()
+	kem, err := atcrypto.GeneratePrivateKeyP256()
+	if err != nil {
+		n.T.Fatal(err)
+	}
+	n.mu.Lock()
+	a.Kem = kem
+	n.mu.Unlock()
+	n.publish(a)
 }
 
 // AddMember lets an account obtain credentials for the space.
@@ -280,8 +311,9 @@ var testHash = space.LexBytes(make([]byte, 32))
 func (n *Net) DeliverWrite(a *Account, prevSpaceRev string) []int {
 	n.T.Helper()
 	n.mu.Lock()
-	// The hash is bytes, encoded as {"$bytes": …} like any lexicon bytes.
-	body := map[string]any{"space": n.Space, "repo": a.DID, "repoRev": a.rev, "hash": testHash, "spaceRev": a.spaceRev}
+	// The digest is bytes, encoded as {"$bytes": …} like any lexicon bytes.
+	// The protocol renamed this field from hash in the October 22, 2026 alpha.
+	body := map[string]any{"space": n.Space, "repo": a.DID, "repoRev": a.rev, "data": testHash, "spaceRev": a.spaceRev}
 	n.mu.Unlock()
 	if prevSpaceRev != "" {
 		body["prevSpaceRev"] = prevSpaceRev
@@ -394,23 +426,36 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 
 	case "com.atproto.space.getSpaceCredential":
 		var body struct {
-			Space string `json:"space"`
+			Space             string `json:"space"`
+			CredentialKid     string `json:"credentialKid"`
+			DelegationToken   string `json:"delegationToken"`
+			ClientAttestation string `json:"clientAttestation"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		jwt, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok {
-			return nil, &xerr{401, "MissingJwt", "missing delegation token"}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			return nil, &xerr{400, "InvalidRequest", err.Error()}
 		}
-		tok, err := space.VerifySpaceToken(space.TokenDelegation, jwt, space.VerifyTokenOpts{GetSigningKey: n.keyFunc(r.Context())})
+		if !space.IsP256DIDKey(body.CredentialKid) {
+			return nil, &xerr{400, "InvalidRequest", "credentialKid must be a P-256 did:key"}
+		}
+		if body.Space != n.Space {
+			// This host governs one space: anything else is unknown, not
+			// refused.
+			return nil, &xerr{400, "SpaceNotFound", "Space not found"}
+		}
+		// The space gates on the user, so a request without a delegation
+		// token can't learn that it exists.
+		if body.DelegationToken == "" {
+			return nil, &xerr{400, "SpaceNotFound", "Space not found"}
+		}
+		tok, err := space.VerifySpaceToken(space.TokenDelegation, body.DelegationToken, space.VerifyTokenOpts{GetSigningKey: n.keyFunc(r.Context())})
 		if err != nil {
-			return nil, &xerr{401, "BadJwt", err.Error()}
+			return nil, &xerr{400, "InvalidDelegationToken", err.Error()}
 		}
-		keyID, err := space.VerifySpaceSignature(r.Header, "")
-		if err != nil {
-			return nil, &xerr{401, "BadSpaceSignature", err.Error()}
-		}
-		if tok.Payload.Sub != body.Space || body.Space != n.Space {
+		if tok.Payload.Sub != n.Space {
 			return nil, &xerr{400, "InvalidDelegationToken", "wrong space"}
+		}
+		if ref, _ := space.ParseRef(n.Space); tok.Payload.Aud != ref.HostAud() {
+			return nil, &xerr{400, "InvalidDelegationToken", "wrong audience"}
 		}
 		n.mu.Lock()
 		// The authority is always admitted, as in Cocoon, so it can't lock
@@ -418,9 +463,9 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		member := n.members[tok.Payload.Iss] || tok.Payload.Iss == n.Authority.DID
 		n.mu.Unlock()
 		if !member {
-			return nil, &xerr{403, "Forbidden", "not a member"}
+			return nil, &xerr{403, "UserNotAuthorized", "not a member"}
 		}
-		cred, err := space.CreateSpaceToken(space.TokenCredential, space.CreateTokenOpts{Iss: n.Authority.DID, Sub: n.Space, KeyID: keyID}, n.Authority.Key)
+		cred, err := space.CreateSpaceToken(space.TokenCredential, space.CreateTokenOpts{Iss: n.Authority.DID, Sub: n.Space, KeyID: body.CredentialKid}, n.Authority.Key)
 		if err != nil {
 			return nil, &xerr{500, "InternalError", err.Error()}
 		}
@@ -437,7 +482,7 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 			if a.rev == "" || !a.listed {
 				continue
 			}
-			repos = append(repos, map[string]any{"did": a.DID, "repoRev": a.rev, "hash": testHash, "spaceRev": a.spaceRev})
+			repos = append(repos, map[string]any{"did": a.DID, "repoRev": a.rev, "data": testHash, "spaceRev": a.spaceRev})
 		}
 		return map[string]any{"repos": repos}, nil
 
@@ -451,6 +496,16 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 			if e := n.checkCredential(r, repo); e != nil {
 				return nil, e
 			}
+		}
+		// A record read is MAC'd when one is asked for; with a credential,
+		// one must be. listRecords carries no MAC.
+		var secret []byte
+		if nsid == "com.atproto.space.getRecord" {
+			s, e := n.macSecret(r, repo, space.RecordMacType)
+			if e != nil {
+				return nil, e
+			}
+			secret = s
 		}
 		n.mu.Lock()
 		defer n.mu.Unlock()
@@ -471,7 +526,12 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 			if !ok {
 				return nil, &xerr{400, "RecordNotFound", "no record"}
 			}
-			return view(rec)
+			v, e := view(rec)
+			if e != nil {
+				return nil, e
+			}
+			n.setRecordMac(w, secret, v["uri"].(string), rec.Cid)
+			return v, nil
 		}
 		paths := make([]string, 0, len(a.records))
 		for p, rec := range a.records {
@@ -569,11 +629,20 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		if e := n.checkCredential(r, repo); e != nil {
 			return nil, e
 		}
-		return n.listRepoOps(repo, q.Get("since"), q.Get("cursor"), q.Get("limit"))
+		// Every page is asked for a MAC, commit or not.
+		secret, e := n.macSecret(r, repo, space.CommitMacType)
+		if e != nil {
+			return nil, e
+		}
+		return n.listRepoOps(w, repo, secret, q.Get("since"), q.Get("cursor"), q.Get("limit"))
 
 	case "com.atproto.space.getRepo":
 		repo := q.Get("repo")
 		if e := n.checkCredential(r, repo); e != nil {
+			return nil, e
+		}
+		secret, e := n.macSecret(r, repo, space.CommitMacType)
+		if e != nil {
 			return nil, e
 		}
 		n.mu.Lock()
@@ -582,15 +651,16 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		if a == nil || a.rev == "" {
 			return nil, &xerr{404, "RepoNotFound", "no repo"}
 		}
-		commit, records, e := n.commit(a)
-		if e != nil {
-			return nil, e
+		commit, records, e2 := n.commit(a)
+		if e2 != nil {
+			return nil, e2
 		}
 		var buf bytes.Buffer
-		if err := space.SerializeRepo(&buf, commit, records, false); err != nil {
+		if err := space.SerializeRepo(&buf, commit, records); err != nil {
 			return nil, &xerr{500, "InternalError", err.Error()}
 		}
-		w.Header().Set("Content-Type", "application/vnd.ipld.car")
+		n.setCommitMac(w, secret, commit)
+		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = w.Write(buf.Bytes())
 		return nil, nil
 	case "com.atproto.space.listSpaces":
@@ -768,12 +838,14 @@ func (n *Net) sortedAccounts() []*Account {
 }
 
 func (n *Net) keyFunc(ctx context.Context) space.SigningKeyFunc {
-	return func(iss, kid string, fresh bool) (string, error) {
+	return func(iss string, fresh bool) (string, error) {
 		ident, err := n.Dir.LookupDID(ctx, syntax.DID(iss))
 		if err != nil {
 			return "", err
 		}
-		pub, err := ident.GetPublicKey(strings.TrimPrefix(kid, "#"))
+		// The October 22, 2026 alpha issues every space token under the
+		// account's #atproto key.
+		pub, err := ident.GetPublicKey("atproto")
 		if err != nil {
 			return "", err
 		}
@@ -782,8 +854,8 @@ func (n *Net) keyFunc(ctx context.Context) space.SigningKeyFunc {
 }
 
 func (n *Net) checkCredential(r *http.Request, audience string) *xerr {
-	jwt, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Atproto-Space ")
-	if !ok {
+	scheme, jwt, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+	if !ok || !strings.EqualFold(scheme, space.CredentialScheme) {
 		return &xerr{401, "MissingJwt", "missing space credential"}
 	}
 	tok, err := space.VerifySpaceToken(space.TokenCredential, jwt, space.VerifyTokenOpts{GetSigningKey: n.keyFunc(r.Context())})
@@ -793,7 +865,7 @@ func (n *Net) checkCredential(r *http.Request, audience string) *xerr {
 	if tok.Payload.Sub != n.Space || tok.Payload.Iss != n.Authority.DID {
 		return &xerr{401, "BadJwt", "credential for another space"}
 	}
-	if _, err := space.VerifySpaceSignature(r.Header, tok.Payload.Cnf.Kid); err != nil {
+	if err := space.VerifyCredentialSig(r.Header, tok.Payload.Cnf.Kid); err != nil {
 		return &xerr{401, "BadSpaceSignature", err.Error()}
 	}
 	if got := r.Header.Get(space.HeaderSpaceAudience); got != audience {
@@ -802,7 +874,56 @@ func (n *Net) checkCredential(r *http.Request, audience string) *xerr {
 	return nil
 }
 
-func (n *Net) commit(a *Account) (space.SignedCommit, []space.SerializedRecord, *xerr) {
+// macSecret establishes the shared secret a response about repo's commits or
+// records is MAC'd with, from the request's Atproto-Space-Want-Mac header.
+// A read with a space credential must ask for one; the account's own session
+// read may or may not.
+func (n *Net) macSecret(r *http.Request, repo, typ string) ([]byte, *xerr) {
+	want := r.Header.Values(space.HeaderWantMac)
+	if len(want) == 0 {
+		if r.Header.Get("X-Test-Did") == repo {
+			return nil, nil
+		}
+		return nil, &xerr{400, "BadSpaceMac", "missing Atproto-Space-Want-Mac"}
+	}
+	keyShare, err := space.ParseWantMacHeader(want, typ)
+	if err != nil {
+		return nil, &xerr{400, "BadSpaceMac", err.Error()}
+	}
+	n.mu.Lock()
+	a := n.accounts[repo]
+	n.mu.Unlock()
+	if a == nil || a.Kem == nil {
+		return nil, &xerr{400, "BadSpaceMac", "account has no KEM key"}
+	}
+	secret, err := space.Decapsulate(a.Kem, keyShare)
+	if err != nil {
+		return nil, &xerr{400, "BadSpaceMac", err.Error()}
+	}
+	return secret, nil
+}
+
+func (n *Net) setCommitMac(w http.ResponseWriter, secret []byte, c space.Commit) {
+	if secret == nil {
+		return
+	}
+	if n.BadMacs {
+		secret = bytes.Repeat([]byte{0x01}, 32)
+	}
+	w.Header().Set(space.HeaderMac, space.FormatMacHeader(space.CommitMacType, space.ComputeCommitMac(secret, c)))
+}
+
+func (n *Net) setRecordMac(w http.ResponseWriter, secret []byte, uri string, c cid.Cid) {
+	if secret == nil {
+		return
+	}
+	if n.BadMacs {
+		secret = bytes.Repeat([]byte{0x01}, 32)
+	}
+	w.Header().Set(space.HeaderMac, space.FormatMacHeader(space.RecordMacType, space.ComputeRecordMac(secret, uri, c)))
+}
+
+func (n *Net) commit(a *Account) (space.Commit, []space.SerializedRecord, *xerr) {
 	var refs []space.RecordRef
 	var records []space.SerializedRecord
 	paths := make([]string, 0, len(a.records))
@@ -819,14 +940,12 @@ func (n *Net) commit(a *Account) (space.SignedCommit, []space.SerializedRecord, 
 	if n.CorruptCommits {
 		repo.SetHash.Add("bogus")
 	}
-	c, err := repo.Sign(space.CommitCtx{Space: n.Space, Author: a.DID, Rev: a.rev}, a.Key)
-	if err != nil {
-		return c, nil, &xerr{500, "InternalError", err.Error()}
-	}
-	return c, records, nil
+	// Commits are no longer signed: a repo host authenticates them with the
+	// MAC it returns beside them (commits are MAC'd in the response header).
+	return repo.ToCommit(space.CommitCtx{Space: n.Space, Repo: a.DID, Rev: a.rev}), records, nil
 }
 
-func (n *Net) listRepoOps(repo, since, cursor, limitStr string) (any, *xerr) {
+func (n *Net) listRepoOps(w http.ResponseWriter, repo string, secret []byte, since, cursor, limitStr string) (any, *xerr) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	a := n.accounts[repo]
@@ -872,6 +991,9 @@ func (n *Net) listRepoOps(repo, since, cursor, limitStr string) (any, *xerr) {
 		if e != nil {
 			return nil, e
 		}
+		// A page without a commit has nothing to MAC: its ops are checked
+		// once the final page's commit is compared with the set hash.
+		n.setCommitMac(w, secret, c)
 		res["commit"] = c
 	} else {
 		res["cursor"] = strconv.Itoa(end)

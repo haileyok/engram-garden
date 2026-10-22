@@ -20,16 +20,13 @@ def main() -> None:
     key = space.generate_key()
     did_key = space.did_key(key.public_key())
     sigs = []
-    for auth, aud in [
-        ("Bearer eyJ.delegation.token", ""),
-        ("Atproto-Space eyJ.credential.jwt", "did:web:api.engram.garden"),
-        ("Atproto-Space eyJ.credential.jwt", "did:plc:abcdefghijklmnopqrstuvwx"),
-    ]:
+    for aud in ["did:web:api.engram.garden", "did:plc:abcdefghijklmnopqrstuvwx"]:
+        auth = f"{space.CREDENTIAL_SCHEME} eyJ.credential.jwt"
         sigs.append(
             {
                 "authorization": auth,
                 "audience": aud,
-                "keyId": did_key if aud else "",
+                "keyId": did_key,
                 "headers": space.create_space_sig_headers(key, auth, aud),
             }
         )

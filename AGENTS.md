@@ -60,9 +60,9 @@ Guidance for working on Engram Garden.
   requests. Delegation tokens come from a `Delegator`: the user's own PDS
   session (agents, the web app) or, in the appview, a space's grant.
 - `internal/indexer`: syncs member repos. It applies oplog entries to a set
-  hash, checks the result against the member's signed commit, and falls back
-  to a verified `getRepo` export. The authority's config record is honored
-  only from the authority's repo.
+  hash, checks the result against the member's commit and the MAC the repo
+  host returns for it, and falls back to a verified `getRepo` export. The
+  authority's config record is honored only from the authority's repo.
 - `internal/spacestore`: the index. Per space: a manifest and segment files
   in object storage, a write buffer, flushes, merges, garbage collection,
   search (1-bit scan, int8 re-rank), cache tiers, limits and fencing. Read

@@ -349,9 +349,9 @@ func (s *Server) verifyCredential(r *http.Request, spaceURI string) error {
 			return errf(http.StatusUnauthorized, "AuthRequired", "request requires exactly one %s header", strings.ToLower(name))
 		}
 	}
-	jwt, ok := strings.CutPrefix(h.Get("Authorization"), "Atproto-Space ")
+	jwt, ok := spaceCredential(r)
 	if !ok || jwt == "" {
-		return errf(http.StatusUnauthorized, "AuthRequired", "requires a space credential (Authorization: Atproto-Space ...)")
+		return errf(http.StatusUnauthorized, "AuthRequired", "requires a space credential (Authorization: %s ...)", space.CredentialScheme)
 	}
 	tok, err := space.VerifySpaceToken(space.TokenCredential, jwt, space.VerifyTokenOpts{
 		GetSigningKey: spaceclient.KeyResolver(r.Context(), s.Dir),
@@ -367,10 +367,21 @@ func (s *Server) verifyCredential(r *http.Request, spaceURI string) error {
 	if aud := h.Get(space.HeaderSpaceAudience); aud != s.ServiceDID {
 		return errf(http.StatusUnauthorized, "BadSpaceSignature", "request is addressed to %q, not this service (%s)", aud, s.ServiceDID)
 	}
-	if _, err := space.VerifySpaceSignature(h, tok.Payload.Cnf.Kid); err != nil {
+	if err := space.VerifyCredentialSig(h, tok.Payload.Cnf.Kid); err != nil {
 		return errf(http.StatusUnauthorized, "BadSpaceSignature", "%v", err)
 	}
 	return nil
+}
+
+// spaceCredential returns the space credential a request presents. The
+// scheme is matched regardless of case, as the reference does; the signature
+// base is still computed over the header exactly as received.
+func spaceCredential(r *http.Request) (string, bool) {
+	scheme, jwt, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+	if !ok || !strings.EqualFold(scheme, space.CredentialScheme) {
+		return "", false
+	}
+	return jwt, true
 }
 
 func (s *Server) indexes(spaceURI string) bool {

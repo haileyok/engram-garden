@@ -39,6 +39,16 @@ class Identity:
     def pds_endpoint(self) -> str:
         return self.service_endpoint("atproto_pds")
 
+    def verification_method_key(self, key_id: str) -> str:
+        """The did:key of the verification method with this fragment id (e.g. atproto_kem), or ""."""
+        for vm in self.doc.get("verificationMethod", []) or []:
+            vid = vm.get("id", "")
+            if vid in (f"#{key_id}", f"{self.did}#{key_id}"):
+                mb = vm.get("publicKeyMultibase")
+                if isinstance(mb, str) and mb:
+                    return "did:key:" + mb
+        return ""
+
 
 @dataclass
 class Directory:

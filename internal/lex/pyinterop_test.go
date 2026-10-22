@@ -94,20 +94,13 @@ func TestWritePythonFixtures(t *testing.T) {
 		t.Fatal(err)
 	}
 	fx := goFixtures{PrivateKeyHex: testKeyHex, DIDKey: pub.DIDKey()}
-	for _, c := range []struct{ auth, aud string }{
-		{"Bearer eyJ.delegation.token", ""},
-		{"Atproto-Space eyJ.credential.jwt", "did:web:api.engram.garden"},
-		{"Atproto-Space eyJ.credential.jwt", "did:plc:abcdefghijklmnopqrstuvwx"},
-	} {
-		h, err := space.CreateSpaceSigHeaders(key, c.auth, c.aud)
+	for _, aud := range []string{"did:web:api.engram.garden", "did:plc:abcdefghijklmnopqrstuvwx"} {
+		auth := space.CredentialScheme + " eyJ.credential.jwt"
+		h, err := space.CreateSpaceSigHeaders(key, auth, aud)
 		if err != nil {
 			t.Fatal(err)
 		}
-		keyID := ""
-		if c.aud != "" {
-			keyID = pub.DIDKey()
-		}
-		fx.Sigs = append(fx.Sigs, sigFixture{Authorization: c.auth, Audience: c.aud, KeyID: keyID, Headers: h})
+		fx.Sigs = append(fx.Sigs, sigFixture{Authorization: auth, Audience: aud, KeyID: pub.DIDKey(), Headers: h})
 	}
 	for _, v := range testVectors() {
 		rec := EmbeddingRecord(ModelInfo{Model: nomic.Model, ModelDigest: nomic.ModelDigest, Dims: len(v)}, v)
@@ -167,12 +160,11 @@ func TestPythonFixtures(t *testing.T) {
 		for k, v := range s.Headers {
 			h.Set(k, v)
 		}
-		got, err := space.VerifySpaceSignature(h, s.KeyID)
-		if err != nil {
+		if err := space.VerifyCredentialSig(h, s.KeyID); err != nil {
 			t.Fatalf("sig %d (audience %q): %v", i, s.Audience, err)
 		}
-		if s.KeyID == "" && got != fx.DIDKey {
-			t.Fatalf("sig %d: signed by %s, want %s", i, got, fx.DIDKey)
+		if s.KeyID != fx.DIDKey {
+			t.Fatalf("sig %d: bound to %s, want %s", i, s.KeyID, fx.DIDKey)
 		}
 	}
 	for i, v := range fx.Vectors {

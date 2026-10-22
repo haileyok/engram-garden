@@ -91,7 +91,7 @@ Why:
   so even a laptop CPU keeps up. This is goal 1, each space using its own
   resources, applied to compute.
 - The vector lives in the memory record, in the author's own repo and under
-  their signed commit. Any appview can index a space from the records alone,
+  their commit. Any appview can index a space from the records alone,
   without re-embedding, which also makes export nearly free.
 
 ### The space's model
@@ -415,8 +415,9 @@ accepted before syncing, as before.
   using `listRepoOps`. Changes that were only in the lost buffer, at most
   about an hour's worth, are pulled again.
 - If a PDS can't serve the oplog from that position, or the result doesn't
-  verify against the signed commit, the indexer falls back to a full
-  verified `getRepo` export of that repo, as before.
+  verify against the commit and the MAC the repo host returned for it, the
+  indexer falls back to a full verified `getRepo` export of that repo, as
+  before.
 - Until a repo catches up, its newest memories are missing from search.
   They aren't lost.
 

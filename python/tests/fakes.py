@@ -1,20 +1,25 @@
 """An in-process fake of what the client talks to: the account's PDS, the space authority's host and the
-appview. It checks what the real services check (delegation tokens, the credential's bound key, HTTP message
-signatures and their audience) so a client that passes here would be accepted there."""
+appview. It checks what the real services check (delegation tokens in the request body, the credential's
+bound key, HTTP message signatures and their audience, and the MACs a repo host returns) so a client that
+passes here would be accepted there."""
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from engram_garden import lex, space, vec
 from engram_garden.embed import HASHING_DIGEST, hash_embed
+from engram_garden.space import Ref
 
 APPVIEW_URL = "https://api.engram.test"
 APPVIEW_DID = "did:web:api.engram.test"
@@ -37,6 +42,14 @@ def fake_jwt(payload: dict[str, Any]) -> str:
 
 def json_resp(status: int, body: Any) -> httpx.Response:
     return httpx.Response(status, json=body)
+
+
+def record_cid(rec: dict[str, Any]) -> str:
+    """A well-formed CIDv1 string for a record: base32 of dag-cbor/sha2-256 over its JSON. Not the DRISL
+    CID a real PDS computes; the MAC binds whatever CID the host names."""
+    digest = hashlib.sha256(json.dumps(rec, sort_keys=True, separators=(",", ":")).encode()).digest()
+    raw = bytes([0x01, 0x71, 0x12, 0x20]) + digest
+    return "b" + base64.b32encode(raw).decode().lower().rstrip("=")
 
 
 def xrpc_err(status: int, name: str, message: str = "") -> httpx.Response:
@@ -72,11 +85,15 @@ class World:
     spaces_created: list[dict[str, Any]] = field(default_factory=list)
     #: Members whose PDS fails credentialed reads, as if it were down.
     reject_member_reads: set[str] = field(default_factory=set)
+    #: MAC responses with a secret the client doesn't hold.
+    bad_macs: bool = False
     members: dict[str, dict[str, tuple[bool, bool]]] = field(default_factory=dict)
     _tokens: dict[str, str] = field(default_factory=dict)  # access jwt -> did
     _refresh: dict[str, str] = field(default_factory=dict)  # refresh jwt -> did
     _delegations: dict[str, tuple[str, str]] = field(default_factory=dict)  # token -> (did, space)
     _creds: dict[str, tuple[str, str, str]] = field(default_factory=dict)  # jwt -> (did, space, bound key)
+    #: Each account's #atproto_kem key, published in its DID document.
+    kem: dict[str, ec.EllipticCurvePrivateKey] = field(default_factory=dict)
     _n: int = 0
 
     def __post_init__(self) -> None:
@@ -141,15 +158,14 @@ class World:
         if self.reject_credentials > 0:
             self.reject_credentials -= 1
             return xrpc_err(401, "AuthRequired", "bad credential")
-        auth = req.headers.get("authorization", "")
-        if not auth.startswith("Atproto-Space "):
+        scheme, _, cred = req.headers.get("authorization", "").partition(" ")
+        if scheme.lower() != space.CREDENTIAL_SCHEME.lower() or not cred:
             return xrpc_err(401, "AuthRequired", "no credential")
-        cred = auth.removeprefix("Atproto-Space ")
         if cred not in self._creds:
             return xrpc_err(401, "AuthRequired", "unknown credential")
         did, space_uri, bound = self._creds[cred]
         try:
-            space.verify_space_signature(dict(req.headers), bound)
+            space.verify_credential_sig(dict(req.headers), bound)
         except ValueError as e:
             return xrpc_err(401, "BadSpaceSignature", str(e))
         if audience is None:  # a space host: its audience is the space's authority
@@ -186,9 +202,23 @@ class World:
             {
                 "id": did,
                 "alsoKnownAs": [f"at://{a.handle}"],
+                "verificationMethod": [
+                    {
+                        "id": f"{did}#atproto_kem",
+                        "type": "Multikey",
+                        "controller": did,
+                        "publicKeyMultibase": space.did_key(self.kem_of(did).public_key()).removeprefix("did:key:"),
+                    }
+                ],
                 "service": [{"id": "#atproto_pds", "type": "AtprotoPersonalDataServer", "serviceEndpoint": PDS_URL}],
             },
         )
+
+    def kem_of(self, did: str) -> ec.EllipticCurvePrivateKey:
+        """An account's #atproto_kem key, made on first use."""
+        if did not in self.kem:
+            self.kem[did] = ec.generate_private_key(ec.SECP256R1())
+        return self.kem[did]
 
     def _pds(self, req: httpx.Request) -> httpx.Response:
         nsid = req.url.path.removeprefix("/xrpc/")
@@ -211,7 +241,8 @@ class World:
             return self._exchange(req, body)
         tok = req.headers.get("authorization", "").removeprefix("Bearer ")
         # Credentialed reads at the authority's PDS (the space config).
-        if req.headers.get("authorization", "").startswith("Atproto-Space "):
+        scheme = req.headers.get("authorization", "").partition(" ")[0]
+        if scheme.lower() == space.CREDENTIAL_SCHEME.lower():
             return self._pds_credentialed(req, nsid, q)
         if self.expire_tokens > 0:
             self.expire_tokens -= 1
@@ -228,18 +259,25 @@ class World:
         return {"did": did, "handle": handle, "accessJwt": access, "refreshJwt": refresh}
 
     def _exchange(self, req: httpx.Request, body: dict[str, Any]) -> httpx.Response:
+        """getSpaceCredential: the request's assertions are in its body, not its headers."""
         self.exchanges += 1
-        auth = req.headers.get("authorization", "")
-        if not auth.startswith("Bearer "):
-            return xrpc_err(401, "AuthRequired", "no delegation token")
-        deleg = self._delegations.get(auth.removeprefix("Bearer "))
-        if deleg is None or deleg[1] != body.get("space"):
-            return xrpc_err(401, "InvalidToken", "bad delegation token")
+        kid = body.get("credentialKid", "")
+        if not kid.startswith("did:key:"):
+            return xrpc_err(400, "InvalidRequest", "credentialKid must be a P-256 did:key")
+        space_uri = body.get("space")
+        # A space this fake knows of (the authority's own, or one created here) exists; anything
+        # else doesn't, and a space that gates on the user can't be found without a delegation
+        # token either.
         try:
-            bound = space.verify_space_signature(dict(req.headers), "")
-        except ValueError as e:
-            return xrpc_err(401, "BadSpaceSignature", str(e))
-        return json_resp(200, {"credential": self._mint_credential(deleg[0], deleg[1], bound)})
+            known = Ref.parse(space_uri).authority == AUTHORITY_DID or space_uri in self.members
+        except ValueError:
+            known = False
+        if not known:
+            return xrpc_err(400, "SpaceNotFound", "Space not found")
+        deleg = self._delegations.get(body.get("delegationToken") or "")
+        if deleg is None or deleg[1] != space_uri:
+            return xrpc_err(400, "InvalidDelegationToken", "bad delegation token")
+        return json_resp(200, {"credential": self._mint_credential(deleg[0], deleg[1], kid)})
 
     def _pds_credentialed(self, req: httpx.Request, nsid: str, q: httpx.QueryParams) -> httpx.Response:
         # A member's PDS checks the audience is that member; the space host, the authority.
@@ -256,13 +294,34 @@ class World:
             return self._list_records(q)
         if nsid == "com.atproto.space.getRecord":
             key = (q["space"], q["repo"], q["collection"])
+            uri = f"{q['space']}/{q['repo']}/{q['collection']}/{q['rkey']}"
             if q["collection"] == lex.CONFIG_COLLECTION and self.config is not None:
-                return json_resp(200, {"uri": "x", "value": self.config})
+                return self._record_mac(req, {"uri": uri, "cid": record_cid(self.config), "value": self.config}, q)
             rec = self.records.get(key, {}).get(q["rkey"])
             if rec is None:
                 return xrpc_err(404, "RecordNotFound", "no such record")
-            return json_resp(200, {"uri": "x", "value": rec})
+            return self._record_mac(req, {"uri": uri, "cid": record_cid(rec), "value": rec}, q)
         return xrpc_err(404, "MethodNotImplemented", nsid)
+
+    def _record_mac(self, req: httpx.Request, resp: dict[str, Any], q: httpx.QueryParams) -> httpx.Response:
+        """Answer a getRecord with the MAC the request asked for. A credential read must ask."""
+        want = req.headers.get(space.HEADER_WANT_MAC, "")
+        if not want:
+            return xrpc_err(400, "BadSpaceMac", "missing Atproto-Space-Want-Mac")
+        m = re.fullmatch(rf'type="{space.RECORD_MAC_TYPE}", ver={space.RECORD_MAC_VERSION}, key_share="([^"]+)"', want)
+        if not m:
+            return xrpc_err(400, "BadSpaceMac", "malformed Atproto-Space-Want-Mac")
+        try:
+            secret = space.decapsulate(self.kem_of(q["repo"]), m.group(1))
+        except ValueError as e:
+            return xrpc_err(400, "BadSpaceMac", str(e))
+        if self.bad_macs:
+            secret = bytes(32)
+        mac = space.compute_record_mac(secret, resp["uri"], space.cid_bytes(resp["cid"]))
+        header = (
+            f'type="{space.RECORD_MAC_TYPE}", ver={space.RECORD_MAC_VERSION}, mac=:{base64.b64encode(mac).decode()}:'
+        )
+        return httpx.Response(200, json=resp, headers={space.HEADER_MAC: header})
 
     def _pds_session(self, did: str, nsid: str, q: httpx.QueryParams, body: dict[str, Any]) -> httpx.Response:
         acct = self.accounts[did]
@@ -301,11 +360,13 @@ class World:
             return self._list_records(q)
         if nsid == "com.atproto.space.getRecord":
             if q["collection"] == lex.CONFIG_COLLECTION and self.config is not None:
-                return json_resp(200, {"uri": "x", "value": self.config})
+                uri = f"{q['space']}/{q['repo']}/{q['collection']}/{q['rkey']}"
+                return json_resp(200, {"uri": uri, "cid": record_cid(self.config), "value": self.config})
             rec = self.records.get((q["space"], q["repo"], q["collection"]), {}).get(q.get("rkey", ""))
             if rec is None:
                 return xrpc_err(404, "RecordNotFound", "no such record")
-            return json_resp(200, {"uri": "x", "value": rec})
+            uri = f"{q['space']}/{q['repo']}/{q['collection']}/{q['rkey']}"
+            return json_resp(200, {"uri": uri, "cid": record_cid(rec), "value": rec})
         return self._pds_session_rest(did, acct, nsid, q, body)
 
     def _list_records(self, q: httpx.QueryParams) -> httpx.Response:
@@ -316,7 +377,9 @@ class World:
         page = keys[start : start + limit]
         # Like cocoon: list items name a record by collection and rkey, with no uri.
         out: dict[str, Any] = {
-            "records": [{"collection": q["collection"], "rkey": k, "cid": "bafy-" + k, "value": recs[k]} for k in page]
+            "records": [
+                {"collection": q["collection"], "rkey": k, "cid": record_cid(recs[k]), "value": recs[k]} for k in page
+            ]
         }
         if start + limit < len(keys):
             out["cursor"] = page[-1]

@@ -440,9 +440,9 @@ make python-lint python-test                # the Python client (uv)
 ```
 
 Tests run against an in-memory Spaces network (`internal/spacetest`). It
-builds real tokens, credentials, signed commits and repo CARs with Cocoon's
-`space` package, so the appview's verification runs end to end without
-any external services. Storage tests use a local directory and an
+builds real tokens, credentials, MAC'd commits and repo STAR archives with
+Cocoon's `space` package, so the appview's verification runs end to end
+without any external services. Storage tests use a local directory and an
 in-process S3, and the control-plane store is in memory.
 
 To run those against a real Postgres, with Docker running:

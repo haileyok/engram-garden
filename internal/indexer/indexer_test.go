@@ -3,8 +3,12 @@ package indexer
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/bluesky-social/indigo/atproto/identity"
+	"github.com/bluesky-social/indigo/atproto/syntax"
 
 	"github.com/haileyok/engram-garden/internal/blob"
 	"github.com/haileyok/engram-garden/internal/embed"
@@ -332,7 +336,7 @@ func TestBadCommitIndexesNothing(t *testing.T) {
 	}
 }
 
-func TestKeyRotation(t *testing.T) {
+func TestKemKeyRotation(t *testing.T) {
 	t.Parallel()
 	f := setup(t)
 	ctx := context.Background()
@@ -341,13 +345,85 @@ func TestKeyRotation(t *testing.T) {
 	if err := f.ix.SyncRepo(ctx, f.net.Space, f.alice.DID, ""); err != nil {
 		t.Fatal(err)
 	}
-	f.net.RotateKey(f.alice)
+	f.net.RotateKem(f.alice)
 	f.net.Put(f.alice, Collection, "a2", memory("two"))
 	if err := f.ix.SyncRepo(ctx, f.net.Space, f.alice.DID, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.count(t); got != 2 {
 		t.Fatalf("got %d, want 2", got)
+	}
+}
+
+// staleDID serves an old DID document until it is purged, as a caching
+// directory does between a key rotation and the refresh a failed MAC asks for.
+type staleDID struct {
+	identity.Directory
+	mu    sync.Mutex
+	stale map[syntax.DID]identity.Identity
+}
+
+func (d *staleDID) LookupDID(ctx context.Context, did syntax.DID) (*identity.Identity, error) {
+	d.mu.Lock()
+	ident, ok := d.stale[did]
+	d.mu.Unlock()
+	if ok {
+		return &ident, nil
+	}
+	return d.Directory.LookupDID(ctx, did)
+}
+
+func (d *staleDID) Purge(ctx context.Context, id syntax.AtIdentifier) error {
+	d.mu.Lock()
+	delete(d.stale, syntax.DID(id.String()))
+	d.mu.Unlock()
+	return d.Directory.Purge(ctx, id)
+}
+
+func TestKemRotationRefetchesDIDAndRetries(t *testing.T) {
+	t.Parallel()
+	f := setup(t)
+	ctx := context.Background()
+	f.syncConfig(t)
+	// The indexer and the client share one directory: both must see the stale
+	// document and both care when it is purged.
+	stale := &staleDID{Directory: f.net.Dir, stale: map[syntax.DID]identity.Identity{}}
+	f.ix.Dir, f.ix.Client.Dir = stale, stale
+
+	old, err := f.net.Dir.LookupDID(ctx, syntax.DID(f.alice.DID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.net.RotateKem(f.alice)
+	stale.mu.Lock()
+	stale.stale[syntax.DID(f.alice.DID)] = *old
+	stale.mu.Unlock()
+
+	f.net.Put(f.alice, Collection, "a1", memory("one"))
+	before := f.net.Calls("com.atproto.space.getRepo")
+	if err := f.ix.SyncRepo(ctx, f.net.Space, f.alice.DID, ""); err != nil {
+		t.Fatalf("sync after a KEM key rotation: %v", err)
+	}
+	if got := f.count(t); got != 1 {
+		t.Fatalf("got %d memories, want 1", got)
+	}
+	if n := f.net.Calls("com.atproto.space.getRepo") - before; n != 2 {
+		t.Fatalf("getRepo was called %d times; the failed MAC should have been retried once", n)
+	}
+}
+
+func TestCommitWithBadMacIndexesNothing(t *testing.T) {
+	t.Parallel()
+	f := setup(t)
+	ctx := context.Background()
+	f.syncConfig(t)
+	f.net.BadMacs = true
+	f.net.Put(f.alice, Collection, "a1", memory("unauthenticated"))
+	if err := f.ix.SyncRepo(ctx, f.net.Space, f.alice.DID, ""); err == nil {
+		t.Fatal("expected the MAC to be refused")
+	}
+	if got := f.count(t); got != 0 {
+		t.Fatalf("indexed %d memories from an unauthenticated read", got)
 	}
 }
 

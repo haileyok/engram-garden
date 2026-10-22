@@ -3,35 +3,25 @@
   "didKey": "did:key:zDnaeagKWt45K6WCE6Dm3pAWvUzt7HgPtvAL1YNpBGX3YJ8eL",
   "sigs": [
     {
-      "authorization": "Bearer eyJ.delegation.token",
-      "audience": "",
-      "keyId": "",
-      "headers": {
-        "authorization": "Bearer eyJ.delegation.token",
-        "signature": "atproto-space=:qA3CVxJ5IILk/AJeWsanVMmxjGjtsvZJAsrCzhKl0ZtYjChbXnJbfU604z2si1gcMnfozJhrtvTAWIlVRxOpIw==:",
-        "signature-input": "atproto-space=(\"authorization\");keyid=\"did:key:zDnaeagKWt45K6WCE6Dm3pAWvUzt7HgPtvAL1YNpBGX3YJ8eL\""
-      }
-    },
-    {
-      "authorization": "Atproto-Space eyJ.credential.jwt",
+      "authorization": "Atproto-Space-Credential eyJ.credential.jwt",
       "audience": "did:web:api.engram.garden",
       "keyId": "did:key:zDnaeagKWt45K6WCE6Dm3pAWvUzt7HgPtvAL1YNpBGX3YJ8eL",
       "headers": {
         "atproto-space-audience": "did:web:api.engram.garden",
-        "authorization": "Atproto-Space eyJ.credential.jwt",
-        "signature": "atproto-space=:iKbsxeihaU3CefwYSEx7PexoXiIqwwdjqXYgJWmkoa4YEUEB/5zP+7RizNpEx1X8lcCgrgPD2A3Me6p1sEsdkg==:",
-        "signature-input": "atproto-space=(\"authorization\" \"atproto-space-audience\")"
+        "authorization": "Atproto-Space-Credential eyJ.credential.jwt",
+        "signature": "atproto-space-credential=:CGlPH1W8Iad+Hdpbi3imkZw6jA+UBy0Ni9QOUBhHP1BgKa8r5HkwiXnAZLNXiuiPWDjDJeNlmztij748C382Vg==:",
+        "signature-input": "atproto-space-credential=(\"authorization\" \"atproto-space-audience\");tag=\"atproto-space-credential\""
       }
     },
     {
-      "authorization": "Atproto-Space eyJ.credential.jwt",
+      "authorization": "Atproto-Space-Credential eyJ.credential.jwt",
       "audience": "did:plc:abcdefghijklmnopqrstuvwx",
       "keyId": "did:key:zDnaeagKWt45K6WCE6Dm3pAWvUzt7HgPtvAL1YNpBGX3YJ8eL",
       "headers": {
         "atproto-space-audience": "did:plc:abcdefghijklmnopqrstuvwx",
-        "authorization": "Atproto-Space eyJ.credential.jwt",
-        "signature": "atproto-space=:Fb0IWWOwFtdojkzH54FDfaj/0eLy/KR7tNfTlEf8BcIaXZcRHL2ftiGUj3qL5gn5hKRN2un5gCaqs+IJtldN4w==:",
-        "signature-input": "atproto-space=(\"authorization\" \"atproto-space-audience\")"
+        "authorization": "Atproto-Space-Credential eyJ.credential.jwt",
+        "signature": "atproto-space-credential=:xrtWd3zfVq5z6t8vL1rSbVZ/stcvFanEVu5CAisJAl0xMX+iNVgbQHxB1Yp9OiAACPMf1a8lGv9TrEJcYJYqHA==:",
+        "signature-input": "atproto-space-credential=(\"authorization\" \"atproto-space-audience\");tag=\"atproto-space-credential\""
       }
     }
   ],

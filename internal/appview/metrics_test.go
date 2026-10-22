@@ -81,7 +81,7 @@ func TestMetricsFollowNotifications(t *testing.T) {
 		t.Fatalf("search: %d %v", status, body)
 	}
 	svc := f.srv.ServiceID()
-	if s := f.net.Deliver(svc, "com.atproto.space.notifyWrite", map[string]any{"space": f.net.Space, "repo": f.alice.DID, "hash": "not bytes"},
+	if s := f.net.Deliver(svc, "com.atproto.space.notifyWrite", map[string]any{"space": f.net.Space, "repo": f.alice.DID, "data": "not bytes"},
 		f.net.ServiceAuth(svc, "com.atproto.space.notifyWrite")); s != 400 {
 		t.Fatalf("malformed notification: %d", s)
 	}

@@ -149,6 +149,15 @@ async def test_no_model_declared(world: World, http):
             await s.remember("hello")
 
 
+async def test_config_record_with_a_bad_mac_is_refused(world: World, http):
+    """The authority's config is read with a space credential, so its record must come back MAC'd."""
+    world.bad_macs = True
+    async with await eg.open_spaces(make_settings(), http=http) as s:
+        with pytest.raises(eg.EngramError, match="MAC did not verify"):
+            await s.remember("hello")
+        assert world.memories(SPACE) == {}
+
+
 async def test_local_model_mismatch_blocks_writes(world: World, http):
     world.config = lex.Config(lex.ModelInfo("hashing-64", "sha256:something-else", 64)).record()
     async with await eg.open_spaces(make_settings(), http=http) as s:

@@ -32,16 +32,24 @@ def test_did_key_round_trip():
 @pytest.mark.parametrize("i", range(len(GO["sigs"])))
 def test_verifies_go_signatures(i):
     s = GO["sigs"][i]
-    signer = space.verify_space_signature(s["headers"], s["keyId"])
-    assert signer == GO["didKey"]
+    assert s["keyId"] == GO["didKey"]
+    space.verify_credential_sig(s["headers"], s["keyId"])
 
 
 def test_go_signature_rejects_tampering():
-    s = GO["sigs"][1]
+    s = GO["sigs"][0]
     headers = dict(s["headers"])
-    headers["authorization"] = "Atproto-Space other.credential.jwt"
+    headers["authorization"] = f"{space.CREDENTIAL_SCHEME} other.credential.jwt"
     with pytest.raises(ValueError):
-        space.verify_space_signature(headers, s["keyId"])
+        space.verify_credential_sig(headers, s["keyId"])
+
+
+def test_go_signature_rejects_missing_tag():
+    s = GO["sigs"][0]
+    headers = dict(s["headers"])
+    headers["signature-input"] = f'{space.SIG_LABEL}=("authorization" "atproto-space-audience")'
+    with pytest.raises(ValueError):
+        space.verify_credential_sig(headers, s["keyId"])
 
 
 def test_signature_shape_matches_go():

@@ -1,7 +1,7 @@
 // Package indexer keeps the memory index in step with a space: it pulls each
-// member's repo changes, verifies them against the member's signed commit,
-// and hands the memories, with the vectors their records carry, to the
-// index.
+// member's repo changes, verifies them against the MAC the repo host returns
+// for the member's commit, and hands the memories, with the vectors their
+// records carry, to the index.
 package indexer
 
 import (
@@ -230,8 +230,9 @@ type Notification struct {
 	Space   string `json:"space"`
 	Repo    string `json:"repo"`
 	RepoRev string `json:"repoRev"`
-	// Hash is the repo's set-hash digest, lexicon bytes ({"$bytes": …}).
-	Hash         space.LexBytes `json:"hash"`
+	// Data is the repo's set-hash digest, lexicon bytes ({"$bytes": …}). The
+	// protocol called this field hash before the October 22, 2026 alpha.
+	Data         space.LexBytes `json:"data"`
 	SpaceRev     string         `json:"spaceRev,omitempty"`
 	PrevSpaceRev string         `json:"prevSpaceRev,omitempty"`
 }
@@ -279,18 +280,41 @@ func (ix *Indexer) SyncRepo(ctx context.Context, spaceURI, did, spaceRev string)
 	}
 	if st != nil && st.SetHash != nil {
 		mode = "incremental"
-		err := ix.syncIncremental(ctx, spaceURI, did, *st, spaceRev)
+		err := ix.syncIncremental(ctx, spaceURI, did, *st, spaceRev, false)
+		if errors.Is(err, errKemRotated) {
+			// The author's #atproto_kem key may have rotated: the DID
+			// document was refetched, so read the repo again.
+			err = ix.syncIncremental(ctx, spaceURI, did, *st, spaceRev, true)
+		}
 		if err == nil {
 			return nil
 		}
-		if !errors.Is(err, errResync) {
+		if !errors.Is(err, errResync) && !errors.Is(err, errKemRotated) {
 			return err
 		}
 		ix.log().Info("incremental sync can't be applied, re-exporting repo", "space", spaceURI, "repo", did, "reason", err)
 		reexports.Inc()
 		mode = "full"
 	}
-	return ix.syncFull(ctx, spaceURI, did, spaceRev)
+	err = ix.syncFull(ctx, spaceURI, did, spaceRev, false)
+	if errors.Is(err, errKemRotated) {
+		err = ix.syncFull(ctx, spaceURI, did, spaceRev, true)
+	}
+	return err
+}
+
+// errKemRotated marks a commit or archive whose MAC didn't verify with the
+// author's current #atproto_kem key.
+var errKemRotated = errors.New("mac did not verify")
+
+// purgeDID drops a cached DID document, so the next read resolves the
+// author's #atproto_kem key again.
+func (ix *Indexer) purgeDID(ctx context.Context, did string) {
+	d, err := syntax.ParseDID(did)
+	if err != nil || ix.Dir == nil {
+		return
+	}
+	_ = ix.Dir.Purge(ctx, d.AtIdentifier())
 }
 
 // errResync marks an incremental sync that can't be trusted or applied; a
@@ -311,10 +335,13 @@ type pathState struct {
 	value json.RawMessage
 }
 
-func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st spacestore.RepoPosition, spaceRev string) error {
+func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st spacestore.RepoPosition, spaceRev string, fresh bool) error {
 	host, err := ix.Client.PDSHost(ctx, did)
 	if err != nil {
 		return err
+	}
+	if fresh {
+		ix.purgeDID(ctx, did)
 	}
 	repo, err := space.RepoCommitFromState(st.SetHash)
 	if err != nil {
@@ -326,7 +353,10 @@ func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st
 	}
 	final := map[string]*pathState{}
 	var order []string
-	var commit *space.SignedCommit
+	var (
+		commit *space.Commit
+		mac    *spaceclient.Mac
+	)
 	cursor := ""
 	for commit == nil {
 		params := url.Values{"space": {spaceURI}, "repo": {did}, "limit": {fmt.Sprint(pageSize)}}
@@ -336,11 +366,12 @@ func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st
 			params.Set("since", st.Rev)
 		}
 		var out struct {
-			Ops    []opEntry           `json:"ops"`
-			Cursor string              `json:"cursor"`
-			Commit *space.SignedCommit `json:"commit"`
+			Ops    []opEntry     `json:"ops"`
+			Cursor string        `json:"cursor"`
+			Commit *space.Commit `json:"commit"`
 		}
-		if err := ix.Client.Query(ctx, host, spaceURI, did, "com.atproto.space.listRepoOps", params, &out); err != nil {
+		pageMac, err := ix.Client.QueryMac(ctx, host, spaceURI, did, space.CommitMacType, "com.atproto.space.listRepoOps", params, &out)
+		if err != nil {
 			return fmt.Errorf("listRepoOps: %w", err)
 		}
 		for _, op := range out.Ops {
@@ -356,6 +387,9 @@ func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st
 			final[path] = &pathState{cid: rop.Cid, value: op.Value}
 		}
 		commit = out.Commit
+		if commit != nil {
+			mac = pageMac
+		}
 		if commit == nil {
 			if out.Cursor == "" || out.Cursor == cursor {
 				return fmt.Errorf("%w: oplog page ended without a commit or cursor", errResync)
@@ -363,7 +397,7 @@ func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st
 			cursor = out.Cursor
 		}
 	}
-	if err := ix.verifyCommit(ctx, spaceURI, did, *commit, repo); err != nil {
+	if err := verifyCommit(spaceURI, did, *commit, repo, mac); err != nil {
 		return err
 	}
 
@@ -485,77 +519,55 @@ func parseOp(op opEntry) (space.RepoOp, error) {
 	return out, nil
 }
 
-// verifyCommit checks a commit is signed by the author and matches the set
-// hash the ops produced.
-func (ix *Indexer) verifyCommit(ctx context.Context, spaceURI, did string, c space.SignedCommit, repo *space.RepoCommit) error {
-	didKey, err := ix.authorKey(ctx, did, false)
-	if err != nil {
-		return err
+// verifyCommit checks a commit against the MAC its response carried. Only
+// once that passes is the commit's data trusted, which is what makes the
+// running set hash meaningful. A MAC that doesn't verify may mean the
+// author's #atproto_kem key rotated.
+func verifyCommit(spaceURI, did string, c space.Commit, repo *space.RepoCommit, mac *spaceclient.Mac) error {
+	if mac == nil {
+		return fmt.Errorf("%w: no MAC in the response", errResync)
 	}
-	cctx := space.CommitCtx{Space: spaceURI, Author: did, Rev: c.Rev}
-	if !space.VerifyCommit(c, cctx, didKey) {
-		// The key may have rotated.
-		if didKey, err = ix.authorKey(ctx, did, true); err != nil {
-			return err
-		}
-		if !space.VerifyCommit(c, cctx, didKey) {
-			return fmt.Errorf("%w: commit signature did not verify", errResync)
-		}
+	m, err := mac.CommitMac()
+	if err != nil {
+		return fmt.Errorf("%w: %v", errResync, err)
+	}
+	params := space.VerifyCommitParams{Space: spaceURI, Repo: did, SharedSecret: mac.SharedSecret, Mac: m}
+	if !space.VerifyCommit(c, params) {
+		return fmt.Errorf("%w: commit MAC did not verify", errKemRotated)
 	}
 	if !repo.Matches(c) {
-		return fmt.Errorf("%w: ops do not add up to the signed commit", errResync)
+		return fmt.Errorf("%w: ops do not add up to the commit", errResync)
 	}
 	return nil
 }
 
-func (ix *Indexer) authorKey(ctx context.Context, did string, fresh bool) (string, error) {
-	d, err := syntax.ParseDID(did)
-	if err != nil {
-		return "", err
-	}
-	if fresh {
-		_ = ix.Dir.Purge(ctx, d.AtIdentifier())
-	}
-	ident, err := ix.Dir.LookupDID(ctx, d)
-	if err != nil {
-		return "", err
-	}
-	pub, err := ident.PublicKey()
-	if err != nil {
-		return "", err
-	}
-	return pub.DIDKey(), nil
-}
-
-func (ix *Indexer) syncFull(ctx context.Context, spaceURI, did, spaceRev string) error {
+func (ix *Indexer) syncFull(ctx context.Context, spaceURI, did, spaceRev string, fresh bool) error {
 	host, err := ix.Client.PDSHost(ctx, did)
 	if err != nil {
 		return err
 	}
-	verify := func(fresh bool) (*space.VerifiedRepo, error) {
-		didKey, err := ix.authorKey(ctx, did, fresh)
-		if err != nil {
-			return nil, err
-		}
-		body, err := ix.Client.QueryRaw(ctx, host, spaceURI, did, "com.atproto.space.getRepo", url.Values{"space": {spaceURI}, "repo": {did}})
-		if err != nil {
-			return nil, fmt.Errorf("getRepo: %w", err)
-		}
-		defer body.Close()
-		return space.VerifyRepoCarFull(body, space.VerifyRepoParams{Space: spaceURI, Author: did, DidKey: didKey})
+	if fresh {
+		ix.purgeDID(ctx, did)
 	}
-	vr, err := verify(false)
-	if err != nil && !spaceclient.IsError(err, "RepoNotFound") {
-		var verr *space.RepoVerificationError
-		if errors.As(err, &verr) {
-			vr, err = verify(true)
-		}
+	mac, body, err := ix.Client.QueryRawMac(ctx, host, spaceURI, did, space.CommitMacType, "com.atproto.space.getRepo", url.Values{"space": {spaceURI}, "repo": {did}})
+	if err != nil {
+		return fmt.Errorf("getRepo: %w", err)
 	}
+	defer body.Close()
+	m, err := mac.CommitMac()
+	if err != nil {
+		return fmt.Errorf("getRepo: %w", err)
+	}
+	vr, err := space.VerifyRepoStarFull(body, space.VerifyRepoParams{Space: spaceURI, Repo: did, SharedSecret: mac.SharedSecret, Mac: m})
 	if spaceclient.IsError(err, "RepoNotFound") {
 		// The member has no repo (any more): nothing of theirs to index.
 		return ix.Store.RemoveRepo(ctx, spaceURI, did)
 	}
 	if err != nil {
+		var verr *space.RepoVerificationError
+		if errors.As(err, &verr) && !fresh {
+			return fmt.Errorf("%w: %v", errKemRotated, err)
+		}
 		return fmt.Errorf("verifying %s's repo: %w", did, err)
 	}
 
@@ -571,8 +583,12 @@ func (ix *Indexer) syncFull(ctx context.Context, spaceURI, did, spaceRev string)
 			return err
 		}
 	}
-	var upserts []spacestore.Memory
+	var (
+		upserts []spacestore.Memory
+		refs    = make([]space.RecordRef, 0, len(vr.Records))
+	)
 	for _, r := range vr.Records {
+		refs = append(refs, space.RecordRef{Collection: r.Collection, Rkey: r.Rkey, Cid: r.Cid})
 		if r.Collection != Collection {
 			continue
 		}
@@ -580,7 +596,8 @@ func (ix *Indexer) syncFull(ctx context.Context, spaceURI, did, spaceRev string)
 			upserts = append(upserts, m)
 		}
 	}
-	next := spacestore.RepoPosition{Rev: vr.Commit.Rev, SetHash: vr.Repo.SetHash.State(), SpaceRev: spaceRev}
+	state := space.RepoCommitFromRecords(refs).SetHash.State()
+	next := spacestore.RepoPosition{Rev: vr.Commit.Rev, SetHash: state, SpaceRev: spaceRev}
 	if err := ix.apply(ctx, spaceURI, did, next, upserts, nil, true); err != nil {
 		return err
 	}

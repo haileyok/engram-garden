@@ -77,11 +77,12 @@ class Client:
         return self.session.did if self.session else ""
 
     async def space_host(self, authority: str) -> str:
-        """Where a space authority serves its spaces: its #atproto_space_host service, else its PDS."""
+        """Where a space authority serves its spaces: its PDS, which is also its space host. The
+        October 22, 2026 alpha retired the dedicated #atproto_space_host service."""
         ident = await self.dir.lookup_did(authority)
-        host = ident.service_endpoint("atproto_space_host") or ident.pds_endpoint()
+        host = ident.pds_endpoint()
         if not host:
-            raise EngramError(f"{authority} publishes no space host or PDS")
+            raise EngramError(f"{authority} publishes no PDS")
         return host
 
     async def pds_host(self, did: str) -> str:
@@ -107,13 +108,15 @@ class Client:
         ref = spacelib.Ref.parse(space_uri)
         token = await self.delegator.delegation_token(space_uri)
         host = await self.space_host(ref.authority)
-        # The exchange signs only the authorization; the signature's key becomes the credential's
-        # bound key.
-        headers = spacelib.create_space_sig_headers(self._key, "Bearer " + token, "")
+        # The request is unauthenticated apart from its body: the delegation token establishes the
+        # user, and the credential is bound to our key.
+        body = {
+            "space": space_uri,
+            "credentialKid": spacelib.did_key(self._key.public_key()),
+            "delegationToken": token,
+        }
         try:
-            out = await self._do(
-                "POST", host, "com.atproto.space.getSpaceCredential", None, {"space": space_uri}, headers
-            )
+            out = await self._do("POST", host, "com.atproto.space.getSpaceCredential", None, body, {})
         except XrpcError as e:
             raise EngramError(f"getSpaceCredential: {e}") from e
         jwt = out["credential"]
@@ -127,7 +130,42 @@ class Client:
     async def signed_headers(self, space_uri: str, audience: str) -> dict[str, str]:
         """The headers presenting a space credential to an audience DID."""
         cred = await self.credential(space_uri)
-        return spacelib.create_space_sig_headers(self._key, "Atproto-Space " + cred, audience)
+        return spacelib.create_space_sig_headers(self._key, f"{spacelib.CREDENTIAL_SCHEME} {cred}", audience)
+
+    async def kem_key(self, did: str) -> str:
+        """The #atproto_kem key a repo host authenticates the author's commits and records with. Until
+        the account publishes one, its space repos can't be read with a credential."""
+        ident = await self.dir.lookup_did(did)
+        key = ident.verification_method_key("atproto_kem")
+        if not key:
+            raise EngramError(f"{did} publishes no #atproto_kem key, so its space repos can't be read")
+        return key
+
+    async def query_mac(
+        self,
+        host: str,
+        space_uri: str,
+        audience: str,
+        mac_type: str,
+        nsid: str,
+        params: dict[str, Any] | None = None,
+    ) -> tuple[Any, bytes, bytes]:
+        """A credentialed GET that must be authenticated: it asks the repo host for a MAC of mac_type
+        (space.RECORD_MAC_TYPE or space.COMMIT_MAC_TYPE) and returns the body, the shared secret and
+        the MAC. Read other accounts' space repos with this, never with query()."""
+
+        async def go(h: dict[str, str]) -> tuple[Any, bytes, bytes]:
+            kem = await self.kem_key(audience)
+            key_share, secret = spacelib.encapsulate(kem)
+            sent = {**h, spacelib.HEADER_WANT_MAC: spacelib.format_want_mac_header(mac_type, key_share)}
+            resp = await self._send("GET", host, nsid, params, None, sent)
+            if resp.status_code != 200:
+                raise read_error(resp)
+            mac = spacelib.parse_mac_header(resp.headers.get_list(spacelib.HEADER_MAC), mac_type)
+            value = resp.json() if resp.content else None
+            return value, secret, mac
+
+        return await self._with_credential(space_uri, audience, go)
 
     async def query(
         self, host: str, space_uri: str, audience: str, nsid: str, params: dict[str, Any] | None = None
@@ -142,7 +180,7 @@ class Client:
     async def query_raw(
         self, host: str, space_uri: str, audience: str, nsid: str, params: dict[str, Any] | None = None
     ) -> bytes:
-        """A credentialed GET returning the raw body, for binary responses such as getRepo's CAR."""
+        """A credentialed GET returning the raw body, for binary responses."""
 
         async def go(h: dict[str, str]) -> bytes:
             resp = await self._send("GET", host, nsid, params, None, h)

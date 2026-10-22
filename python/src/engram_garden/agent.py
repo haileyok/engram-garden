@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from . import lex, vec
+from . import space as spacelib
 from .embed import Provider
 from .errors import EngramError, ModelMismatchError, XrpcError, is_error
 from .space import Ref
@@ -169,8 +170,12 @@ class Agent:
         auth = self._authority()
         host = await self.client.pds_host(auth)
         params = {"space": self.space, "repo": auth, "collection": lex.CONFIG_COLLECTION, "rkey": lex.CONFIG_RKEY}
+        ref = Ref.parse(self.space)
+        uri = ref.record_uri(auth, lex.CONFIG_COLLECTION, lex.CONFIG_RKEY)
         try:
-            out = await self.client.query(host, self.space, auth, "com.atproto.space.getRecord", params)
+            out, secret, mac = await self.client.query_mac(
+                host, self.space, auth, spacelib.RECORD_MAC_TYPE, "com.atproto.space.getRecord", params
+            )
         except XrpcError as e:
             if is_error(e, "RecordNotFound", "RepoNotFound"):
                 raise EngramError(
@@ -178,6 +183,8 @@ class Agent:
                     "(engram model --set <model>)"
                 ) from e
             raise EngramError(f"reading the space's config: {e}") from e
+        if not spacelib.verify_record(uri, out, secret, mac):
+            raise EngramError("reading the space's config: the record's MAC did not verify")
         c = lex.parse_config(out["value"])
         self._cfg, self._cfg_at = c, time.monotonic()
         return c
