@@ -83,9 +83,9 @@ export function parseFilter(answer: string, ids: number[]): Kept[] {
 
 export const CONSOLIDATE_PROMPT = `A memory is about to be stored in a long-term memory store that AI agents search in later sessions. Below are the existing memories most like it. Decide what to do, so the store holds each thing once and stays current:
 
-- "skip": an existing memory already says everything the new one does. Nothing is stored.
+- "skip": an existing memory already says everything the new one does. Nothing is stored. A restatement, a summary or a rewording of what's there is a skip, never a merge.
 - "new": it's about something the existing ones don't cover. It's stored as written.
-- "merge": it adds to or updates one to three existing memories about the same thing (a later status, a correction, more detail). Write one memory that replaces them and the new one: keep every fact that is still true and useful from all of them, with its identifiers (paths, PR and issue numbers, commits, versions, URLs) and dates, drop only what the newer information makes wrong (an old "not deployed yet" once it's deployed), and say when things happened. The replaced memories are deleted, so anything you leave out is lost: when in doubt, keep it, or choose "new". Merge only memories about the same subject; different deploys, projects or decisions stay separate.
+- "merge": it adds to or updates one to three existing memories about the same thing (a later status, a correction, more detail). Write one memory that replaces them and the new one: keep every fact that is still true and useful from all of them, with its identifiers (paths, PR and issue numbers, commits, versions, URLs) and dates, drop only what the newer information makes wrong (an old "not deployed yet" once it's deployed), and say when things happened. The replaced memories are deleted, so anything you leave out is lost: when in doubt, keep it, or choose "new". Merge only when the new memory adds or corrects a fact; don't touch dates or claims the new memory doesn't change, and never add an identifier, path, commit or date that none of them contains. Merge only memories about the same subject; different deploys, projects or decisions stay separate.
 
 For "skip", list the ids that already say it. For "merge", list the ids it replaces.
 
@@ -135,6 +135,8 @@ export function identifiers(text: string): Set<string> {
 		const t = raw.replace(/^[^\w~/#@]+|[^\w/]+$/g, "");
 		if (t.length < 3) continue;
 		if (/\d/.test(t) || t.includes("/") || t.includes("_") || /\w\.\w/.test(t) || /[a-z][A-Z]/.test(t)) out.add(t.toLowerCase());
+		// Command flags: an invented --update-input is as wrong as an invented commit.
+		else if (/^--?[a-z][\w-]{2,}$/i.test(raw.replace(/[^\w]+$/, ""))) out.add(raw.replace(/[^\w]+$/, "").toLowerCase());
 	}
 	return out;
 }
@@ -164,11 +166,63 @@ export function keepsFacts(merged: string, old: string): boolean {
 	return merged.length >= old.length * 0.5;
 }
 
+/**
+ * ungrounded lists the identifiers of text that source never mentions: what
+ * a model made up rather than read. A leading v or #, a trailing slash, and
+ * ~/ for a home directory written out in full are tolerated.
+ */
+export function ungrounded(text: string, source: string): string[] {
+	const lower = source.toLowerCase();
+	// Whole tokens only: 114152 isn't grounded by 1141528.
+	const seen = (v: string) => v.length > 0 && new RegExp(`(?<![\\w])${escape(v)}(?![\\w])`).test(lower);
+	const out: string[] = [];
+	for (const id of identifiers(text)) {
+		const bare = id.replace(/\/+$/, "");
+		const variants = [bare, bare.replace(/^[v#]/, "")];
+		if (/^\d/.test(bare)) variants.push(`v${bare}`);
+		const home = bare.match(/^\/(?:home\/[^/]+|root)(\/.*)$/);
+		if (home) variants.push(`~${home[1]}`);
+		// ~/x written out in full: /home/someone/x or /root/x.
+		const tilde = bare.startsWith("~/") && new RegExp(`(?:/home/[^/\\s]+|/root)${escape(bare.slice(1))}(?![\\w])`).test(lower);
+		if (!tilde && !variants.some(seen) && !dateSeen(bare, lower)) out.push(id);
+	}
+	return out;
+}
+
+const MONTHS = [
+	"jan(?:uary)?",
+	"feb(?:ruary)?",
+	"mar(?:ch)?",
+	"apr(?:il)?",
+	"may",
+	"june?",
+	"july?",
+	"aug(?:ust)?",
+	"sep(?:t|tember)?",
+	"oct(?:ober)?",
+	"nov(?:ember)?",
+	"dec(?:ember)?",
+];
+
+/** dateSeen: a YYYY-MM-DD date the source writes another way ("Oct 20", "Mon Oct 20 14:23:45 2026"). */
+function dateSeen(id: string, lower: string): boolean {
+	const m = id.match(/^(\d{4})-(\d{2})-(\d{2})(?:t.*)?$/);
+	if (!m) return false;
+	const [, year, month, day] = m;
+	// The same date at the start of a timestamp (2026-10-22T01:00:00Z).
+	if (lower.includes(`${year}-${month}-${day}`)) return true;
+	const name = MONTHS[Number(month) - 1];
+	if (!name || !lower.includes(year)) return false;
+	return new RegExp(`\\b${name}\\.?\\s+0?${Number(day)}\\b|\\b0?${Number(day)}\\s+${name}\\b`).test(lower);
+}
+
+function escape(s: string): string {
+	return s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+}
+
 /** grounded reports whether an extract adds no identifier the memory doesn't have. */
 export function grounded(extract: string, memory: string): boolean {
-	const lower = memory.toLowerCase();
-	for (const id of identifiers(extract)) if (!lower.includes(id)) return false;
-	return true;
+	return ungrounded(extract, memory).length === 0;
 }
 
 // ---- context ----

@@ -180,7 +180,7 @@ test("capture stores new memories, skips known ones, and doesn't reread", async 
 	const h = await harness({ captureMinChars: 100, captureExitMinChars: 50, captureTags: ["auto", "token=abcdefgh12345678"] });
 	try {
 		await start(h);
-		h.addMessage("user", "Let's figure out how Attie deploys work and fix the flaky queue test while we're at it.");
+		h.addMessage("user", "Let's figure out how Attie deploys to pop1 work and fix the flaky queue test while we're at it.");
 		h.addMessage(
 			"assistant",
 			"The flaky queue test was racing the janitor goroutine; I gave it its own clock and it passes 500 runs in a row.",
@@ -345,7 +345,7 @@ test("a capture that fails partway records what it stored and reads the stretch 
 	const h = await harness({ captureMinChars: 10 });
 	try {
 		await start(h);
-		h.addMessage("user", "a conversation with two things worth keeping in it, at least");
+		h.addMessage("user", "a conversation with two things worth keeping in it, at least (FAIL_REMEMBER)");
 		h.completions.push(
 			answer("The janitor goroutine owns the queue's clock in Attie's tests.", "FAIL_REMEMBER this one can't be stored anywhere."),
 		);
@@ -426,7 +426,7 @@ test("after a failed pass, automatic passes wait for more conversation", async (
 	const h = await harness({ captureMinChars: 50 });
 	try {
 		await start(h);
-		h.addMessage("user", "a conversation with something in it worth keeping for later on");
+		h.addMessage("user", "a conversation with something in it worth keeping for later on (FAIL_REMEMBER)");
 		h.completions.push(answer("FAIL_REMEMBER a memory the PDS keeps refusing to store."));
 		await h.emit("agent_settled", { type: "agent_settled", aborted: false });
 		await waitFor(() => h.notes.some((n) => /capturing failed/.test(n)));
@@ -920,6 +920,49 @@ test("a long memory shows its extract; a space given as a URI still consolidates
 		h.completions.push('{"action": "skip", "replaces": [0]}');
 		const out = await h.tools.get("remember").execute("r", { text: deployFact, space: "at://did:plc:a/space/coding-agents" }, undefined, undefined, h.ctx);
 		assert.match(out.content[0].text, /^Not stored/);
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("capture drops a memory naming things the conversation never did", async () => {
+	const h = await harness({ captureMinChars: 10 });
+	try {
+		await start(h);
+		h.addMessage("user", "Bump engram-garden in ~/dotfiles and upgrade the minimal profile, please.");
+		h.addMessage("assistant", "Done: committed 1141528 in /home/pelican/dotfiles and ran nix profile upgrade minimal.");
+		h.completions.push(
+			answer(
+				// Made up: no such commit or command in the conversation.
+				"Engram-garden was bumped in ~/dotfiles (commit 6c84547) with nix flake lock --update-input.",
+				// Grounded, including ~/ for the home directory written out in full.
+				"Engram is updated by bumping engram-garden in ~/dotfiles (commit 1141528) and upgrading the minimal profile.",
+			),
+		);
+		await h.commands.get("engram").handler("capture", h.ctx);
+		const rec = h.branch.find((e) => e.customType === "engram-capture").data;
+		assert.equal(rec.stored.length, 1);
+		assert.match(rec.stored[0].text, /1141528/);
+		assert.equal(rec.rejected.length, 1);
+		assert.deepEqual(rec.rejected[0].missing, ["6c84547", "--update-input"]);
+		assert.match(h.systems[0], /never write one you didn't see/);
+		assert.ok(h.notes.some((n) => /dropped 1 that named things not in the conversation/.test(n)));
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("a merge naming something none of its memories do is stored as written instead", async () => {
+	const seed = [mine("at://m/mine1", deployFact)];
+	const h = await harness({ consolidateMinSimilarity: 300, env: { FAKE_MEMORIES: JSON.stringify(seed) } });
+	try {
+		await start(h);
+		h.completions.push(JSON.stringify({ action: "merge", replaces: [0], text: `${deployFact} Pop2 uses it too since 2026-10-21 (commit 9ffe123).` }));
+		const out = await h.tools.get("remember").execute("r", { text: "Since 2026-10-21 Attie pop2 deploys use the Deploy Attie workflow too." }, undefined, undefined, h.ctx);
+		assert.doesNotMatch(out.content[0].text, /Merged/);
+		const all = (await h.tools.get("list_memories").execute("l", {}, undefined, undefined, h.ctx)).details.memories;
+		assert.ok(all.some((m: any) => m.uri === "at://m/mine1"), "old memory kept");
+		assert.match(h.systems.at(-1)!, /A restatement, a summary or a rewording of what's there is a skip/);
 	} finally {
 		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
 	}

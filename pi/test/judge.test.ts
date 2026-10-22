@@ -64,3 +64,30 @@ test("keepsFacts needs the old memory's words, not just its length", async () =>
 	assert.ok(!keepsFacts("The office kitchen restocks coffee beans every Thursday morning at nine.", old));
 	assert.ok(keepsFacts(`${old} She also wants file paths shown in full.`, old));
 });
+
+test("ungrounded lists identifiers the source never mentions", async () => {
+	const { ungrounded } = await import("../engram/judge.ts");
+	const src = "ran git log in /home/pelican/dotfiles: 1141528 Bump engram-garden; pi 1.3.0; PR 146 at github.com/x/y/pull/146";
+	assert.deepEqual(ungrounded("commit 1141528 in ~/dotfiles, pi v1.3.0, PR #146", src), []);
+	assert.deepEqual(ungrounded("commit 6c84547 in ~/dotfiles", src), ["6c84547"]);
+});
+
+test("ungrounded matches whole tokens and tolerates rewritten dates, # and home paths", async () => {
+	const { ungrounded } = await import("../engram/judge.ts");
+	assert.deepEqual(ungrounded("commit 114152", "committed 1141528"), ["114152"]);
+	assert.deepEqual(ungrounded("PR #146", "see issue 1464"), ["#146"]);
+	assert.deepEqual(ungrounded("Fixed issue #45.", "we fixed issue 45 today"), []);
+	assert.deepEqual(ungrounded("deployed on 2026-10-20.", "git log: Date: Mon Oct 20 14:23:45 2026"), []);
+	assert.deepEqual(ungrounded("deployed on 2026-10-21.", "git log: Date: Mon Oct 20 14:23:45 2026"), ["2026-10-21"]);
+	assert.deepEqual(ungrounded("lives in /home/pelican/dotfiles", "cd ~/dotfiles"), []);
+	assert.deepEqual(ungrounded("see github.com/x/y", "https://github.com/x/y/pull/146"), []);
+});
+
+test("ungrounded: today's date as the prompt gives it, flags, v both ways, no 'maybe' months", async () => {
+	const { ungrounded } = await import("../engram/judge.ts");
+	assert.deepEqual(ungrounded("The deploy finished on 2026-10-22, all green.", "Today is 2026-10-22."), []);
+	assert.deepEqual(ungrounded("finished on 2026-10-22", "at 2026-10-22T01:23:45.000Z"), []);
+	assert.deepEqual(ungrounded("updated with nix flake lock --update-input", "ran nix flake update engram-garden"), ["--update-input"]);
+	assert.deepEqual(ungrounded("pi 1.3.0", "upgraded to v1.3.0"), []);
+	assert.deepEqual(ungrounded("on 2026-05-21", "maybe 21 of them in 2026"), ["2026-05-21"]);
+});

@@ -63,6 +63,7 @@ import {
 	lastExchange,
 	parseDecision,
 	parseFilter,
+	ungrounded,
 } from "./judge.ts";
 import { errorText, McpServer } from "./mcp.ts";
 import {
@@ -694,6 +695,9 @@ export default function engram(pi: ExtensionAPI) {
 
 		// A merge forgets only the memories whose facts it kept.
 		const body = decision.text;
+		// A merge may name only what the memories it combines (or today's date) do.
+		if (ungrounded(body, [m.text, ...decision.replaces.map((i) => `${near[i].text}\n${near[i].createdAt ?? ""}`), new Date().toISOString()].join("\n")).length)
+			return plain();
 		const chosen = decision.replaces.map((i) => near[i]);
 		const olds = chosen.filter((o) => keepsFacts(body, o.text));
 		const kept = chosen.filter((o) => !olds.includes(o)).map((o) => o.uri);
@@ -814,6 +818,13 @@ export default function engram(pi: ExtensionAPI) {
 			// Each chunk is read, then what it held is stored, so later chunks
 			// know about it. captureMax is per chunk: a long stretch isn't cut short.
 			for (const piece of chunks(transcript, CHUNK_CHARS)) {
+				const shown = userPrompt(piece, {
+					project: project.name,
+					cwd: ctx.cwd,
+					date: new Date().toISOString().slice(0, 10),
+					known,
+					max: cfg.captureMax,
+				});
 				const res = await ctx.modelRegistry.complete(
 					model,
 					{
@@ -821,15 +832,7 @@ export default function engram(pi: ExtensionAPI) {
 						messages: [
 							{
 								role: "user",
-								content: text(
-									userPrompt(piece, {
-										project: project.name,
-										cwd: ctx.cwd,
-										date: new Date().toISOString().slice(0, 10),
-										known,
-										max: cfg.captureMax,
-									}),
-								),
+								content: text(shown),
 								timestamp: Date.now(),
 							},
 						],
@@ -845,6 +848,19 @@ export default function engram(pi: ExtensionAPI) {
 					.join("\n");
 				for (const c of parseCandidates(answer, cfg.captureMax)) {
 					if (signal.aborted) throw new Error("aborted");
+					// A memory that names a commit, path or version the model wasn't
+					// shown was made up, at least in part: agents would act on it.
+					// Checked against the conversation itself (and where and when it ran),
+					// not the memories the prompt listed as known.
+					// What this pass already stored was grounded in this conversation too.
+					const missing = ungrounded(
+						c.text,
+						[piece, ctx.cwd, project.name ?? "", new Date().toISOString(), ...record.stored.map((x) => x.text)].join("\n"),
+					);
+					if (missing.length) {
+						(record.rejected ??= []).push({ text: c.text, missing });
+						continue;
+					}
 					const r = await storeConsolidated(
 						ctx,
 						{
@@ -887,12 +903,16 @@ export default function engram(pi: ExtensionAPI) {
 			return;
 		}
 		pi.appendEntry<CaptureRecord>(CAPTURE_ENTRY, record);
-		if (ctx.hasUI && (record.stored.length || report))
+		const dropped = record.rejected?.length ?? 0;
+		if (ctx.hasUI && (record.stored.length || dropped || report))
 			ctx.ui.notify(
-				record.stored.length
+				(record.stored.length
 					? `engram: remembered ${record.stored.length} ${record.stored.length === 1 ? "memory" : "memories"} from this session (/engram review)`
-					: "engram: nothing worth keeping in that stretch",
-				"info",
+					: dropped
+						? "engram: nothing stored from that stretch"
+						: "engram: nothing worth keeping in that stretch") +
+					(dropped ? `; dropped ${dropped} that named things not in the conversation (/engram review)` : ""),
+				dropped && !record.stored.length ? "warning" : "info",
 			);
 	}
 
@@ -910,11 +930,12 @@ export default function engram(pi: ExtensionAPI) {
 
 	pi.registerEntryRenderer<CaptureRecord>(CAPTURE_ENTRY, (entry, { expanded }, theme) => {
 		const r = entry.data;
-		if (!r || (!r.stored.length && !expanded)) return undefined;
+		if (!r || (!r.stored.length && !r.rejected?.length && !expanded)) return undefined;
 		const box = new Box(1, 0, (t) => theme.bg("customMessageBg", t));
 		const n = r.stored.length;
 		let head = `${theme.fg("accent", "◆ engram")} ${theme.fg("muted", `remembered ${n} ${n === 1 ? "memory" : "memories"}`)}`;
 		if (r.skipped) head += theme.fg("dim", ` (${r.skipped} already known)`);
+		if (r.rejected?.length) head += theme.fg("warning", ` (${r.rejected.length} dropped: named things not in the conversation)`);
 		if (!expanded) {
 			const first = r.stored[0] ? theme.fg("dim", ` — ${shorten(r.stored[0].text.replace(/\s+/g, " "), 80)}`) : "";
 			box.addChild(new Text(head + first, 0, 0));
@@ -926,6 +947,8 @@ export default function engram(pi: ExtensionAPI) {
 			const probs = (m.problems ?? []).map((p) => `\n  ${theme.fg("warning", `⚠ ${p}`)}`).join("");
 			box.addChild(new Text(`${theme.fg("dim", "•")} ${m.text}${merged}\n  ${theme.fg("dim", m.uri)}${probs}`, 0, 0));
 		}
+		for (const x of r.rejected ?? [])
+			box.addChild(new Text(theme.fg("warning", `✗ ${shorten(x.text, 200)}\n  not in the conversation: ${x.missing.join(", ")}`), 0, 0));
 		return box;
 	});
 
@@ -1251,6 +1274,14 @@ export default function engram(pi: ExtensionAPI) {
 						const r = e.data as CaptureRecord;
 						for (const m of r.stored)
 							ms.push({ uri: m.uri, text: m.text, tags: m.tags, author: "", createdAt: r.at });
+						for (const x of r.rejected ?? [])
+							ms.push({
+								uri: "(not stored)",
+								text: `DROPPED, named things not in the conversation (${x.missing.join(", ")}): ${x.text}`,
+								tags: [],
+								author: "",
+								createdAt: r.at,
+							});
 					}
 					await showMemories(ctx, "Memories captured in this session", ms, true);
 					return;

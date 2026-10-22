@@ -20,6 +20,8 @@ export interface CaptureRecord {
 	stored: Array<{ uri: string; text: string; tags: string[]; replaced?: string[]; problems?: string[] }>;
 	/** Memories left out because a similar one exists. */
 	skipped: number;
+	/** Memories dropped because they named things the conversation never did. */
+	rejected?: Array<{ text: string; missing: string[] }>;
 	/** Characters of conversation read. */
 	chars: number;
 	model?: string;
@@ -134,6 +136,8 @@ Leave out, even if true:
 - one-off details of this machine or session unless they will bite again
 - anything listed under "Already known", and anything the agent stored itself with a remember tool call in the transcript
 - secrets of any kind: passwords, tokens, API keys, private keys, credentials, personal data
+
+Copy identifiers (commits, PR numbers, paths, versions, commands, URLs) exactly as they appear in the transcript, and never write one you didn't see there: tool output is cut short, so if an identifier isn't shown, leave it out rather than guess. A memory naming anything the transcript doesn't is thrown away.
 
 Write each memory as two to five plain sentences, at most about 600 characters, that stand alone: name the project, the people and the date instead of "this", "here" or "the user". One subject per memory. Most stretches of conversation hold nothing worth keeping; returning none is the usual answer.
 
