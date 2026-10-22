@@ -17,7 +17,7 @@ export interface CaptureRecord {
 	 */
 	upTo: string;
 	/** Memories stored. */
-	stored: Array<{ uri: string; text: string; tags: string[] }>;
+	stored: Array<{ uri: string; text: string; tags: string[]; replaced?: string[]; problems?: string[] }>;
 	/** Memories left out because a similar one exists. */
 	skipped: number;
 	/** Characters of conversation read. */
@@ -119,26 +119,27 @@ export interface PromptContext {
 	max: number;
 }
 
-export const SYSTEM_PROMPT = `You read part of a session between a person and an AI coding agent, and pick out what is worth keeping in a long-term memory store that agents search in later sessions. Those agents will not have this conversation: a memory has to make sense on its own.
+export const SYSTEM_PROMPT = `You read part of a session between a person and an AI coding agent, and pick out the rare things worth keeping in a long-term memory store that agents search in later sessions. Those agents will not have this conversation. The store is shared and fills up fast, so the bar is high: keep a fact only if a future session would be noticeably worse off without it, and it couldn't easily find it out again.
 
-Keep only what a future session would be glad to find:
-- decisions, and why they were made
-- the person's preferences and ways of working, and corrections they gave the agent
-- gotchas: non-obvious causes of bugs, things that failed and what worked instead
-- where things are and how they fit together (repositories, paths, services, commands), when it took effort to find out
-- milestones of ongoing work: what was merged, deployed, released, opened or abandoned, with dates and identifiers (PR numbers, commits, branches)
+Keep only:
+- decisions the person made or agreed to, with the reason
+- the person's preferences, ways of working, and corrections they gave the agent
+- gotchas that cost real time: a non-obvious cause, what failed and what worked
+- milestones: something merged, deployed, released, published or abandoned, with identifiers (PR, commit, version) and the date
 
-Leave out:
-- routine steps, and anything plain from reading the code or its docs
-- passing state (what the agent is in the middle of) and plans that weren't acted on
+Leave out, even if true:
+- anything a future agent can learn by reading the code, its docs, the git log or the command's own help: file layout, function and type names, what a module does, how tests are set up
+- progress on work that isn't finished (built, reviewed, started, in a branch): only the milestone when it lands, or a decision that shapes it
+- what the agent did step by step, review rounds, tool output, plans that weren't acted on
+- one-off details of this machine or session unless they will bite again
 - anything listed under "Already known", and anything the agent stored itself with a remember tool call in the transcript
 - secrets of any kind: passwords, tokens, API keys, private keys, credentials, personal data
 
-Write each memory as a few plain sentences that stand alone: name the project, the files, the people and the date instead of saying "this", "here" or "the user". Prefer one rich memory to several thin ones. Most stretches of conversation hold nothing worth keeping; returning none is fine and often right.
+Write each memory as two to five plain sentences, at most about 600 characters, that stand alone: name the project, the people and the date instead of "this", "here" or "the user". One subject per memory. Most stretches of conversation hold nothing worth keeping; returning none is the usual answer.
 
 Answer with JSON only, no prose and no code fence:
 {"memories": [{"text": "...", "tags": ["short", "labels"]}]}
-Tags are a few lowercase labels such as the project and the kind of memory (decision, preference, gotcha, status).`;
+Tags are a few lowercase labels such as the project and the kind of memory (decision, preference, gotcha, milestone).`;
 
 export function userPrompt(transcript: string, c: PromptContext): string {
 	const known = c.known.length

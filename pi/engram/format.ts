@@ -11,6 +11,8 @@ export interface Memory {
 	source?: string;
 	createdAt: string;
 	similarity?: number;
+	/** The part of the memory that bears on the prompt, as the model picked it. */
+	relevant?: string;
 	match?: {
 		keyword?: { terms?: Array<{ term: string; kind?: string }> };
 	};
@@ -79,14 +81,16 @@ export function formatMemories(out: MemoriesOut, opts: { maxChars?: number } = {
  * recallBlock is what auto-recall adds to the conversation: the memories
  * most like the prompt, shortened, marked as recalled rather than asked for.
  */
-export function recallBlock(memories: Memory[], maxChars: number): string {
+export function recallBlock(memories: Memory[], maxChars: number, picked = false): string {
 	const lines = [
 		"<memories>",
-		"Memories from Engram recalled automatically for this request. They were written by agents in earlier sessions and may be stale or beside the point: use what helps, verify before relying on it, and call get_memory with a uri for a shortened one's full text.",
+		picked
+			? "Memories from Engram recalled automatically and picked as relevant to this request; a long one shows the part that matters (get_memory with its uri has the full text). They were written in earlier sessions and may be out of date: verify before relying on them."
+			: "Memories from Engram recalled automatically for this request. They were written by agents in earlier sessions and may be stale or beside the point: use what helps, verify before relying on it, and call get_memory with a uri for a shortened one's full text.",
 		"",
 	];
 	for (const m of memories) {
-		lines.push(`- (${header(m)}) ${shorten(m.text, maxChars)}`);
+		lines.push(`- (${header(m)}) ${m.relevant ? shorten(m.relevant, maxChars) : shorten(m.text, maxChars)}`);
 		lines.push(`  uri: ${m.uri}`);
 	}
 	lines.push("</memories>");

@@ -14,11 +14,26 @@ export interface Config {
 	args: string[];
 	env: Record<string, string>;
 
+	/**
+	 * "provider/model" for the memory work: picking recalled memories,
+	 * extracting memories from the conversation, and consolidating them.
+	 * The session's model if unset. A small, fast model fits.
+	 */
+	model?: string;
+
 	/** Recall memories for each prompt and add them to the conversation. */
 	autoRecall: boolean;
 	/** At most this many memories per prompt. */
 	recallLimit: number;
-	/** Leave out memories less similar than this (0-1000). */
+	/** How many search results the model chooses from. */
+	recallCandidates: number;
+	/** Search results less similar than this (0-1000) aren't candidates. */
+	recallCandidateSimilarity: number;
+	/** Have the model pick the memories that bear on the prompt, and the part of each that does. */
+	recallFilter: boolean;
+	/** Give up on the model's pick after this long, and fall back to similarity alone. */
+	recallFilterTimeoutMs: number;
+	/** Without the model's pick: leave out memories less similar than this (0-1000). */
 	recallMinSimilarity: number;
 	/** Also leave out memories this far below the best match. */
 	recallMaxGap: number;
@@ -33,7 +48,7 @@ export interface Config {
 
 	/** Extract memories from the conversation in the background. */
 	autoCapture: boolean;
-	/** "provider/model" for extraction; the session's model if unset. */
+	/** The old name for model. */
 	captureModel?: string;
 	/** The space captured memories go to; the default space if unset. */
 	captureSpace?: string;
@@ -47,8 +62,20 @@ export interface Config {
 	captureExitTimeoutMs: number;
 	/** At most this many memories per 80k characters of conversation read. */
 	captureMax: number;
-	/** Skip a captured memory when one this similar exists (0-1000). */
+	/** Skip a captured memory when one this similar exists (0-1000), without asking the model. */
 	captureDedupeSimilarity: number;
+
+	/**
+	 * Before storing a memory (captured or remembered), have the model compare
+	 * it with the most similar ones: skip it if it's already there, or merge it
+	 * with your own ones it updates (forgetting those, in that one space;
+	 * other people's memories are never forgotten).
+	 */
+	consolidate: boolean;
+	/** Existing memories at least this similar (0-1000) are compared. */
+	consolidateMinSimilarity: number;
+	/** Give up on comparing after this long, and store the memory as it is. */
+	consolidateTimeoutMs: number;
 }
 
 export const defaults: Config = {
@@ -56,7 +83,11 @@ export const defaults: Config = {
 	args: [],
 	env: {},
 	autoRecall: true,
-	recallLimit: 5,
+	recallLimit: 6,
+	recallCandidates: 12,
+	recallCandidateSimilarity: 600,
+	recallFilter: true,
+	recallFilterTimeoutMs: 4000,
 	recallMinSimilarity: 650,
 	recallMaxGap: 80,
 	recallTimeoutMs: 4000,
@@ -65,11 +96,14 @@ export const defaults: Config = {
 	recallMaxChars: 700,
 	autoCapture: true,
 	captureTags: ["auto"],
-	captureMinChars: 24_000,
+	captureMinChars: 40_000,
 	captureExitMinChars: 3_000,
 	captureExitTimeoutMs: 20_000,
-	captureMax: 5,
+	captureMax: 3,
 	captureDedupeSimilarity: 860,
+	consolidate: true,
+	consolidateMinSimilarity: 720,
+	consolidateTimeoutMs: 8000,
 };
 
 export function agentDir(): string {
@@ -90,7 +124,7 @@ const bool = (v: string) => v === "1" || v.toLowerCase() === "true";
 /** check makes sure each setting has its default's type. */
 function check(cfg: Record<string, unknown>) {
 	for (const [k, v] of Object.entries(cfg)) {
-		if (k === "captureModel" || k === "captureSpace") {
+		if (k === "model" || k === "captureModel" || k === "captureSpace") {
 			if (v !== undefined && typeof v !== "string") throw new Error(`${k} must be a string`);
 			continue;
 		}
@@ -113,7 +147,9 @@ export function loadConfig(projectDir?: string, env: NodeJS.ProcessEnv = process
 	if (env.PI_ENGRAM_COMMAND) cfg.command = env.PI_ENGRAM_COMMAND;
 	if (env.PI_ENGRAM_AUTO_RECALL) cfg.autoRecall = bool(env.PI_ENGRAM_AUTO_RECALL);
 	if (env.PI_ENGRAM_AUTO_CAPTURE) cfg.autoCapture = bool(env.PI_ENGRAM_AUTO_CAPTURE);
-	if (env.PI_ENGRAM_CAPTURE_MODEL) cfg.captureModel = env.PI_ENGRAM_CAPTURE_MODEL;
+	if (env.PI_ENGRAM_MODEL) cfg.model = env.PI_ENGRAM_MODEL;
+	if (env.PI_ENGRAM_CAPTURE_MODEL) cfg.model = env.PI_ENGRAM_CAPTURE_MODEL;
+	cfg.model ??= cfg.captureModel;
 	cfg.command = resolveCommand(cfg.command, env);
 	return cfg;
 }

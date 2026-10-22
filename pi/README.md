@@ -8,18 +8,37 @@ server the model has to remember to use.
   prompt names your spaces and says what memory is for. engram-mcp's other
   tools (`list_spaces`, `create_space`, members, models, indexing) are
   there for codemode scripts as `engram_<name>`.
-- **Auto-recall.** Each prompt is searched for before the model sees it.
-  Memories clearly about it (similarity at least 650, and within 80 of the
-  best match) are added to the conversation in a `<memories>` block, once
-  per branch. Searching never holds a prompt up for more than four seconds, except that
-  the first one waits for engram-mcp to start (about three seconds).
+- **Auto-recall.** Each prompt is searched for before the model sees it (a
+  short follow-up, with the exchange it follows). The best dozen results
+  above similarity 600 go to a small model (`model`, below), which keeps
+  only those that bear on the prompt and the sentences of each that do;
+  those are added to the conversation in a `<memories>` block, once per
+  branch. Often none are, and nothing is added. If the model is slow or
+  fails, only results that are clearly close (at least 650, within 80 of
+  the best) are added. A short memory is shown whole; a long one, the part
+  that matters. This takes two to three seconds a prompt (at most about
+  eight, when the search and the model both run out of time), and the
+  first one also waits for engram-mcp to start (about three).
 - **Auto-capture.** When the agent goes idle with enough new conversation
-  (about 24k characters), before compaction, and when the session ends, the
-  stretch not read yet goes to a model with one question: what here would a
-  future session want? What comes back is checked: thin memories, anything
-  that looks like a credential, and near-duplicates of stored memories are
-  dropped. The rest is remembered with the tag `auto` and the project's
-  name. A session entry records how far each branch has been read, so
+  (about 40k characters), before compaction, and when the session ends, the
+  stretch not read yet goes to the model with one question: what here would
+  a future session be noticeably worse off without? The bar is high
+  (decisions, preferences and corrections, costly gotchas, milestones; not
+  what the code shows or work still in progress), at most three memories a
+  stretch, and usually none. Thin memories and anything that looks like a
+  credential are dropped. The rest is remembered with the tag `auto` and
+  the project's name.
+- **Consolidation.** Before any memory is stored, captured or remembered by
+  the agent, it's compared with the most similar ones (similarity at least
+  720). A near-copy (860 or more) is skipped; otherwise the model decides:
+  skip it (already said), store it as new, or merge it with your own older
+  memories it updates into one, forgetting those. A merge keeps what's still
+  true and drops what the update made wrong (an old "not deployed yet"); it
+  only happens within one space, and an old memory is forgotten only if the
+  merged text keeps its identifiers and at least half its length. Forgotten
+  memories are written in full to `~/.local/state/pi-engram/forgotten.jsonl`
+  first, so a bad merge can be undone. Other people's memories are never
+  forgotten. A session entry records how far each branch has been read, so
   nothing is read twice. Only saved interactive sessions are captured, not
   `pi -p --no-session` runs such as subagents.
 - **Skills.** The skills kept in your spaces (see
@@ -67,8 +86,14 @@ the extension warns while both are there. The memory paragraphs in
   "args": [],
   "env": {},
 
+  "model": "router/deepseek-v4.1-flash:api",
+
   "autoRecall": true,
-  "recallLimit": 5,
+  "recallLimit": 6,
+  "recallCandidates": 12,
+  "recallCandidateSimilarity": 600,
+  "recallFilter": true,
+  "recallFilterTimeoutMs": 4000,
   "recallMinSimilarity": 650,
   "recallMaxGap": 80,
   "recallTimeoutMs": 4000,
@@ -77,23 +102,27 @@ the extension warns while both are there. The memory paragraphs in
   "recallMaxChars": 700,
 
   "autoCapture": true,
-  "captureModel": "router/deepseek-v4.1-flash:api",
   "captureSpace": "coding-agents",
   "captureTags": ["auto"],
-  "captureMinChars": 24000,
+  "captureMinChars": 40000,
   "captureExitMinChars": 3000,
   "captureExitTimeoutMs": 20000,
-  "captureMax": 5,
-  "captureDedupeSimilarity": 860
+  "captureMax": 3,
+  "captureDedupeSimilarity": 860,
+
+  "consolidate": true,
+  "consolidateMinSimilarity": 720,
+  "consolidateTimeoutMs": 8000
 }
 ```
 
-`captureModel` defaults to the session's model and `captureSpace` to the
-default space. `captureMax` applies to each 80k characters of conversation
+`model` is the model for picking, capturing and consolidating memories; it
+defaults to the session's model, and a small fast one fits (`captureModel`
+is its old name). `captureSpace` defaults to the default space. `captureMax` applies to each 80k characters of conversation
 read. `env` goes to engram-mcp, so `ENGRAM_*` settings work there
 (an agent's own config dir, for example). `PI_ENGRAM_COMMAND`,
-`PI_ENGRAM_AUTO_RECALL`, `PI_ENGRAM_AUTO_CAPTURE` and
-`PI_ENGRAM_CAPTURE_MODEL` override the files.
+`PI_ENGRAM_AUTO_RECALL`, `PI_ENGRAM_AUTO_CAPTURE` and `PI_ENGRAM_MODEL`
+override the files.
 
 Captured memories come from a model reading everything the session saw,
 including files and web pages, so text written to steer it can end up in a

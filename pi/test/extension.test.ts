@@ -38,6 +38,8 @@ interface Harness {
 	emit(event: string, payload: any): Promise<any[]>;
 	completions: Array<string | ((signal: AbortSignal) => Promise<any>)>;
 	prompts: string[];
+	systems: string[];
+	queries: string[];
 	addMessage(role: string, content: string): void;
 }
 
@@ -49,6 +51,7 @@ async function harness(settings: Record<string, unknown> = {}): Promise<Harness>
 	);
 	process.env.PI_CODING_AGENT_DIR = dir;
 	process.env.XDG_CACHE_HOME = join(dir, "cache");
+	process.env.XDG_STATE_HOME = join(dir, "state");
 	const { default: engram } = await import("../engram/index.ts");
 
 	const h: Harness = {
@@ -59,6 +62,8 @@ async function harness(settings: Record<string, unknown> = {}): Promise<Harness>
 		notes: [],
 		completions: [],
 		prompts: [],
+		systems: [],
+		queries: [],
 		ctx: undefined,
 		addMessage: () => {},
 		async emit(event, payload) {
@@ -95,6 +100,7 @@ async function harness(settings: Record<string, unknown> = {}): Promise<Harness>
 			find: () => undefined,
 			complete: async (_model: any, context: any, opts: any) => {
 				h.prompts.push(context.messages[0].content[0].text);
+				h.systems.push(context.systemPrompt ?? "");
 				const next = h.completions.shift() ?? '{"memories": []}';
 				if (typeof next === "function") return next(opts.signal);
 				return { stopReason: "stop", content: [{ type: "text", text: next }] };
@@ -131,7 +137,7 @@ const startEvent = (prompt: string) => ({
 });
 
 test("auto-recall adds relevant memories once, and the memory section", async () => {
-	const h = await harness({ recallMinSimilarity: 300 });
+	const h = await harness({ recallMinSimilarity: 300, recallCandidateSimilarity: 300 });
 	try {
 		await start(h);
 		const ev = startEvent("how do attie deploys to pop1 work, which workflow?");
@@ -516,7 +522,7 @@ test("an answer that isn't JSON doesn't mark the stretch read", async () => {
 });
 
 test("after compaction, recalled memories can be added again", async () => {
-	const h = await harness({ recallMinSimilarity: 300 });
+	const h = await harness({ recallMinSimilarity: 300, recallCandidateSimilarity: 300 });
 	try {
 		await start(h);
 		const [res] = await h.emit("before_agent_start", startEvent("how do attie deploys to pop1 work, which workflow?"));
@@ -530,7 +536,7 @@ test("after compaction, recalled memories can be added again", async () => {
 });
 
 test("the first prompt waits for a slow engram-mcp start", async () => {
-	const h = await harness({ recallMinSimilarity: 300, recallTimeoutMs: 500, env: { FAKE_MEMORIES: JSON.stringify(seeded), FAKE_SLOW_START: "1500" } });
+	const h = await harness({ recallMinSimilarity: 300, recallCandidateSimilarity: 300, recallTimeoutMs: 500, env: { FAKE_MEMORIES: JSON.stringify(seeded), FAKE_SLOW_START: "1500" } });
 	try {
 		await h.emit("session_start", { type: "session_start" });
 		const [res] = await h.emit("before_agent_start", startEvent("how do attie deploys to pop1 work, which workflow?"));
@@ -697,6 +703,224 @@ test("an edit while a slow sync runs stays on disk, unsaved, and isn't marked sa
 		assert.match(readFileSync(md, "utf8"), /mid-sync/);
 	} finally {
 		delete process.env.PI_ENGRAM_SYNC_WAIT_MS;
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+const recallQueries = async (h: Harness) => {
+	await waitFor(() => h.tools.has("engram_debug_recalls"));
+	const out = await h.tools.get("engram_debug_recalls").execute("q", {}, undefined, undefined, h.ctx);
+	return (out.structuredContent as any).queries as string[];
+};
+
+test("auto-recall lets the model pick memories and shows the part that matters", async () => {
+	const h = await harness({ recallCandidateSimilarity: 100 });
+	try {
+		await start(h);
+		h.completions.push(JSON.stringify({ keep: [{ id: 0, relevant: "Attie pop1 deploys use the Deploy Attie workflow." }] }));
+		const [res] = await h.emit("before_agent_start", startEvent("how do attie deploys to pop1 work, which workflow and coffee?"));
+		assert.match(h.systems.at(-1)!, /choose which memories/);
+		assert.match(h.prompts.at(-1)!, /<memory id="0"[\s\S]*<memory id="1"/, "both candidates shown");
+		assert.equal(res.message.details.memories.length, 1);
+		assert.equal(res.message.details.filtered, true);
+		// A short memory is shown whole, not as the extract.
+		assert.match(res.message.content, /picked as relevant[\s\S]*one SHA for every service/);
+		assert.equal(res.message.details.memories[0].relevant, undefined);
+		assert.doesNotMatch(res.message.content, /coffee/);
+		const qs = await recallQueries(h);
+		assert.ok(!qs.at(-1)!.includes(":"), "no project name in front");
+
+		// The model keeping none adds nothing.
+		h.completions.push('{"keep": []}');
+		const [none] = await h.emit("before_agent_start", startEvent("anything about office coffee machines and deploys?"));
+		assert.equal(none, undefined);
+
+		// A failed pick falls back to similarity alone.
+		h.completions.push("I can't answer that");
+		const [fallback] = await h.emit("before_agent_start", startEvent("the office coffee machine needs descaling every month, right?"));
+		assert.equal(fallback?.message.details.filtered, false);
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("a short follow-up is searched for with what it follows", async () => {
+	const h = await harness({ recallCandidateSimilarity: 100 });
+	try {
+		await start(h);
+		h.addMessage("user", "Can you deploy attie to pop1 for me?");
+		h.addMessage("assistant", "Sure. Shall I run the Deploy Attie workflow with the current SHA?");
+		h.completions.push('{"keep": []}');
+		await h.emit("before_agent_start", startEvent("yes, go ahead please"));
+		const q = (await recallQueries(h)).at(-1)!;
+		assert.match(q, /^yes, go ahead please\n\nUser: Can you deploy attie[\s\S]*Agent: Sure\. Shall I run the Deploy Attie workflow/);
+		assert.match(h.prompts.at(-1)!, /Recent conversation, for context:/);
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+const mine = (uri: string, text: string, space = "coding-agents", source?: string) => ({
+	space, uri, author: "did:plc:a", text, tags: ["attie"], createdAt: "2026-10-01T00:00:00Z", ...(source ? { source } : {}),
+});
+const deployFact = "Attie deploys to pop1 go through the deploy repo's Deploy Attie workflow (PR #1201), one SHA for every service.";
+
+test("remember skips what's already known and merges what it updates", async () => {
+	const seed = [mine("at://m/mine1", deployFact, "coding-agents", "docs/deploy.md")];
+	const h = await harness({ consolidateMinSimilarity: 300, env: { FAKE_MEMORIES: JSON.stringify(seed) } });
+	try {
+		await start(h);
+		const remember = h.tools.get("remember");
+		// A restatement: the model says skip, and the agent sees what's there.
+		h.completions.push('{"action": "skip", "replaces": [0]}');
+		const skipped = await remember.execute("r1", { text: deployFact }, undefined, undefined, h.ctx);
+		assert.match(skipped.content[0].text, /^Not stored: a memory already says this[\s\S]*Deploy Attie workflow \(PR #1201\)[\s\S]*uri: at:\/\/m\/mine1/);
+		assert.match(h.systems.at(-1)!, /about to be stored/);
+		assert.match(h.prompts.at(-1)!, /<memory id="0"[^>]*>/, "memories fenced as data");
+
+		// An update: merged, the old one forgotten (and logged).
+		const merged = `${deployFact} Since 2026-10-21 pop2 deploys use it too.`;
+		h.completions.push(JSON.stringify({ action: "merge", replaces: [0], text: merged }));
+		const out = await remember.execute("r2", { text: "Since 2026-10-21 Attie pop2 deploys also go through the Deploy Attie workflow.", tags: ["attie"], source: "slack" }, undefined, undefined, h.ctx);
+		assert.match(out.content[0].text, /Merged with 1 older memory it updates, now forgotten \(at:\/\/m\/mine1\)/);
+		const all = (await h.tools.get("list_memories").execute("l", {}, undefined, undefined, h.ctx)).details.memories;
+		assert.deepEqual(all.map((m: any) => m.text), [merged]);
+		assert.equal(all[0].source, "slack ; docs/deploy.md", "sources kept");
+		const log = readFileSync(join(process.env.XDG_STATE_HOME!, "pi-engram", "forgotten.jsonl"), "utf8");
+		assert.match(log, /at:\/\/m\/mine1/);
+
+		// Nothing similar: stored as written, without asking.
+		const asked = h.prompts.length;
+		await remember.execute("r3", { text: "Hailey's espresso grinder setting is 14 for the house blend." }, undefined, undefined, h.ctx);
+		assert.equal(h.prompts.length, asked);
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("a merge that drops a memory's facts doesn't forget it", async () => {
+	const seed = [mine("at://m/mine1", deployFact)];
+	const h = await harness({ consolidateMinSimilarity: 300, env: { FAKE_MEMORIES: JSON.stringify(seed) } });
+	try {
+		await start(h);
+		h.completions.push(JSON.stringify({ action: "merge", replaces: [0], text: "Attie deploys go through a workflow now, also for pop2 since recently." }));
+		const out = await h.tools.get("remember").execute("r", { text: "Attie pop2 deploys go through the Deploy Attie workflow too, since 2026-10-21." }, undefined, undefined, h.ctx);
+		assert.doesNotMatch(out.content[0].text, /Merged/);
+		const all = (await h.tools.get("list_memories").execute("l", {}, undefined, undefined, h.ctx)).details.memories;
+		assert.ok(all.some((m: any) => m.text === deployFact), "old memory kept");
+		assert.ok(all.some((m: any) => m.text.startsWith("Attie pop2 deploys")), "new one stored as written");
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("consolidation stays in one space, keeps others' memories, and reports failed forgets", async () => {
+	const seed = [
+		mine("at://m/other-space", deployFact, "attie"),
+		{ ...mine("at://m/theirs", deployFact), author: "did:plc:b" },
+	];
+	const h = await harness({ consolidateMinSimilarity: 300, env: { FAKE_MEMORIES: JSON.stringify(seed) } });
+	try {
+		await start(h);
+		const merged = `${deployFact} Since 2026-10-21 pop2 deploys use it too.`;
+		h.completions.push(JSON.stringify({ action: "merge", replaces: [0], text: merged }));
+		const out = await h.tools.get("remember").execute("r", { text: "Since 2026-10-21 Attie pop2 deploys use the Deploy Attie workflow too." }, undefined, undefined, h.ctx);
+		assert.match(h.prompts.at(-1)!, /space="coding-agents"/);
+		assert.doesNotMatch(h.prompts.at(-1)!, /space="attie"/, "the other space's memory isn't a candidate");
+		assert.match(out.content[0].text, /Kept, though similar: at:\/\/m\/theirs/);
+		const all = (await h.tools.get("list_memories").execute("l", {}, undefined, undefined, h.ctx)).details.memories;
+		assert.ok(all.some((m: any) => m.uri === "at://m/theirs") && all.some((m: any) => m.uri === "at://m/other-space"));
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+	const h2 = await harness({ consolidateMinSimilarity: 300, env: { FAKE_MEMORIES: JSON.stringify([mine("at://m/mine1", deployFact)]), FAKE_FORGET_FAILS: "1" } });
+	try {
+		await start(h2);
+		h2.completions.push(JSON.stringify({ action: "merge", replaces: [0], text: `${deployFact} Also pop2 since 2026-10-21.` }));
+		const out = await h2.tools.get("remember").execute("r", { text: "Attie pop2 deploys use the Deploy Attie workflow since 2026-10-21." }, undefined, undefined, h2.ctx);
+		assert.match(out.content[0].text, /Note: couldn't forget at:\/\/m\/mine1: the PDS is down/);
+	} finally {
+		await h2.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("a skip naming nothing stores the memory; consolidate off stores without comparing", async () => {
+	const h = await harness({ consolidateMinSimilarity: 300, env: { FAKE_MEMORIES: JSON.stringify([mine("at://m/mine1", deployFact)]) } });
+	try {
+		await start(h);
+		h.completions.push('{"action": "skip"}');
+		const out = await h.tools.get("remember").execute("r", { text: "Attie pop1 deploys use the Deploy Attie workflow, checked 2026-10-22." }, undefined, undefined, h.ctx);
+		assert.match(out.content[0].text, /^Remembered: /);
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+	const h2 = await harness({ consolidate: false, env: { FAKE_MEMORIES: JSON.stringify([mine("at://m/mine1", deployFact)]) } });
+	try {
+		await start(h2);
+		const before = h2.prompts.length;
+		const out = await h2.tools.get("remember").execute("r", { text: deployFact }, undefined, undefined, h2.ctx);
+		assert.match(out.content[0].text, /^Remembered: /);
+		assert.equal(h2.prompts.length, before);
+	} finally {
+		await h2.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("recall: a slow pick falls back, an ungrounded extract shows the memory, two close results skip the model", async () => {
+	const h = await harness({ recallCandidateSimilarity: 100, recallMinSimilarity: 100, recallMaxGap: 1000, recallFilterTimeoutMs: 200 });
+	try {
+		await start(h);
+		h.completions.push((signal: AbortSignal) => new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")))));
+		const t0 = Date.now();
+		const [slow] = await h.emit("before_agent_start", startEvent("how do attie deploys to pop1 work, which workflow and coffee?"));
+		assert.ok(Date.now() - t0 < 2000);
+		assert.equal(slow.message.details.filtered, false);
+
+		h.completions.push(JSON.stringify({ keep: [{ id: 0, relevant: "Attie deploys use PR #9999 and deploy.sh." }] }));
+		const [res] = await h.emit("before_agent_start", startEvent("tell me how attie deploys to pop1 work with the workflow"));
+		assert.equal(res.message.details.memories[0].relevant, undefined);
+		assert.match(res.message.content, /one SHA for every service/);
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+	const h2 = await harness({ recallCandidateSimilarity: 100, env: { FAKE_MEMORIES: JSON.stringify([mine("at://m/x", deployFact)]) } });
+	try {
+		await start(h2);
+		const before = h2.prompts.length;
+		const [res] = await h2.emit("before_agent_start", startEvent(deployFact));
+		assert.equal(res.message.details.memories.length, 1);
+		assert.equal(h2.prompts.length, before, "no model call");
+	} finally {
+		await h2.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("a merge that brings a secret in is stored as written instead", async () => {
+	const h = await harness({ consolidateMinSimilarity: 300, captureDedupeSimilarity: 990 });
+	try {
+		await start(h);
+		h.completions.push(JSON.stringify({ action: "merge", replaces: [0], text: "Attie deploys use token=abcdefgh12345678 with the Deploy Attie workflow." }));
+		const out = await h.tools.get("remember").execute("r", { text: "Attie pop1 deploys go through the Deploy Attie workflow, checked again." }, undefined, undefined, h.ctx);
+		assert.match(out.content[0].text, /^Remembered: /);
+		assert.doesNotMatch(out.content[0].text, /Merged/);
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("a long memory shows its extract; a space given as a URI still consolidates", async () => {
+	const long = `${deployFact} ${"Background on how the workflow came to be and every caveat about it. ".repeat(15)}`;
+	const h = await harness({ recallCandidateSimilarity: 50, recallMaxChars: 300, consolidateMinSimilarity: 100, env: { FAKE_MEMORIES: JSON.stringify([mine("at://m/long", long)]) } });
+	try {
+		await start(h);
+		h.completions.push(JSON.stringify({ keep: [{ id: 0, relevant: "Attie pop1 deploys go through the Deploy Attie workflow (PR #1201)." }] }));
+		const [res] = await h.emit("before_agent_start", startEvent("how do attie deploys work, which workflow is it again?"));
+		assert.match(res.message.content, /Attie pop1 deploys go through the Deploy Attie workflow \(PR #1201\)\./);
+
+		h.completions.push('{"action": "skip", "replaces": [0]}');
+		const out = await h.tools.get("remember").execute("r", { text: deployFact, space: "at://did:plc:a/space/coding-agents" }, undefined, undefined, h.ctx);
+		assert.match(out.content[0].text, /^Not stored/);
+	} finally {
 		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
 	}
 });

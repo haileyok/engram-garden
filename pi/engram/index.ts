@@ -17,7 +17,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -52,6 +52,18 @@ import {
 	shorten,
 	spacesSummary,
 } from "./format.ts";
+import {
+	CONSOLIDATE_PROMPT,
+	consolidatePrompt,
+	type Decision,
+	FILTER_PROMPT,
+	filterPrompt,
+	grounded,
+	keepsFacts,
+	lastExchange,
+	parseDecision,
+	parseFilter,
+} from "./judge.ts";
 import { errorText, McpServer } from "./mcp.ts";
 import {
 	cachedSkills,
@@ -77,6 +89,9 @@ interface RecallDetails {
 	query: string;
 	memories: Memory[];
 	note?: string;
+	/** Whether the model picked these, and from how many. */
+	filtered?: boolean;
+	considered?: number;
 }
 
 interface Project {
@@ -452,6 +467,11 @@ export default function engram(pi: ExtensionAPI) {
 			if (isOurs) for (const m of d?.memories ?? []) seen.add(m.uri);
 		}
 
+		// A short follow-up ("ok, do that") is searched for with what it follows.
+		const branch = ctx.sessionManager.getBranch() as any[];
+		const context = lastExchange(branch);
+		const query = prompt.length < 200 && context ? `${prompt}\n\n${context}` : prompt;
+
 		activity = "recalling";
 		status(ctx);
 		let out: MemoriesOut;
@@ -466,48 +486,82 @@ export default function engram(pi: ExtensionAPI) {
 						setTimeout(() => reject(new Error("slow start")), cfg!.recallStartTimeoutMs).unref(),
 					),
 				]);
-			await projectReady;
 			const signal = AbortSignal.any([AbortSignal.timeout(cfg.recallTimeoutMs), captureAbort.signal]);
 			out = await server.call<MemoriesOut>(
 				"recall",
-				// Naming the project leans the search toward its memories.
-				{ query: shorten(project.name ? `${project.name}: ${prompt}` : prompt, 1000), limit: Math.min(cfg.recallLimit * 2 + seen.size, 30) },
+				{ query: shorten(query, 1600), limit: Math.min(cfg.recallCandidates + seen.size, 30) },
 				signal,
 			);
 		} catch {
-			return; // a slow or missing memory never holds up the prompt
-		} finally {
 			activity = "";
 			status(ctx);
+			return; // a slow or missing memory never holds up the prompt
 		}
-		const best = Math.max(0, ...out.memories.map((m) => m.similarity ?? 0));
-		const floor = Math.max(cfg.recallMinSimilarity, best - cfg.recallMaxGap);
-		const picked = out.memories
-			.filter((m) => (m.similarity ?? 0) >= floor && !seen.has(m.uri))
-			.slice(0, cfg.recallLimit)
+		const candidates = out.memories
+			.filter((m) => (m.similarity ?? 0) >= cfg!.recallCandidateSimilarity && !seen.has(m.uri))
+			.slice(0, cfg.recallCandidates)
 			.map(slim);
+		let picked: Memory[] = [];
+		let filtered = false;
+		// One or two clearly close results need no second opinion.
+		const obvious = candidates.length > 0 && candidates.length <= 2 && candidates.every((m) => (m.similarity ?? 0) >= 750);
+		if (obvious) {
+			picked = candidates;
+			filtered = true;
+		} else if (candidates.length && cfg.recallFilter && memoryModel(ctx)) {
+			// The model picks what bears on the prompt, and the part of each that does.
+			activity = "choosing memories";
+			status(ctx);
+			try {
+				const signal = AbortSignal.any([AbortSignal.timeout(cfg.recallFilterTimeoutMs), captureAbort.signal]);
+				const numbered = candidates.map((m, i) => ({ id: i, text: m.text, createdAt: m.createdAt, space: m.space }));
+				const answer = await ask(ctx, FILTER_PROMPT, filterPrompt(prompt, context, numbered), signal, 1500);
+				picked = parseFilter(answer, numbered.map((m) => m.id))
+					.slice(0, cfg.recallLimit)
+							// A short memory is shown whole. A long one shows the extract, unless the
+					// extract names something the memory doesn't.
+					.map((k) => {
+						const c = candidates[k.id];
+						const useExtract = k.relevant && c.text.length > cfg!.recallMaxChars && grounded(k.relevant, c.text);
+						return { ...c, relevant: useExtract ? k.relevant : undefined };
+					});
+				filtered = true;
+			} catch {
+				filtered = false;
+			}
+		}
+		activity = "";
+		status(ctx);
+		if (!filtered) {
+			// Similarity alone: only the clearly close ones.
+			const best = Math.max(0, ...candidates.map((m) => m.similarity ?? 0));
+			const floor = Math.max(cfg.recallMinSimilarity, best - cfg.recallMaxGap);
+			picked = candidates.filter((m) => (m.similarity ?? 0) >= floor).slice(0, cfg.recallLimit);
+		}
 		if (!picked.length) return;
 		return {
 			message: {
 				customType: RECALL_MESSAGE,
-				content: recallBlock(picked, cfg.recallMaxChars),
+				content: recallBlock(picked, cfg.recallMaxChars, filtered),
 				display: true,
-				details: { query: prompt, memories: picked } satisfies RecallDetails,
+				details: { query: prompt, memories: picked, filtered, considered: candidates.length } satisfies RecallDetails,
 			},
 		};
 	});
 
 	pi.registerMessageRenderer<RecallDetails>(RECALL_MESSAGE, (message, { expanded, outputPad }, theme) => {
-		const ms = message.details?.memories ?? [];
+		const d = message.details;
+		const ms = d?.memories ?? [];
 		const box = new Box(outputPad, 0, (t) => theme.bg("customMessageBg", t));
-		const head = `${theme.fg("accent", "◆ engram")} ${theme.fg("muted", `recalled ${ms.length} ${ms.length === 1 ? "memory" : "memories"}`)}`;
+		const of = d?.filtered && d.considered ? ` (picked from ${d.considered})` : "";
+		const head = `${theme.fg("accent", "◆ engram")} ${theme.fg("muted", `recalled ${ms.length} ${ms.length === 1 ? "memory" : "memories"}${of}`)}`;
 		if (!expanded) {
-			const first = ms[0] ? theme.fg("dim", ` — ${shorten(ms[0].text.replace(/\s+/g, " "), 80)}`) : "";
+			const first = ms[0] ? theme.fg("dim", ` — ${shorten((ms[0].relevant ?? ms[0].text).replace(/\s+/g, " "), 80)}`) : "";
 			box.addChild(new Text(head + first, 0, 0));
 			return box;
 		}
 		box.addChild(new Text(head, 0, 0));
-		for (const m of ms) box.addChild(new Text(memoryLines(m, theme, 400), 0, 0));
+		for (const m of ms) box.addChild(new Text(memoryLines({ ...m, text: m.relevant ?? m.text }, theme, 400), 0, 0));
 		return box;
 	});
 
@@ -519,16 +573,152 @@ export default function engram(pi: ExtensionAPI) {
 		return (ctx.mode === "tui" || ctx.mode === "rpc") && !!ctx.sessionManager.getSessionFile();
 	}
 
-	function captureModel(ctx: ExtensionContext) {
-		const want = cfg?.captureModel;
+	/** memoryModel is the model for the memory work (cfg.model, else the session's). */
+	function memoryModel(ctx: ExtensionContext) {
+		const want = cfg?.model;
 		if (want) {
 			const slash = want.indexOf("/");
 			const m = slash > 0 ? ctx.modelRegistry.find(want.slice(0, slash), want.slice(slash + 1)) : undefined;
 			if (m) return m;
-			if (ctx.hasUI && !warnedModel) ctx.ui.notify(`engram: captureModel ${want} not found, using the session's model`, "warning");
+			if (ctx.hasUI && !warnedModel) ctx.ui.notify(`engram: model ${want} not found, using the session's model`, "warning");
 			warnedModel = true;
 		}
 		return ctx.model;
+	}
+
+	/**
+	 * ask puts one question to the memory model, with no reasoning (pi sends
+	 * the model's "off" level when none is asked for), and returns its answer.
+	 */
+	async function ask(ctx: ExtensionContext, system: string, user: string, signal: AbortSignal, maxTokens = 2048): Promise<string> {
+		const model = memoryModel(ctx);
+		if (!model) throw new Error("no model for the memory work");
+		const res = await ctx.modelRegistry.complete(
+			model,
+			{ systemPrompt: system, messages: [{ role: "user", content: text(user), timestamp: Date.now() }] },
+			{ maxTokens, signal, cacheRetention: "none" } as any,
+		);
+		if (res.stopReason !== "stop") throw new Error(res.errorMessage || `the model stopped early (${res.stopReason})`);
+		return res.content
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map((c) => c.text)
+			.join("\n");
+	}
+
+	interface StoreIn {
+		text: string;
+		tags: string[];
+		source?: string;
+		space?: string;
+	}
+	type Stored =
+		| { action: "stored"; uri: string; text: string; tags: string[]; replaced: string[]; kept: string[]; problems: string[]; note?: string }
+		| { action: "skipped"; existing: Memory[] };
+
+	/**
+	 * targetSpace names the space a memory goes to: the one given (by name or
+	 * URI), else the default. Results are labeled by name, so a URI is turned
+	 * into its name. Undefined when it can't be told.
+	 */
+	async function targetSpace(given: string | undefined, signal: AbortSignal): Promise<string | undefined> {
+		if (!spaces) {
+			try {
+				spaces = await need().call<ListSpacesOut>("list_spaces", {}, signal);
+			} catch {
+				return given && !given.startsWith("at://") ? given : undefined;
+			}
+		}
+		if (!given) return spaces.spaces.find((x) => x.default)?.name;
+		return spaces.spaces.find((x) => x.name === given || x.uri === given)?.name ?? (given.startsWith("at://") ? undefined : given);
+	}
+
+	/** keepForgotten writes a memory about to be forgotten to a local log, so a bad merge can be undone. */
+	function keepForgotten(m: Memory, mergedInto: string) {
+		try {
+			const dir = join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "pi-engram");
+			mkdirSync(dir, { recursive: true });
+			appendFileSync(join(dir, "forgotten.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), mergedInto, memory: m })}\n`);
+		} catch {}
+	}
+
+	/**
+	 * storeConsolidated stores a memory unless one already says it, and merges
+	 * it with your own memories it updates (forgetting those), all within the
+	 * one space it's stored in. A merge forgets a memory only if the merged
+	 * text keeps its identifiers and most of its length; the forgotten ones
+	 * are logged locally first. Without a model, or when the comparison fails
+	 * or takes too long, it stores the memory as it is.
+	 *
+	 * quickSkip (capture) skips a near-copy without asking the model; an
+	 * explicit remember always gets the model's judgment.
+	 */
+	async function storeConsolidated(ctx: ExtensionContext, m: StoreIn, signal: AbortSignal, quickSkip: boolean): Promise<Stored> {
+		const srv = need();
+		const space = await targetSpace(m.space, signal);
+		const plain = async (): Promise<Stored> => {
+			const args: Record<string, unknown> = { text: m.text, tags: m.tags };
+			if (m.source) args.source = m.source;
+			if (m.space || space) args.space = m.space || space;
+			const out = await srv.call<{ uri: string; note?: string }>("remember", args, signal);
+			return { action: "stored", uri: out.uri, text: m.text, tags: m.tags, replaced: [], kept: [], problems: [], note: out.note };
+		};
+		// Without knowing the space, comparing would mean searching all of them,
+		// and merging across them: store it as it is.
+		if ((!cfg!.consolidate && !quickSkip) || !space) return plain();
+		let near: Memory[];
+		try {
+			near = (await srv.call<MemoriesOut>("recall", { query: m.text, limit: 5, mode: "vector", space }, signal)).memories.filter(
+				(x) => (x.similarity ?? 0) >= cfg!.consolidateMinSimilarity && x.space === space,
+			);
+		} catch (err) {
+			if (signal.aborted) throw err;
+			return plain();
+		}
+		if (quickSkip) {
+			const same = near.filter((x) => (x.similarity ?? 0) >= cfg!.captureDedupeSimilarity);
+			if (same.length) return { action: "skipped", existing: same };
+		}
+		if (!cfg!.consolidate || !near.length || !memoryModel(ctx)) return plain();
+		let decision: Decision;
+		try {
+			const timed = AbortSignal.any([signal, AbortSignal.timeout(cfg!.consolidateTimeoutMs)]);
+			const numbered = near.map((x, i) => ({ id: i, text: x.text, createdAt: x.createdAt, space: x.space }));
+			const answer = await ask(ctx, CONSOLIDATE_PROMPT, consolidatePrompt(m.text, numbered, new Date().toISOString().slice(0, 10)), timed);
+			decision = parseDecision(answer, numbered.map((x) => x.id));
+		} catch (err) {
+			if (signal.aborted) throw err;
+			return plain();
+		}
+		if (decision.action === "skip") return { action: "skipped", existing: decision.existing.map((i) => near[i]) };
+		if (decision.action === "new" || looksSecret(decision.text)) return plain();
+
+		// A merge forgets only the memories whose facts it kept.
+		const body = decision.text;
+		const chosen = decision.replaces.map((i) => near[i]);
+		const olds = chosen.filter((o) => keepsFacts(body, o.text));
+		const kept = chosen.filter((o) => !olds.includes(o)).map((o) => o.uri);
+		if (!olds.length) return plain();
+		const tags = memoryTags([...m.tags, ...olds.flatMap((o) => o.tags ?? [])]);
+		const sources = [...new Set([m.source, ...olds.map((o) => o.source)].filter((x): x is string => !!x))];
+		const args: Record<string, unknown> = { text: body, tags };
+		if (sources.length) args.source = shorten(sources.join(" ; "), 1900);
+		if (space) args.space = space;
+		const out = await srv.call<{ uri: string; note?: string }>("remember", args, signal);
+		const replaced: string[] = [];
+		const problems: string[] = [];
+		for (const o of olds) {
+			keepForgotten(o, out.uri);
+			try {
+				await srv.call("forget", { uri: o.uri }, signal);
+				replaced.push(o.uri);
+			} catch (err) {
+				if (signal.aborted) throw err;
+				const msg = errorText(err);
+				if (/only forget your own|belongs to/i.test(msg)) kept.push(o.uri); // someone else's: it stays
+				else problems.push(`couldn't forget ${o.uri}: ${msg}`);
+			}
+		}
+		return { action: "stored", uri: out.uri, text: body, tags, replaced, kept, problems, note: out.note };
 	}
 
 	/**
@@ -606,7 +796,7 @@ export default function engram(pi: ExtensionAPI) {
 	) {
 		if (!cfg || !server) return;
 		const signal = captureAbort.signal;
-		const model = captureModel(ctx);
+		const model = memoryModel(ctx);
 		if (!model) throw new Error("no model to read the conversation with");
 
 		activity = "capturing";
@@ -655,20 +845,29 @@ export default function engram(pi: ExtensionAPI) {
 					.join("\n");
 				for (const c of parseCandidates(answer, cfg.captureMax)) {
 					if (signal.aborted) throw new Error("aborted");
-					const near = await server.call<MemoriesOut>("recall", { query: c.text, limit: 3, mode: "vector" }, signal);
-					if (near.memories.some((m) => (m.similarity ?? 0) >= cfg!.captureDedupeSimilarity)) {
+					const r = await storeConsolidated(
+						ctx,
+						{
+							text: c.text,
+							tags: memoryTags([...cfg.captureTags, ...(project.name ? [project.name] : []), ...c.tags]),
+							source: project.remote && !looksSecret(project.remote) ? project.remote : ctx.cwd,
+							space: cfg.captureSpace,
+						},
+						signal,
+						true,
+					);
+					if (r.action === "skipped") {
 						record.skipped++;
 						continue;
 					}
-					const args: Record<string, unknown> = {
-						text: c.text,
-						tags: memoryTags([...cfg.captureTags, ...(project.name ? [project.name] : []), ...c.tags]),
-						source: project.remote && !looksSecret(project.remote) ? project.remote : ctx.cwd,
-					};
-					if (cfg.captureSpace) args.space = cfg.captureSpace;
-					const out = await server.call<{ uri: string }>("remember", args, signal);
-					record.stored.push({ uri: out.uri, text: c.text, tags: args.tags as string[] });
-					known.push(c.text);
+					record.stored.push({
+						uri: r.uri,
+						text: r.text,
+						tags: r.tags,
+						...(r.replaced.length ? { replaced: r.replaced } : {}),
+						...(r.problems.length ? { problems: r.problems } : {}),
+					});
+					known.push(r.text);
 				}
 			}
 		} catch (err) {
@@ -722,7 +921,11 @@ export default function engram(pi: ExtensionAPI) {
 			return box;
 		}
 		box.addChild(new Text(head + theme.fg("dim", ` from ${r.chars.toLocaleString()} chars with ${r.model}`), 0, 0));
-		for (const m of r.stored) box.addChild(new Text(`${theme.fg("dim", "•")} ${m.text}\n  ${theme.fg("dim", m.uri)}`, 0, 0));
+		for (const m of r.stored) {
+			const merged = m.replaced?.length ? theme.fg("dim", `  (merged with ${m.replaced.length} older, forgotten)`) : "";
+			const probs = (m.problems ?? []).map((p) => `\n  ${theme.fg("warning", `⚠ ${p}`)}`).join("");
+			box.addChild(new Text(`${theme.fg("dim", "•")} ${m.text}${merged}\n  ${theme.fg("dim", m.uri)}${probs}`, 0, 0));
+		}
 		return box;
 	});
 
@@ -784,11 +987,11 @@ export default function engram(pi: ExtensionAPI) {
 		name: "remember",
 		label: "Remember",
 		description:
-			"Store a memory in an Engram space (the default one unless you pass space). Agents in that space, including your future sessions, find it with recall within seconds. Write it to stand on its own later, without this conversation.",
+			"Store a memory in an Engram space (the default one unless you pass space). Agents in that space, including your future sessions, find it with recall within seconds. Write it to stand on its own later, without this conversation. It's compared with the most similar memories first: if one already says it, nothing is stored; if it updates your own older ones (a later status, a correction), they're merged into one and the old ones forgotten. The result says which.",
 		promptSnippet: "Store a durable memory for future sessions and other agents",
 		promptGuidelines: [
 			"Write each memory as a few sentences that stand alone: name the project, files, people and date rather than 'this' or 'the user'; add tags (the project, and a kind such as decision, preference, gotcha or status) and a source (URL, path, PR) when there is one.",
-			"Update by remembering a new memory that says what changed; use forget only for your own memories that are wrong.",
+			"To update something, remember what changed: it's merged with the older memory. Use forget only for your own memories that are simply wrong.",
 		],
 		parameters: Type.Object({
 			text: Type.String({ description: "The memory, written to make sense on its own later" }),
@@ -796,24 +999,43 @@ export default function engram(pi: ExtensionAPI) {
 			source: Type.Optional(Type.String({ description: "Where it came from: a URL, file path, PR or task" })),
 			space: Type.Optional(Type.String({ description: "The space to store it in, by name or URI" })),
 		}),
-		async execute(_id, params, signal) {
+		async execute(_id, params, signal, _onUpdate, ctx): Promise<any> {
 			const args = params.source ? { ...params, source: sanitizeSource(params.source) } : params;
 			if ([args.text, args.source ?? "", ...(args.tags ?? [])].some(looksSecret))
 				throw new Error("This looks like it contains a credential. Memories are readable by every agent in the space: leave the secret out.");
-			const out = await need().call<{ uri: string; note?: string }>("remember", args, signal);
+			const r = await storeConsolidated(
+				ctx,
+				{ text: args.text, tags: memoryTags(args.tags ?? []), source: args.source, space: args.space },
+				signal ?? new AbortController().signal,
+				false,
+			);
+			if (r.action === "skipped")
+				return {
+					content: text(
+						`Not stored: a memory already says this. If it doesn't (a fact differs), remember again saying what changed.\n\n${formatMemories({ memories: r.existing }, { maxChars: 1500 })}`,
+					),
+					details: { skipped: r.existing.map((x) => x.uri), text: params.text },
+				};
+			const lines = [`Remembered: ${r.uri}`];
+			if (r.replaced.length)
+				lines.push(
+					`Merged with ${r.replaced.length} older ${r.replaced.length === 1 ? "memory" : "memories"} it updates, now forgotten (${r.replaced.join(", ")}). Stored text:\n${r.text}`,
+				);
+			if (r.kept.length) lines.push(`Kept, though similar: ${r.kept.join(", ")}`);
+			for (const p of r.problems) lines.push(`Note: ${p}`);
+			if (r.note) lines.push(`Note: ${r.note}`);
 			return {
-				content: text(`Remembered: ${out.uri}${out.note ? `\nNote: ${out.note}` : ""}`),
-				details: { uri: out.uri, text: params.text, tags: params.tags ?? [], note: out.note },
+				content: text(lines.join("\n")),
+				details: { uri: r.uri, text: r.text, tags: r.tags, note: r.note, replaced: r.replaced },
 			};
 		},
 		renderCall: (args, theme) => title(theme, "remember", shorten(args.text.replace(/\s+/g, " "), 100)),
 		renderResult: (result, _o, theme) => {
-			const d = result.details as { note?: string } | undefined;
-			return new Text(
-				d?.note ? theme.fg("warning", d.note) : theme.fg("success", "✓ remembered"),
-				0,
-				0,
-			);
+			const d = result.details as { note?: string; skipped?: string[]; replaced?: string[] } | undefined;
+			if (d?.skipped) return new Text(theme.fg("dim", "already known; not stored"), 0, 0);
+			if (d?.note) return new Text(theme.fg("warning", d.note), 0, 0);
+			const n = d?.replaced?.length ?? 0;
+			return new Text(theme.fg("success", n ? `✓ remembered, merged with ${n} older` : "✓ remembered"), 0, 0);
 		},
 	});
 
@@ -983,7 +1205,7 @@ export default function engram(pi: ExtensionAPI) {
 					if (spaces) lines.push(spacesSummary(spaces.spaces));
 					lines.push(
 						`auto-recall: ${cfg?.autoRecall ? `on (≥${cfg.recallMinSimilarity}, up to ${cfg.recallLimit})` : "off"}`,
-						`auto-capture: ${cfg?.autoCapture ? (captureAllowed(ctx) ? `on (${cfg.captureModel ?? "session model"})` : "off for this session (not saved, or print mode)") : "off"}${capturing ? ", capturing now" : ""}`,
+						`auto-capture: ${cfg?.autoCapture ? (captureAllowed(ctx) ? `on (${cfg.model ?? "session model"})` : "off for this session (not saved, or print mode)") : "off"}${capturing ? ", capturing now" : ""}`,
 					);
 					const recs = (ctx.sessionManager.getBranch() as any[]).filter(
 						(e) => e.type === "custom" && e.customType === CAPTURE_ENTRY,

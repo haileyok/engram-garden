@@ -23,6 +23,7 @@ interface Mem {
 }
 
 const store: Mem[] = JSON.parse(process.env.FAKE_MEMORIES ?? "[]");
+const recalls: string[] = [];
 // Skills by name; FAKE_SKILLS seeds them.
 const skills = new Map<string, any>((JSON.parse(process.env.FAKE_SKILLS ?? "[]") as any[]).map((s) => [s.name, s]));
 let n = store.length;
@@ -42,10 +43,15 @@ function tool(name: string, args: any): unknown {
 			return {
 				spaces: [
 					{ name: "coding-agents", uri: "at://did:plc:a/space/coding-agents", default: true, setUp: true, indexing: "granted" },
+					{ name: "attie", uri: "at://did:plc:a/space/attie", setUp: true, indexing: "granted" },
 				],
 			};
+		case "debug_recalls":
+			return { queries: recalls };
 		case "recall": {
+			recalls.push(args.query);
 			const ms = store
+				.filter((m) => !args.space || m.space === args.space)
 				.map((m) => ({ ...m, similarity: similarity(args.query, m.text) }))
 				.filter((m) => m.similarity > 0)
 				.sort((a, b) => b.similarity - a.similarity)
@@ -55,7 +61,7 @@ function tool(name: string, args: any): unknown {
 		case "remember": {
 			if (String(args.text).includes("FAIL_REMEMBER")) throw new Error("the PDS said no");
 			const m: Mem = {
-				space: "coding-agents",
+				space: args.space || "coding-agents",
 				uri: `at://did:plc:a/space/coding-agents/did:plc:a/garden.engram.memory/${++n}`,
 				author: "did:plc:a",
 				text: args.text,
@@ -76,6 +82,8 @@ function tool(name: string, args: any): unknown {
 		case "forget": {
 			const i = store.findIndex((x) => x.uri === args.uri);
 			if (i < 0) throw new Error("no such memory");
+			if (store[i].author !== "did:plc:a") throw new Error(`that memory belongs to ${store[i].author}; you can only forget your own`);
+			if (process.env.FAKE_FORGET_FAILS) throw new Error("the PDS is down");
 			store.splice(i, 1);
 			return { deleted: args.uri };
 		}
@@ -142,7 +150,7 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 				jsonrpc: "2.0",
 				id: msg.id,
 				result: {
-					tools: ["list_spaces", "remember", "recall", "get_memory", "list_memories", "forget", "debug_hang", "list_skills", "get_skill", "save_skill", "debug_skills"].map((name) => ({
+					tools: ["list_spaces", "remember", "recall", "get_memory", "list_memories", "forget", "debug_hang", "list_skills", "get_skill", "save_skill", "debug_skills", "debug_recalls"].map((name) => ({
 						name,
 						description: name,
 						inputSchema: { type: "object", properties: {} },
