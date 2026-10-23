@@ -48,6 +48,21 @@ server the model has to remember to use.
   agent in its space; a new directory with a `SKILL.md` becomes a new
   shared skill. `save_skill` does the same as a tool. Skills changed
   elsewhere load after `/reload`.
+- **Session sync.** The session's own transcript, and where the work stands,
+  are kept in the space too, so the session can be resumed on another
+  machine. The record (`garden.engram.session`) says what the session is
+  about — its first prompt, the newest compaction summary, the repo, branch,
+  commit, directory and machine — and `head`/`chunks` say how much of the
+  transcript is stored; the bytes go up as space blobs, in chunks of whole
+  JSONL lines, so appending a turn uploads only what grew. Pushed after a
+  turn end when enough has built up (`sessionSyncSeconds`,
+  `sessionSyncMinBytes`) and once more when the session ends; the entry
+  `engram-session-sync` records how far the file is stored. `/engram sessions`
+  lists what's stored, and `/engram pull <id>` writes a stored transcript
+  into pi's sessions directory where `/resume` finds it. Both need the
+  `blob:` scope: an agent that signed in before sessions existed keeps its
+  transcript in chunk records until it runs `engram login` again, and the
+  extension says so once.
 - **`/engram`** shows the state (`status`), the spaces (`spaces`), searches
   (`recall <query>`), captures now (`capture`), lets you read and forget
   what was captured (`review`), lists the skills (`skills`, or

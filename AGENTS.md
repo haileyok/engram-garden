@@ -50,6 +50,18 @@ Guidance for working on Engram Garden.
   `internal/skillfile` (SKILL.md and skill directories), the MCP tools `list_skills`, `get_skill`,
   `save_skill`, `delete_skill`, `engram skill`, `python/src/engram_garden/skills.py`, and
   `pi/engram/skills.ts` (the pi package keeps them on disk for pi and saves edits back).
+- Sessions (`docs/design/sessions.md`): `garden.engram.session` records in
+  members' own repos, read directly like skills, holding where a session
+  stands plus `head`/`chunks`; the transcript's bytes are space **blobs**
+  (`com.atproto.repo.uploadBlob`, read with `com.atproto.space.getBlob`),
+  chunked on whole JSONL lines, because records would drag every transcript
+  through repo sync and `getRepo`. Fallbacks while a sign-in predates the
+  `blob:` scope: `garden.engram.sessionChunk` records, then the record alone.
+  `internal/lex/session.go`, `internal/agent/sessions.go`, `internal/agent/blobs`
+  (in `sessions.go`), the MCP tools `list_sessions`/`pull_session`/`push_session`/
+  `delete_session`, `cmd/engram/sessions.go`, and `pi/engram/sessionsync.ts`
+  (which pushes on turn end and session end, and pulls a session into pi's
+  sessions directory).
 - `internal/lex`: record formats: the space's config, the vectors memories
   carry (`f16le`), the query vector encoding, and the text that gets embedded.
 - `internal/embed`: OpenAI-compatible embedding client, the provider that

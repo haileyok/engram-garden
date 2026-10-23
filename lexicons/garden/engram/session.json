@@ -5,11 +5,12 @@
     "main": {
       "type": "record",
       "key": "any",
-      "description": "Where an agent's working session stands, so it can be picked up later, on another machine or by another agent. The record key is the harness's session ID. Rewritten as the session goes on; not searched as a memory.",
+      "description": "Where an agent's working session stands, so it can be picked up later, on another machine or by another agent. The record key is the harness's session ID. Rewritten as the session goes on; not searched as a memory. The record is also the index of the session's transcript: head says how far it is stored, and chunks name the bytes, either blobs or garden.engram.sessionChunk records.",
       "record": {
         "type": "object",
         "required": ["title", "summary", "updatedAt"],
         "properties": {
+          "sessionId": { "type": "string", "maxLength": 128, "description": "The harness's session ID: the same as the record key." },
           "title": { "type": "string", "maxLength": 200, "description": "A short name for the work." },
           "summary": {
             "type": "string",
@@ -27,8 +28,42 @@
           "machine": { "type": "string", "maxLength": 256, "description": "The machine's host name." },
           "harness": { "type": "string", "maxLength": 64, "description": "The agent harness, such as pi." },
           "model": { "type": "string", "maxLength": 256 },
+          "gitHead": { "type": "string", "maxLength": 128, "description": "The commit the working tree was on: resuming needs the same code." },
+          "gitDirty": { "type": "boolean", "description": "Whether the working tree had uncommitted changes." },
           "startedAt": { "type": "string", "format": "datetime" },
-          "updatedAt": { "type": "string", "format": "datetime" }
+          "updatedAt": { "type": "string", "format": "datetime" },
+          "mode": {
+            "type": "string",
+            "maxLength": 16,
+            "knownValues": ["blob", "record", "metadata"],
+            "description": "Where the transcript's bytes are: blobs (the default), sessionChunk records, or nowhere (this record only)."
+          },
+          "head": {
+            "type": "object",
+            "description": "How far the stored transcript goes.",
+            "properties": {
+              "entryId": { "type": "string", "maxLength": 256, "description": "The last transcript entry stored." },
+              "entries": { "type": "integer", "minimum": 0 },
+              "bytes": { "type": "integer", "minimum": 0, "description": "The whole transcript's size." }
+            }
+          },
+          "chunks": {
+            "type": "array",
+            "maxLength": 2000,
+            "description": "The transcript's chunks, oldest first.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "blob": { "type": "blob" },
+                "rkey": { "type": "string", "maxLength": 256, "description": "The garden.engram.sessionChunk record holding this chunk's bytes." },
+                "bytes": { "type": "integer", "minimum": 0 },
+                "entries": { "type": "integer", "minimum": 0 },
+                "firstEntry": { "type": "string", "maxLength": 256 },
+                "lastEntry": { "type": "string", "maxLength": 256 },
+                "sha256": { "type": "string", "maxLength": 64, "description": "Of the chunk's bytes, so a reader can check what it got." }
+              }
+            }
+          }
         }
       }
     }
