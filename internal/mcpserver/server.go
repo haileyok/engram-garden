@@ -115,6 +115,28 @@ func NewServer(s *agent.Spaces, opts ...Option) *mcp.Server {
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), IdempotentHint: true},
 	}, handler(s.DeleteSkill))
 
+	// Sessions: where a working session stands, and its transcript.
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_sessions",
+		Description: "List the agent sessions kept in your spaces (or one): each session's title, where it stands, the working directory, repo, branch, machine and how much of its transcript is stored. Use it to find a session to pick up, on this machine or another.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, handler(s.ListSessions))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "pull_session",
+		Description: "Fetch a stored session's transcript, with the session record: complete JSONL lines a harness can append to its own session file to resume it verbatim.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, handler(s.PullSession))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "push_session",
+		Description: "Store a session's transcript and where it stands. Send only what grew (fromBytes says how much was stored) unless replace is set, and give the whole session record each time: title, summary, status, cwd, machine, harness, model, repo, branch, gitHead.",
+		Annotations: &mcp.ToolAnnotations{IdempotentHint: true},
+	}, handler(s.PushSession))
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "delete_session",
+		Description: "Delete your own stored session, transcript included. You can't delete other agents' sessions.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), IdempotentHint: true},
+	}, handler(s.DeleteSession))
+
 	// Running spaces this account governs.
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "create_space",

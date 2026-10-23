@@ -50,6 +50,13 @@ export function shorten(text: string, max: number): string {
 	return `${(sp > max * 0.7 ? cut.slice(0, sp) : cut).trimEnd()}…`;
 }
 
+/** humanBytes writes a size the way a person reads it. */
+export function humanBytes(n: number): string {
+	if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`;
+	if (n >= 1 << 10) return `${Math.round(n / (1 << 10))} kB`;
+	return `${n} B`;
+}
+
 export function day(iso: string): string {
 	return iso ? iso.slice(0, 10) : "";
 }

@@ -55,6 +55,18 @@ const events: any[] = [];
 let seq = 0;
 let wakeEvents: (() => void) | undefined;
 
+// Sessions, kept the way the real tool keeps them: bytes of a transcript
+// per session, appended to unless the caller says replace.
+interface StoredSession {
+	session: Record<string, any>;
+	data: string;
+	mode: string;
+}
+const sessions = new Map<string, StoredSession>(
+	(JSON.parse(process.env.FAKE_SESSIONS ?? "[]") as any[]).map((s) => [s.session.sessionId, { session: s.session, data: s.data ?? "", mode: s.mode ?? "blob" }]),
+);
+const entriesOf = (data: string) => data.split("\n").filter(Boolean).length;
+
 function tool(name: string, args: any): unknown {
 	if (!lounge && ["lounge_status", "list_agents", "send_message", "list_messages", "set_presence", "debug_lounge", "debug_deliver"].includes(name))
 		throw new Error(`unknown tool ${name}`);
@@ -161,6 +173,45 @@ function tool(name: string, args: any): unknown {
 		}
 		case "debug_skills":
 			return { skills: [...skills.values()] };
+		case "list_sessions":
+			return {
+				sessions: [...sessions.values()].map((s) => ({
+					...s.session,
+					head: { bytes: s.data.length, entries: entriesOf(s.data) },
+					space: "coding-agents",
+				})),
+			};
+		case "push_session": {
+			const id = args.session.sessionId;
+			const cur = sessions.get(id);
+			if (!args.replace && args.fromBytes !== (cur?.data.length ?? 0))
+				return { session: id, mode: cur?.mode ?? "metadata", bytes: cur?.data.length ?? 0, entries: entriesOf(cur?.data ?? ""), storedBytes: 0, resync: true };
+			const base = args.replace ? "" : (cur?.data ?? "");
+			const data = base + String(args.data ?? "");
+			// A trailing line without its newline is held back, like the real one.
+			const cut = data.lastIndexOf("\n") + 1;
+			const kept = data.slice(0, cut);
+			const entry = { session: { ...args.session }, data: kept, mode: process.env.NO_BLOBS ? "record" : "blob" };
+			sessions.set(id, entry);
+			return {
+				session: id,
+				mode: entry.mode,
+				bytes: kept.length,
+				entries: entriesOf(kept),
+				chunks: 1,
+				storedBytes: kept.length - base.length,
+				...(process.env.NO_BLOBS ? { note: "the transcript is in chunk records, not blobs" } : {}),
+			};
+		}
+		case "pull_session": {
+			const s = sessions.get(args.session);
+			if (!s) throw new Error(`no session ${args.session} in any of your spaces`);
+			return { session: { ...s.session, head: { bytes: s.data.length, entries: entriesOf(s.data) } }, data: s.data, space: "coding-agents" };
+		}
+		case "delete_session":
+			return { deleted: `at://did:plc:a/garden.engram.session/${args.session}` };
+		case "debug_sessions":
+			return { sessions: [...sessions.values()] };
 		default:
 			throw new Error(`unknown tool ${name}`);
 	}
@@ -204,7 +255,7 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 				id: msg.id,
 				result: {
 					tools: [
-						"list_spaces", "remember", "recall", "get_memory", "list_memories", "forget", "debug_hang", "list_skills", "get_skill", "save_skill", "debug_skills", "debug_recalls",
+						"list_spaces", "remember", "recall", "get_memory", "list_memories", "forget", "debug_hang", "list_skills", "get_skill", "save_skill", "debug_skills", "debug_recalls", "list_sessions", "push_session", "pull_session", "delete_session", "debug_sessions",
 						...(lounge ? ["lounge_status", "list_agents", "send_message", "list_messages", "set_presence", "lounge_events", "debug_lounge", "debug_deliver"] : []),
 					].map((name) => ({
 						name,

@@ -1,0 +1,29 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.sessionChunk",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "any",
+      "description": "A slice of a session's transcript, for a PDS whose sign-in can't upload blobs yet. The garden.engram.session record for the session names its chunks in order. The record key is <session id>-<index>; not searched as a memory.",
+      "record": {
+        "type": "object",
+        "required": ["sessionId", "index", "bytes", "data"],
+        "properties": {
+          "sessionId": { "type": "string", "maxLength": 128, "description": "The session this chunk belongs to." },
+          "index": { "type": "integer", "minimum": 0, "description": "The chunk's position in the transcript, from 0." },
+          "bytes": { "type": "integer", "minimum": 0, "description": "The size of data." },
+          "entries": { "type": "integer", "minimum": 0, "description": "How many transcript entries the chunk holds." },
+          "firstEntry": { "type": "string", "maxLength": 256 },
+          "lastEntry": { "type": "string", "maxLength": 256 },
+          "sha256": { "type": "string", "maxLength": 64, "description": "Of data, so a reader can check what it got." },
+          "data": {
+            "type": "string",
+            "maxLength": 409600,
+            "description": "Complete transcript lines."
+          }
+        }
+      }
+    }
+  }
+}

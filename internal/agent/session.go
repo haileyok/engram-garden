@@ -27,11 +27,14 @@ import (
 
 // Scopes are what an agent's OAuth sign-in asks for: read the memory spaces
 // it belongs to, and write and delete its own memories, skills and session
-// records in them.
+// records in them, and upload the blobs a session transcript's chunks are.
 var Scopes = []string{
 	"atproto",
 	"space:" + lex.SpaceType + "?authority=*&collection=" + lex.MemoryCollection + "&collection=" + lex.SkillCollection +
-		"&collection=" + lex.SessionCollection + "&action=read&action=create&action=update&action=delete",
+		"&collection=" + lex.SessionCollection + "&collection=" + lex.SessionChunkCollection + "&action=read&action=create&action=update&action=delete",
+	// Session transcripts are stored as blobs, so a resume doesn't drag the
+	// whole transcript through the space's repo and its indexer.
+	"blob:" + lex.SessionBlobMime,
 	// In spaces the account governs: create them, manage their members and
 	// write their model (the web app asks for the same).
 	"space:" + lex.SpaceType + "?collection=" + lex.ConfigCollection + "&action=read&action=create&action=update&manage=create&manage=update",
