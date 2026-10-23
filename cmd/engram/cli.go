@@ -136,6 +136,12 @@ Skills (instructions every agent in a space shares; --space picks one):
   engram skill put <dir|SKILL.md>... [--note n]   add or update skills from Agent Skills directories
   engram skill rm <name>                     delete your own version of a skill
 
+Sessions (where a working session stands, and its transcript; --space picks one):
+  engram sessions list                       the sessions in your spaces
+  engram sessions pull <id> [--to file]      one transcript, as complete JSONL lines
+  engram sessions push <file> [--id id] [--title t]   store a session file
+  engram sessions rm <id>                    delete your own session
+
 Add --json to any command for machine-readable output. MCP clients can run
 engram-mcp, which uses the same settings.
 
@@ -176,6 +182,7 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		"spaces": c.cmdSpaces, "use": c.cmdUse,
 		"create": c.cmdCreate, "members": c.cmdMembers, "model": c.cmdModel, "index": c.cmdIndex,
 		"skill": c.cmdSkill, "skills": c.cmdSkill,
+		"session": c.cmdSessions, "sessions": c.cmdSessions,
 	}
 	cmd, ok := cmds[rest[0]]
 	if !ok {

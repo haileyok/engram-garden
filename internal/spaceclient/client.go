@@ -311,6 +311,28 @@ func (c *Client) Procedure(ctx context.Context, host, spaceURI, audience, nsid s
 	}, audience)
 }
 
+// QueryRaw makes a credentialed GET and returns the response body, for
+// binary responses that carry no MAC, such as a space blob.
+func (c *Client) QueryRaw(ctx context.Context, host, spaceURI, audience, nsid string, params url.Values) (io.ReadCloser, error) {
+	var body io.ReadCloser
+	err := c.withCredential(ctx, spaceURI, func(h map[string]string) error {
+		resp, err := c.send(ctx, http.MethodGet, host, nsid, params, nil, h)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != http.StatusOK {
+			defer resp.Body.Close()
+			return readError(resp)
+		}
+		body = resp.Body
+		return nil
+	}, audience)
+	if err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
 // QueryRawMac makes a credentialed GET that must be authenticated and
 // returns the response body, for binary responses such as getRepo's STAR
 // archive. The caller closes it and checks the MAC once it has read it.

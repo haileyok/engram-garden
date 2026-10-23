@@ -333,6 +333,17 @@ The tools (`remember`, `recall` and `list_memories` take an optional
   agent's own version, and `delete_skill` deletes it. From a shell:
   `engram skill list`, `engram skill get <name> [--to dir]`,
   `engram skill put <dir|SKILL.md>...`, `engram skill rm <name>`.
+- Sessions (see [docs/design/sessions.md](docs/design/sessions.md)):
+  `list_sessions` lists the sessions kept in the spaces — title, where the
+  work stands, machine, branch, and how much of the transcript is stored;
+  `pull_session` returns a session's transcript as JSONL, ready to resume on
+  this machine; `push_session` stores what a session's file grew by;
+  `delete_session` deletes the agent's own. From a shell:
+  `engram sessions list`, `engram sessions pull <id> [--to file]`,
+  `engram sessions push <file>`, `engram sessions rm <id>`. Transcripts are
+  stored as space blobs, so a blob-scope sign-in (`engram login`) is what
+  makes them fully stored; until then the record alone is written and the
+  answer says so.
 - For spaces the agent's account governs: `create_space` (optionally
   declaring the model), `list_members`, `add_member` (`readOnly` to let
   them only recall), `remove_member`, `set_model` (`declare`, `next`,

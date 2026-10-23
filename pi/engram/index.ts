@@ -14,10 +14,15 @@
  *   keeping; near-duplicates of stored memories are dropped and the rest is
  *   remembered (auto-capture). A custom entry records how far each branch
  *   has been read, so nothing is read twice.
+ * - The session's own transcript, and where the work stands, are kept in
+ *   the space too (session sync), so the same session can be resumed on
+ *   another machine: the manifest is a garden.engram.session record and the
+ *   bytes go up as blobs. A custom entry records how much of the file is
+ *   stored.
  */
 
 import { execFile } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -43,8 +48,25 @@ import {
 } from "./capture.ts";
 import { type Config, loadConfig } from "./config.ts";
 import {
+	agentDir,
+	HARNESS,
+	lastSync,
+	type Manifest,
+	machine,
+	SESSION_SYNC_ENTRY,
+	type SyncRecord,
+	gitInfo,
+	pushSession,
+	startedAtOf,
+	syncedBytes,
+	summaryOf,
+	titleOf,
+	writePulled,
+} from "./sessionsync.ts";
+import {
 	day,
 	formatMemories,
+	humanBytes,
 	type ListSpacesOut,
 	type MemoriesOut,
 	type Memory,
@@ -156,6 +178,12 @@ export default function engram(pi: ExtensionAPI) {
 	let failure: { chars: number; at: number } | undefined;
 	const RETRY_AFTER_MS = 10 * 60_000;
 	let captureAbort = new AbortController();
+
+	// Session sync: one push at a time, and not more often than the settings
+	// say unless the session is ending.
+	let sessionPush: Promise<void> | undefined;
+	let lastPushAt = 0;
+	let warnedSync = false;
 
 	const need = (): McpServer => {
 		if (!server) throw new Error("Engram isn't running in this session");
@@ -395,6 +423,13 @@ export default function engram(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (event, ctx) => {
 		const s = server;
+		if (event.reason !== "reload" && captureAllowed(ctx)) {
+			// The last push carries everything this session added.
+			await Promise.race([
+				syncSession(ctx, { final: true }),
+				new Promise((r) => setTimeout(r, event.reason === "quit" ? 15_000 : 5_000).unref()),
+			]);
+		}
 		if (cfg?.autoCapture && event.reason !== "reload" && captureAllowed(ctx)) {
 			// Switching sessions keeps the person waiting more than quitting does,
 			// and a session switched away from is read again when resumed.
@@ -412,6 +447,92 @@ export default function engram(pi: ExtensionAPI) {
 		s?.close();
 		if (server === s) server = undefined;
 	});
+
+	// ---- session sync --------------------------------------------------------
+
+	/** StoredSession is a session as list_sessions or pull_session returns it. */
+	interface StoredSession {
+		sessionId: string;
+		title?: string;
+		summary?: string;
+		status?: string;
+		cwd?: string;
+		machine?: string;
+		branch?: string;
+		gitHead?: string;
+		gitDirty?: boolean;
+		updatedAt?: string;
+		head?: { bytes?: number; entries?: number };
+		space?: string;
+	}
+
+	/**
+	 * putSession writes a pulled transcript where pi looks for sessions: its
+	 * own working directory's folder when that directory is here, else this
+	 * one's, so /resume shows it either way.
+	 */
+	function putSession(ctx: ExtensionContext, session: StoredSession, data: string): string {
+		const home = !session.cwd || existsSync(session.cwd) === false;
+		const dir = home ? ctx.sessionManager.getSessionDir() : join(agentDir(), "sessions");
+		const cwd = home ? ctx.cwd : (session.cwd ?? ctx.cwd);
+		return writePulled(dir, cwd, session.sessionId, data, session.updatedAt);
+	}
+
+
+	/** syncSession stores what the session file grew by, and where the work stands. */
+	async function syncSession(ctx: ExtensionContext, opts: { final?: boolean } = {}): Promise<void> {
+		if (!cfg?.autoSessionSync || !server || !captureAllowed(ctx)) return;
+		const file = ctx.sessionManager.getSessionFile();
+		const id = ctx.sessionManager.getSessionId();
+		if (!file || !id) return;
+		// One push at a time; the next one carries what this one missed.
+		if (sessionPush) {
+			if (!opts.final) return;
+			await sessionPush.catch(() => {});
+		}
+		const run = (async () => {
+			const entries = ctx.sessionManager.getEntries() as any[];
+			const from = syncedBytes(entries);
+			const branch = ctx.sessionManager.getBranch() as any[];
+			const git = await gitInfo(ctx.cwd).catch(() => ({}));
+			const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+			const manifest: Manifest = {
+				sessionId: id,
+				title: titleOf(branch, ctx.sessionManager.getSessionName()),
+				summary: summaryOf(branch),
+				status: opts.final ? "ended" : "active",
+				cwd: ctx.cwd,
+				machine: machine(),
+				harness: HARNESS,
+				startedAt: startedAtOf(ctx.sessionManager.getHeader() as any, entries),
+				...(model ? { model } : {}),
+				...git,
+			};
+			const { record, answer } = await pushSession({
+				call: (tool, args) => need().call(tool, args),
+				file,
+				session: manifest,
+				from,
+			});
+			pi.appendEntry<SyncRecord>(SESSION_SYNC_ENTRY, record);
+			lastPushAt = Date.now();
+			if (answer.note && !warnedSync && ctx.hasUI) {
+				warnedSync = true;
+				ctx.ui.notify(`engram: sessions aren't fully stored: ${answer.note}`, "warning");
+			}
+		})();
+		const push: Promise<void> = run
+			.catch((err) => {
+				// Never in the way: a failed push is retried at the next turn end.
+				lastPushAt = Date.now();
+				if (opts.final && ctx.hasUI) ctx.ui.notify(`engram: session not stored: ${errorText(err)}`, "warning");
+			})
+			.finally(() => {
+				if (sessionPush === push) sessionPush = undefined;
+			});
+		sessionPush = push;
+		await push;
+	}
 
 	// ---- the system prompt and auto-recall ----------------------------------
 
@@ -959,6 +1080,22 @@ export default function engram(pi: ExtensionAPI) {
 	}
 
 	pi.on("agent_settled", async (event, ctx) => {
+		if (!event.aborted) {
+			// A session that keeps working still gets stored as it goes: after
+			// the first turn end, or once it has grown enough.
+			const since = Date.now() - lastPushAt;
+			const grown = (() => {
+				try {
+					const file = ctx.sessionManager.getSessionFile();
+					if (!file) return 0;
+					return statSync(file).size - syncedBytes(ctx.sessionManager.getEntries() as any[]);
+				} catch {
+					return 0;
+				}
+			})();
+			if (since >= (cfg?.sessionSyncSeconds ?? 60) * 1000 || grown >= (cfg?.sessionSyncMinBytes ?? 200_000))
+				void syncSession(ctx);
+		}
 		if (!cfg?.autoCapture || event.aborted || !captureAllowed(ctx)) return;
 		void capture(ctx, cfg.captureMinChars);
 	});
@@ -966,6 +1103,7 @@ export default function engram(pi: ExtensionAPI) {
 	pi.on("session_before_compact", async (_event, ctx) => {
 		// The compacted messages stay in the session file, so this is only a
 		// natural point to catch up, not a race against losing them.
+		void syncSession(ctx);
 		if (!cfg?.autoCapture || !captureAllowed(ctx)) return;
 		void capture(ctx, cfg.captureExitMinChars);
 	});
@@ -1221,6 +1359,8 @@ export default function engram(pi: ExtensionAPI) {
 		{ value: "capture", label: "capture", description: "Capture memories from the conversation now" },
 		{ value: "review", label: "review", description: "Look over (and forget) memories captured in this session" },
 		{ value: "skills", label: "skills", description: "The skills from Engram; skills sync fetches them, skills push saves local changes" },
+		{ value: "sessions", label: "sessions", description: "The sessions stored in Engram, with their machines and branches" },
+		{ value: "pull", label: "pull", description: "Put a stored session on this machine: /engram pull <id>" },
 		{ value: "restart", label: "restart", description: "Restart engram-mcp" },
 	];
 
@@ -1273,6 +1413,22 @@ export default function engram(pi: ExtensionAPI) {
 						`auto-recall: ${cfg?.autoRecall ? `on (≥${cfg.recallMinSimilarity}, up to ${cfg.recallLimit})` : "off"}`,
 						`auto-capture: ${cfg?.autoCapture ? (captureAllowed(ctx) ? `on (${cfg.model ?? "session model"})` : "off for this session (not saved, or print mode)") : "off"}${capturing ? ", capturing now" : ""}`,
 					);
+					if (cfg?.autoSessionSync && captureAllowed(ctx)) {
+						const stored = syncedBytes(ctx.sessionManager.getEntries() as any[]);
+						const file = ctx.sessionManager.getSessionFile();
+						let size = 0;
+						try {
+							size = file ? statSync(file).size : 0;
+						} catch {
+							size = 0;
+						}
+						const last = lastSync(ctx.sessionManager.getEntries() as any[]);
+						lines.push(
+							stored
+								? `session stored: ${humanBytes(stored)} of ${humanBytes(size)}${last?.mode ? ` in ${last.mode}` : ""}${last?.error ? ` (${last.error})` : ""}`
+								: `session stored: nothing yet (${humanBytes(size)})`,
+						);
+					} else lines.push("session sync: off for this session (not saved, print mode, or disabled)");
 					const recs = (ctx.sessionManager.getBranch() as any[]).filter(
 						(e) => e.type === "custom" && e.customType === CAPTURE_ENTRY,
 					);
@@ -1360,6 +1516,29 @@ export default function engram(pi: ExtensionAPI) {
 									...ks.map((k) => `  ${k.name}  (${k.space}${k.author ? `, ${k.author}` : ""})${dirty.has(k.name) ? "  changed here, not saved" : ""}`),
 								].join("\n")
 							: `No skills from Engram yet. Add one: write ${skillsDir}/<name>/SKILL.md, or engram skill put <dir>.`,
+						"info",
+					);
+					return;
+				}
+				case "sessions": {
+					const out = await need().call<{ sessions: StoredSession[]; note?: string }>("list_sessions", {});
+					if (!out.sessions.length) return ctx.ui.notify("engram: no stored sessions yet", "info");
+					const lines = out.sessions.map((x) => {
+						const where = [x.machine, x.branch].filter(Boolean).join(" ");
+						const stored = x.head?.bytes ? `${x.head.entries ?? 0} entries, ${humanBytes(x.head.bytes)}` : "no transcript";
+						return `${x.sessionId}\n  ${shorten(x.title ?? "", 90)}\n  ${[x.space, where, `updated ${day(x.updatedAt ?? "")}`, stored].filter(Boolean).join(" · ")}${x.cwd ? `\n  ${x.cwd}` : ""}`;
+					});
+					if (out.note) lines.push(out.note);
+					ctx.ui.notify(lines.join("\n"), "info");
+					return;
+				}
+				case "pull": {
+					if (!arg) return ctx.ui.notify("usage: /engram pull <session id>", "warning");
+					const out = await need().call<{ session: StoredSession; data: string; space?: string }>("pull_session", { session: arg });
+					const path = putSession(ctx, out.session, out.data);
+					ctx.ui.notify(
+						`engram: ${out.session.sessionId} is at ${path}\nResume it with: pi --session ${path}` +
+							(out.session.gitHead ? `\nIt was at ${out.session.branch ?? "a branch"} ${out.session.gitHead}${out.session.gitDirty ? " (uncommitted changes)" : ""}` : ""),
 						"info",
 					);
 					return;

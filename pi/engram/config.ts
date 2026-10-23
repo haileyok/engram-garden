@@ -60,6 +60,17 @@ export interface Config {
 	captureExitMinChars: number;
 	/** How long quitting may wait for capturing (switching sessions: at most 8s). */
 	captureExitTimeoutMs: number;
+	/**
+	 * Store the session's transcript (and where the work stands) in the space,
+	 * so it can be resumed on another machine. Pushed as the session goes,
+	 * and once more when it ends.
+	 */
+	autoSessionSync: boolean;
+	/** At most one push this often while the session is working. */
+	sessionSyncSeconds: number;
+	/** Push sooner than that once this many bytes of transcript are unstored. */
+	sessionSyncMinBytes: number;
+
 	/** At most this many memories per 80k characters of conversation read. */
 	captureMax: number;
 	/** Skip a captured memory when one this similar exists (0-1000), without asking the model. */
@@ -99,6 +110,9 @@ export const defaults: Config = {
 	captureMinChars: 40_000,
 	captureExitMinChars: 3_000,
 	captureExitTimeoutMs: 20_000,
+	autoSessionSync: true,
+	sessionSyncSeconds: 60,
+	sessionSyncMinBytes: 200_000,
 	captureMax: 3,
 	captureDedupeSimilarity: 860,
 	consolidate: true,
@@ -147,6 +161,7 @@ export function loadConfig(projectDir?: string, env: NodeJS.ProcessEnv = process
 	if (env.PI_ENGRAM_COMMAND) cfg.command = env.PI_ENGRAM_COMMAND;
 	if (env.PI_ENGRAM_AUTO_RECALL) cfg.autoRecall = bool(env.PI_ENGRAM_AUTO_RECALL);
 	if (env.PI_ENGRAM_AUTO_CAPTURE) cfg.autoCapture = bool(env.PI_ENGRAM_AUTO_CAPTURE);
+	if (env.PI_ENGRAM_AUTO_SESSION_SYNC) cfg.autoSessionSync = bool(env.PI_ENGRAM_AUTO_SESSION_SYNC);
 	if (env.PI_ENGRAM_MODEL) cfg.model = env.PI_ENGRAM_MODEL;
 	if (env.PI_ENGRAM_CAPTURE_MODEL) cfg.model = env.PI_ENGRAM_CAPTURE_MODEL;
 	cfg.model ??= cfg.captureModel;
