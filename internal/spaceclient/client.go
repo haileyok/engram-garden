@@ -86,7 +86,7 @@ type Client struct {
 	HTTP      *http.Client
 
 	key *atcrypto.PrivateKeyP256
-	// kid is key's public did:key: the credentialKid each credential is
+	// kid is key's public did:key: the credentialKey each credential is
 	// bound to.
 	kid string
 
@@ -189,36 +189,73 @@ func (c *Client) Invalidate(spaceURI string) {
 }
 
 func (c *Client) refreshCredential(ctx context.Context, spaceURI string) (string, error) {
-	ref, err := space.ParseRef(spaceURI)
+	a, err := c.Authorize(ctx, spaceURI, nil)
 	if err != nil {
 		return "", err
+	}
+	return a.Credential, nil
+}
+
+// Notify asks a space host to deliver the space's updates to an endpoint, as
+// part of authorizing (notifySpaceUpdate). The endpoint answers the host's
+// confirmRegistration call for Token, which only this syncer can mint.
+type Notify struct {
+	// Endpoint is the service's base URL, e.g. https://api.engram.garden.
+	Endpoint string `json:"endpoint"`
+	Token    string `json:"token"`
+}
+
+// Authorization is what authorizeSpaceSync granted: a credential, and the
+// space's revision when it was issued.
+type Authorization struct {
+	Credential string
+	// SpaceRev is the space's current revision, empty before its first
+	// update.
+	SpaceRev string
+	// Expires is when the credential, and any registration it renewed,
+	// lapses.
+	Expires time.Time
+}
+
+// Authorize exchanges a delegation token for a new space credential bound to
+// this client's key, caching it. With notify it also registers (or renews the
+// registration of) an endpoint for the space's updates, which lasts as long
+// as the credential does.
+func (c *Client) Authorize(ctx context.Context, spaceURI string, notify *Notify) (*Authorization, error) {
+	ref, err := space.ParseRef(spaceURI)
+	if err != nil {
+		return nil, err
 	}
 	token, err := c.Delegator.DelegationToken(ctx, spaceURI)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	host, err := c.SpaceHost(ctx, ref.Authority)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	// The request is unauthenticated apart from its body: the delegation
 	// token establishes the user, and the credential is bound to our key.
 	var out struct {
 		Credential string `json:"credential"`
+		SpaceRev   string `json:"spaceRev"`
 	}
-	body := map[string]any{"space": spaceURI, "credentialKid": c.kid, "delegationToken": token}
-	if err := c.do(ctx, http.MethodPost, host, "com.atproto.space.getSpaceCredential", nil, body, nil, &out); err != nil {
-		return "", fmt.Errorf("getSpaceCredential: %w", err)
+	body := map[string]any{"space": spaceURI, "credentialKey": c.kid, "delegationToken": token}
+	if notify != nil {
+		body["notify"] = notify
+	}
+	if err := c.do(ctx, http.MethodPost, host, "com.atproto.space.authorizeSpaceSync", nil, body, nil, &out); err != nil {
+		return nil, fmt.Errorf("authorizeSpaceSync: %w", err)
 	}
 	parsed, err := space.ParseSpaceToken(space.TokenCredential, out.Credential)
 	if err != nil {
-		return "", fmt.Errorf("getSpaceCredential returned a bad credential: %w", err)
+		return nil, fmt.Errorf("authorizeSpaceSync returned a bad credential: %w", err)
 	}
 	cr := credential{jwt: out.Credential, exp: time.Unix(parsed.Payload.Exp, 0)}
 	c.mu.Lock()
 	c.creds[spaceURI] = cr
 	c.mu.Unlock()
-	return cr.jwt, nil
+	return &Authorization{Credential: cr.jwt, SpaceRev: out.SpaceRev, Expires: cr.exp}, nil
 }
 
 // SignedHeaders returns the headers presenting a space credential to an
@@ -232,20 +269,17 @@ func (c *Client) SignedHeaders(ctx context.Context, spaceURI, audience string) (
 }
 
 // Mac is a MAC-authorized read's response: the headers it carried and the
-// per-request shared secret they are checked with.
+// encapsulation (the ephemeral key share and its shared secret) they are
+// checked with.
 type Mac struct {
-	Header       http.Header
-	SharedSecret []byte
+	Header http.Header
+	space.Encapsulation
 }
 
-// CommitMac returns the commit MAC the response carried.
-func (m *Mac) CommitMac() ([]byte, error) {
-	return space.ParseMacHeader(m.Header.Values(space.HeaderMac), space.CommitMacType)
-}
-
-// RecordMac returns the record MAC the response carried.
-func (m *Mac) RecordMac() ([]byte, error) {
-	return space.ParseMacHeader(m.Header.Values(space.HeaderMac), space.RecordMacType)
+// Params is what space.VerifyCommit, VerifyRepoStar and VerifyRecord check a
+// response's MAC with.
+func (m *Mac) Params() space.VerifyMacParams {
+	return space.VerifyMacParams{Encapsulation: m.Encapsulation, Headers: m.Header}
 }
 
 // kemKey resolves the #atproto_kem key a repo host authenticates the author's
@@ -263,10 +297,11 @@ func (c *Client) kemKey(ctx context.Context, did string) (string, error) {
 	return pub.DIDKey(), nil
 }
 
-// wantMac builds the request header asking for a MAC of macType and the
-// shared secret the response's MAC is checked with. Every request gets a
-// fresh ephemeral key, so a leaked response proves nothing to a third party.
-func (c *Client) wantMac(ctx context.Context, repo, macType string) (string, []byte, error) {
+// wantMac builds the Accept-Signature header asking for a MAC under profile
+// (space.CommitMacProfile or space.RecordMacProfile) and the encapsulation the
+// response's MAC is checked with. Every request gets a fresh ephemeral key,
+// so a leaked response proves nothing to a third party.
+func (c *Client) wantMac(ctx context.Context, repo, profile string) (string, *space.Encapsulation, error) {
 	kem, err := c.kemKey(ctx, repo)
 	if err != nil {
 		return "", nil, err
@@ -275,7 +310,7 @@ func (c *Client) wantMac(ctx context.Context, repo, macType string) (string, []b
 	if err != nil {
 		return "", nil, err
 	}
-	return space.FormatWantMacHeader(macType, enc.KeyShare), enc.SharedSecret, nil
+	return space.FormatMacRequest(profile, enc.KeyShare), enc, nil
 }
 
 // Query makes a credentialed GET. On an auth failure it retries once with a
@@ -287,19 +322,19 @@ func (c *Client) Query(ctx context.Context, host, spaceURI, audience, nsid strin
 }
 
 // QueryMac makes a credentialed GET that must be authenticated: it asks the
-// repo host for a MAC of macType (space.CommitMacType or space.RecordMacType)
-// and returns it with the secret that checks it. Read other accounts' space
+// repo host for a MAC under macProfile (space.CommitMacProfile or
+// space.RecordMacProfile) and returns it with the secret that checks it. Read other accounts' space
 // repos with this, never with Query.
-func (c *Client) QueryMac(ctx context.Context, host, spaceURI, audience, macType, nsid string, params url.Values, out any) (*Mac, error) {
+func (c *Client) QueryMac(ctx context.Context, host, spaceURI, audience, macProfile, nsid string, params url.Values, out any) (*Mac, error) {
 	var mac *Mac
 	err := c.withCredential(ctx, spaceURI, func(h map[string]string) error {
-		want, secret, err := c.wantMac(ctx, audience, macType)
+		want, enc, err := c.wantMac(ctx, audience, macProfile)
 		if err != nil {
 			return err
 		}
-		h[space.HeaderWantMac] = want
+		h[space.HeaderAcceptSignature] = want
 		resp, err := c.doResponse(ctx, http.MethodGet, host, nsid, params, nil, h)
-		return withResponse(resp, err, &mac, secret, out)
+		return withResponse(resp, err, &mac, enc, out)
 	}, audience)
 	return mac, err
 }
@@ -314,17 +349,17 @@ func (c *Client) Procedure(ctx context.Context, host, spaceURI, audience, nsid s
 // QueryRawMac makes a credentialed GET that must be authenticated and
 // returns the response body, for binary responses such as getRepo's STAR
 // archive. The caller closes it and checks the MAC once it has read it.
-func (c *Client) QueryRawMac(ctx context.Context, host, spaceURI, audience, macType, nsid string, params url.Values) (*Mac, io.ReadCloser, error) {
+func (c *Client) QueryRawMac(ctx context.Context, host, spaceURI, audience, macProfile, nsid string, params url.Values) (*Mac, io.ReadCloser, error) {
 	var (
 		mac  *Mac
 		body io.ReadCloser
 	)
 	err := c.withCredential(ctx, spaceURI, func(h map[string]string) error {
-		want, secret, err := c.wantMac(ctx, audience, macType)
+		want, enc, err := c.wantMac(ctx, audience, macProfile)
 		if err != nil {
 			return err
 		}
-		h[space.HeaderWantMac] = want
+		h[space.HeaderAcceptSignature] = want
 		resp, err := c.send(ctx, http.MethodGet, host, nsid, params, nil, h)
 		if err != nil {
 			return err
@@ -333,7 +368,7 @@ func (c *Client) QueryRawMac(ctx context.Context, host, spaceURI, audience, macT
 			defer resp.Body.Close()
 			return readError(resp)
 		}
-		mac, body = &Mac{Header: resp.Header, SharedSecret: secret}, resp.Body
+		mac, body = &Mac{Header: resp.Header, Encapsulation: *enc}, resp.Body
 		return nil
 	}, audience)
 	return mac, body, err
@@ -401,15 +436,15 @@ func (c *Client) doResponse(ctx context.Context, method, host, nsid string, para
 }
 
 // withResponse decodes a response into out and, for a MAC-authorized read,
-// records its headers and the secret they are checked with. The response is
+// records its headers and the encapsulation they are checked with. The response is
 // closed either way.
-func withResponse(resp *http.Response, err error, mac **Mac, secret []byte, out any) error {
+func withResponse(resp *http.Response, err error, mac **Mac, enc *space.Encapsulation, out any) error {
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if mac != nil {
-		*mac = &Mac{Header: resp.Header, SharedSecret: secret}
+		*mac = &Mac{Header: resp.Header, Encapsulation: *enc}
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -429,8 +464,8 @@ func readError(resp *http.Response) error {
 }
 
 // KeyResolver resolves the did:key a space token's issuer signs with, for
-// space.VerifySpaceToken: the account's own #atproto key, as the October 22,
-// 2026 alpha issues every space token under.
+// space.VerifySpaceToken: the account's own #atproto key, which every space token
+// is issued under.
 func KeyResolver(ctx context.Context, dir identity.Directory) space.SigningKeyFunc {
 	return func(iss string, fresh bool) (string, error) {
 		did, err := syntax.ParseDID(iss)

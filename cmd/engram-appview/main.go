@@ -398,7 +398,7 @@ func run(log *slog.Logger) error {
 		defer cancel()
 		_ = hs.Shutdown(shutdown)
 	}()
-	log.Info("engram-appview listening", "addr", addr, "service", srv.ServiceID(), "grants", srv.GrantURL(),
+	log.Info("engram-appview listening", "addr", addr, "service", srv.ServiceDID, "grants", srv.GrantURL(),
 		"spaces", srv.Spaces, "indexed", len(srv.IndexedSpaces()), "registration", openRegistration, "node", ring.Self, "nodes", len(ring.Nodes), "epoch", ring.Epoch)
 	err = hs.ListenAndServe()
 	// Stop the background loops (if the server failed on its own), wait

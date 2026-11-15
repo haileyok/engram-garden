@@ -20,6 +20,7 @@ import (
 
 	"github.com/bluesky-social/indigo/atproto/atcrypto"
 	"github.com/haileyok/cocoon/space"
+	"github.com/ipfs/go-cid"
 
 	"github.com/haileyok/engram-garden/internal/vec"
 )
@@ -53,10 +54,33 @@ type embedTextFixture struct {
 	Want   string   `json:"want"`
 }
 
+// macFixture is a record's MAC: what a syncer asked for, the secret both sides
+// derive from it and what the repo host answered.
+type macFixture struct {
+	// KemKeyHex is the repo author's #atproto_kem private key.
+	KemKeyHex       string            `json:"kemKeyHex"`
+	KemDIDKey       string            `json:"kemDidKey"`
+	KeyShare        string            `json:"keyShare"`
+	SharedSecretHex string            `json:"sharedSecretHex"`
+	AcceptSignature string            `json:"acceptSignature"`
+	URI             string            `json:"uri"`
+	CID             string            `json:"cid"`
+	Headers         map[string]string `json:"headers"`
+}
+
+// testKemKeyHex is a fixed #atproto_kem key.
+const testKemKeyHex = "2f2e2d2c2b2a292827262524232221201f1e1d1c1b1a19181716151413121110"
+
+const (
+	macURI = "at://did:plc:authority/space/garden.engram.space/memory/did:plc:alice/garden.engram.memory/3kbcq3p7ad400"
+	macCID = "bafyreigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+)
+
 type goFixtures struct {
 	PrivateKeyHex string             `json:"privateKeyHex"`
 	DIDKey        string             `json:"didKey"`
 	Sigs          []sigFixture       `json:"sigs"`
+	Macs          []macFixture       `json:"macs"`
 	Vectors       []vectorFixture    `json:"vectors"`
 	EmbedText     []embedTextFixture `json:"embedText"`
 }
@@ -102,6 +126,35 @@ func TestWritePythonFixtures(t *testing.T) {
 		}
 		fx.Sigs = append(fx.Sigs, sigFixture{Authorization: auth, Audience: aud, KeyID: pub.DIDKey(), Headers: h})
 	}
+	kemRaw, err := hex.DecodeString(testKemKeyHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kem, err := atcrypto.ParsePrivateBytesP256(kemRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kemPub, err := kem.PublicKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		enc, err := space.Encapsulate(kemPub.DIDKey())
+		if err != nil {
+			t.Fatal(err)
+		}
+		accept := space.FormatMacRequest(space.RecordMacProfile, enc.KeyShare)
+		req, err := space.ParseMacRequest([]string{accept}, space.RecordMacProfile)
+		if err != nil || req == nil {
+			t.Fatal(err)
+		}
+		headers := space.CreateRecordMacHeaders(macURI, cid.MustParse(macCID), space.CreateMacParams{MacRequest: *req, SharedSecret: enc.SharedSecret})
+		fx.Macs = append(fx.Macs, macFixture{
+			KemKeyHex: testKemKeyHex, KemDIDKey: kemPub.DIDKey(), KeyShare: enc.KeyShare,
+			SharedSecretHex: hex.EncodeToString(enc.SharedSecret), AcceptSignature: accept,
+			URI: macURI, CID: macCID, Headers: headers,
+		})
+	}
 	for _, v := range testVectors() {
 		rec := EmbeddingRecord(ModelInfo{Model: nomic.Model, ModelDigest: nomic.ModelDigest, Dims: len(v)}, v)
 		fx.Vectors = append(fx.Vectors, vectorFixture{
@@ -136,6 +189,7 @@ func TestWritePythonFixtures(t *testing.T) {
 type pyFixtures struct {
 	DIDKey  string          `json:"didKey"`
 	Sigs    []sigFixture    `json:"sigs"`
+	Macs    []macFixture    `json:"macs"`
 	Vectors []vectorFixture `json:"vectors"`
 }
 
@@ -152,8 +206,33 @@ func TestPythonFixtures(t *testing.T) {
 	if _, err := atcrypto.ParsePublicDIDKey(fx.DIDKey); err != nil {
 		t.Fatalf("Python's did:key %q doesn't parse: %v", fx.DIDKey, err)
 	}
-	if len(fx.Sigs) == 0 || len(fx.Vectors) == 0 {
+	if len(fx.Sigs) == 0 || len(fx.Vectors) == 0 || len(fx.Macs) == 0 {
 		t.Fatal("empty Python fixtures")
+	}
+	for i, m := range fx.Macs {
+		raw, err := hex.DecodeString(m.KemKeyHex)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kem, err := atcrypto.ParsePrivateBytesP256(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		secret, err := space.Decapsulate(kem, m.KeyShare)
+		if err != nil || hex.EncodeToString(secret) != m.SharedSecretHex {
+			t.Fatalf("mac %d: Python's shared secret %s, Go's %x (%v)", i, m.SharedSecretHex, secret, err)
+		}
+		if req, err := space.ParseMacRequest([]string{m.AcceptSignature}, space.RecordMacProfile); err != nil || req == nil || req.KeyShare != m.KeyShare {
+			t.Fatalf("mac %d: Python's Accept-Signature %q: %v", i, m.AcceptSignature, err)
+		}
+		h := http.Header{}
+		for k, v := range m.Headers {
+			h.Set(k, v)
+		}
+		p := space.VerifyMacParams{Encapsulation: space.Encapsulation{KeyShare: m.KeyShare, SharedSecret: secret}, Headers: h}
+		if err := space.VerifyRecordMac(m.URI, cid.MustParse(m.CID), p); err != nil {
+			t.Fatalf("mac %d: Go can't verify Python's record MAC: %v", i, err)
+		}
 	}
 	for i, s := range fx.Sigs {
 		h := http.Header{}

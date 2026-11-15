@@ -130,7 +130,7 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request, _ *user)
 func (s *Server) handleSpaces(w http.ResponseWriter, r *http.Request, u *user) {
 	var out struct {
 		Spaces []struct {
-			URI string `json:"uri"`
+			URI string `json:"space"`
 		} `json:"spaces"`
 	}
 	if err := u.api.Get(r.Context(), "com.atproto.space.listSpaces", map[string]any{"spaceType": lex.SpaceType, "limit": 100}, &out); err != nil {
@@ -330,16 +330,15 @@ func (s *Server) handleCreateSpace(w http.ResponseWriter, r *http.Request, u *us
 		writeErr(w, apiErr(http.StatusBadRequest, "InvalidRequest", "names use letters, digits and . _ ~ : - (up to 512)"))
 		return
 	}
-	member := map[string]string{"$type": "com.atproto.simplespace.defs#memberListPolicy"}
-	body := map[string]any{"spaceType": lex.SpaceType, "skey": in.Name, "readPolicy": member, "writePolicy": member}
+	body := map[string]any{"spaceType": lex.SpaceType, "skey": in.Name, "policy": map[string]any{"$type": "com.atproto.memberspace.policy"}}
 	var out struct {
-		URI string `json:"uri"`
+		Space string `json:"space"`
 	}
-	if err := u.api.Post(r.Context(), "com.atproto.simplespace.createSpace", body, &out); err != nil {
+	if err := u.api.Post(r.Context(), "com.atproto.space.createSpace", body, &out); err != nil {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"uri": out.URI})
+	writeJSON(w, http.StatusOK, map[string]any{"uri": out.Space})
 }
 
 func (s *Server) handleGetSpace(w http.ResponseWriter, r *http.Request, u *user) {
@@ -349,7 +348,7 @@ func (s *Server) handleGetSpace(w http.ResponseWriter, r *http.Request, u *user)
 		return
 	}
 	var out json.RawMessage
-	err := u.api.Get(r.Context(), "com.atproto.simplespace.getSpace", map[string]any{"space": ref.String()}, &out)
+	err := u.api.Get(r.Context(), "com.atproto.space.getSpace", map[string]any{"space": ref.String()}, &out)
 	s.relay(w, err, out)
 }
 
@@ -375,7 +374,7 @@ func (s *Server) handleMembers(w http.ResponseWriter, r *http.Request, u *user) 
 			Members []member `json:"members"`
 			Cursor  string   `json:"cursor"`
 		}
-		if err := u.api.Get(r.Context(), "com.atproto.simplespace.listMembers", params, &page); err != nil {
+		if err := u.api.Get(r.Context(), "com.atproto.memberspace.listMembers", params, &page); err != nil {
 			s.fail(w, err)
 			return
 		}
@@ -434,8 +433,8 @@ func (s *Server) handlePutMember(w http.ResponseWriter, r *http.Request, u *user
 	if in.Write != nil {
 		write = *in.Write
 	}
-	body := map[string]any{"space": ref.String(), "did": did, "read": read, "write": write}
-	if err := u.api.Post(r.Context(), "com.atproto.simplespace.putMember", body, nil); err != nil {
+	body := map[string]any{"space": ref.String(), "members": []map[string]any{{"did": did, "read": read, "write": write}}}
+	if err := u.api.Post(r.Context(), "com.atproto.memberspace.putMembers", body, nil); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -460,7 +459,7 @@ func (s *Server) handleRemoveMember(w http.ResponseWriter, r *http.Request, u *u
 		writeErr(w, apiErr(http.StatusBadRequest, "InvalidRequest", "did must be a DID"))
 		return
 	}
-	if err := u.api.Post(r.Context(), "com.atproto.simplespace.removeMember", map[string]any{"space": ref.String(), "did": in.DID}, nil); err != nil {
+	if err := u.api.Post(r.Context(), "com.atproto.memberspace.removeMembers", map[string]any{"space": ref.String(), "dids": []string{in.DID}}, nil); err != nil {
 		s.fail(w, err)
 		return
 	}

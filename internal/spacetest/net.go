@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -21,7 +22,6 @@ import (
 	"github.com/bluesky-social/indigo/atproto/atclient"
 	"github.com/bluesky-social/indigo/atproto/atcrypto"
 	"github.com/bluesky-social/indigo/atproto/atdata"
-	"github.com/bluesky-social/indigo/atproto/auth"
 	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 	"github.com/haileyok/cocoon/space"
@@ -41,8 +41,12 @@ type Account struct {
 	ops      []op
 	rev      string
 	spaceRev string
-	// listed is whether listRepos includes the account once it has written.
+	// listed is whether listWriters includes the account once it has written:
+	// false once its removal has been forgotten.
 	listed bool
+	// removedRev, when set, is the spaceRev at which the account left the
+	// writer set, which listWriters reports as repoRemoved.
+	removedRev string
 }
 
 type op struct {
@@ -65,7 +69,8 @@ type Net struct {
 	mu            sync.Mutex
 	accounts      map[string]*Account
 	members       map[string]bool
-	registrations map[string]bool
+	registrations map[string]Registration
+	deleted       bool
 	// extra holds spaces created with createSpace, beyond Space: their
 	// members. Only Space supports credentials and records.
 	extra map[string]map[string]bool
@@ -76,6 +81,18 @@ type Net struct {
 	CorruptCommits bool // sign commits over the wrong contents
 	BadMacs        bool // MAC responses with a secret the client doesn't hold
 	OmitValues     bool // leave values off listRepoOps entries
+	// RefuseConfirmation makes the notify endpoints' confirmRegistration
+	// answers count as failed, as a host that can't reach them would find.
+	RefuseConfirmation bool
+}
+
+// Registration is an endpoint registered through authorizeSpaceSync to be
+// told of the space's updates.
+type Registration struct {
+	Endpoint string
+	Token    string
+	// Expires is when the credential from its latest authorization lapses.
+	Expires time.Time
 }
 
 // New starts a network whose authority governs one space.
@@ -90,7 +107,7 @@ func NewSpace(t testing.TB, authority, skey string) *Net {
 		T:             t,
 		accounts:      map[string]*Account{},
 		members:       map[string]bool{},
-		registrations: map[string]bool{},
+		registrations: map[string]Registration{},
 		extra:         map[string]map[string]bool{},
 		clock:         syntax.NewTIDClock(0),
 		calls:         map[string]int{},
@@ -189,11 +206,29 @@ func (n *Net) AddMember(did string) {
 	n.mu.Unlock()
 }
 
-// DropWriter removes an account from the authority's writer list, as when a
-// member is removed from the space.
-func (n *Net) DropWriter(a *Account) {
+// DropWriter removes an account from the space's writer set, as when a member
+// is removed: listWriters reports it as repoRemoved, at a new spaceRev, which
+// it returns.
+func (n *Net) DropWriter(a *Account) string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	a.removedRev = n.clock.Next().String()
+	return a.removedRev
+}
+
+// ForgetWriter makes listWriters stop mentioning an account at all, as when a
+// removal has been garbage collected.
+func (n *Net) ForgetWriter(a *Account) {
 	n.mu.Lock()
 	a.listed = false
+	n.mu.Unlock()
+}
+
+// DeleteSpace deletes the space: authorizeSpaceSync answers SpaceDeleted, and
+// the host's other methods no longer find it.
+func (n *Net) DeleteSpace() {
+	n.mu.Lock()
+	n.deleted = true
 	n.mu.Unlock()
 }
 
@@ -238,6 +273,7 @@ func (n *Net) Put(a *Account, collection, rkey string, value map[string]any) (st
 	a.ops = append(a.ops, o)
 	a.rev = o.Rev
 	a.spaceRev = n.clock.Next().String()
+	a.removedRev = ""
 	ref, _ := space.ParseRef(n.Space)
 	return ref.RecordURI(a.DID, collection, rkey), a.spaceRev
 }
@@ -259,6 +295,7 @@ func (n *Net) Delete(a *Account, collection, rkey string) string {
 	a.ops = append(a.ops, o)
 	a.rev = o.Rev
 	a.spaceRev = n.clock.Next().String()
+	a.removedRev = ""
 	return a.spaceRev
 }
 
@@ -278,26 +315,15 @@ func (t testAuth) DoWithAuth(c *http.Client, req *http.Request, _ syntax.NSID) (
 	return c.Do(req)
 }
 
-// ServiceAuth mints a service-auth JWT from the authority, as it signs the
-// notifications it forwards.
-func (n *Net) ServiceAuth(aud, lxm string) string {
-	n.T.Helper()
-	tok, err := serviceJWT(n.Authority, aud, lxm)
-	if err != nil {
-		n.T.Fatal(err)
-	}
-	return tok
-}
-
-// Registrations lists the services registered for notifications.
-func (n *Net) Registrations() []string {
+// Registrations lists the endpoints registered for notifications.
+func (n *Net) Registrations() []Registration {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	var out []string
-	for s := range n.registrations {
-		out = append(out, s)
+	out := make([]Registration, 0, len(n.registrations))
+	for _, r := range n.registrations {
+		out = append(out, r)
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].Endpoint+out[i].Token < out[j].Endpoint+out[j].Token })
 	return out
 }
 
@@ -305,79 +331,56 @@ func (n *Net) Registrations() []string {
 // read.
 var testHash = space.LexBytes(make([]byte, 32))
 
-// DeliverWrite sends a notifyWrite for an account's latest write to every
-// registered service, as the authority forwards notifications, and returns
-// the response statuses.
+// DeliverWrite sends a notifySpaceUpdate carrying a repoWrite for an
+// account's latest write to every registered endpoint, as the space host
+// forwards updates, and returns the response statuses.
 func (n *Net) DeliverWrite(a *Account, prevSpaceRev string) []int {
 	n.T.Helper()
 	n.mu.Lock()
 	// The digest is bytes, encoded as {"$bytes": …} like any lexicon bytes.
-	// The protocol renamed this field from hash in the October 22, 2026 alpha.
-	body := map[string]any{"space": n.Space, "repo": a.DID, "repoRev": a.rev, "data": testHash, "spaceRev": a.spaceRev}
+	update := map[string]any{"$type": "com.atproto.space.defs#repoWrite", "repo": a.DID, "repoRev": a.rev, "data": testHash, "spaceRev": a.spaceRev}
 	n.mu.Unlock()
 	if prevSpaceRev != "" {
-		body["prevSpaceRev"] = prevSpaceRev
+		update["prevSpaceRev"] = prevSpaceRev
 	}
+	return n.DeliverUpdate(update)
+}
+
+// DeliverUpdate sends a notifySpaceUpdate with the update to every registered
+// endpoint, each under the token it registered with, and returns the response
+// statuses.
+func (n *Net) DeliverUpdate(update map[string]any) []int {
+	n.T.Helper()
 	var statuses []int
-	for _, svc := range n.Registrations() {
-		statuses = append(statuses, n.Deliver(svc, "com.atproto.space.notifyWrite", body, n.ServiceAuth(svc, "com.atproto.space.notifyWrite")))
+	for _, reg := range n.Registrations() {
+		body := map[string]any{"space": n.Space, "token": reg.Token, "update": update}
+		statuses = append(statuses, n.Deliver(reg.Endpoint, "com.atproto.space.notifySpaceUpdate", body))
 	}
 	return statuses
 }
 
-// Deliver POSTs a body to the service's DID document endpoint with the given
-// bearer token, returning the status.
-func (n *Net) Deliver(service, nsid string, body any, bearer string) int {
+// Deliver POSTs a JSON body to a service endpoint, returning the status. A
+// space host's notifications carry no auth beyond the token in the body.
+func (n *Net) Deliver(endpoint, nsid string, body any) int {
 	n.T.Helper()
-	did, frag, _ := strings.Cut(service, "#")
-	ident, err := n.Dir.LookupDID(context.Background(), syntax.DID(did))
-	if err != nil {
-		n.T.Fatal(err)
-	}
-	endpoint := ident.GetServiceEndpoint(frag)
-	if endpoint == "" {
-		n.T.Fatalf("%s has no #%s service", did, frag)
-	}
+	_, status := n.Post(endpoint, nsid, body)
+	return status
+}
+
+// Post POSTs a JSON body to a service endpoint, returning the response body
+// and status.
+func (n *Net) Post(endpoint, nsid string, body any) ([]byte, int) {
+	n.T.Helper()
 	raw, _ := json.Marshal(body)
-	req, _ := http.NewRequest(http.MethodPost, endpoint+"/xrpc/"+nsid, bytes.NewReader(raw))
+	req, _ := http.NewRequest(http.MethodPost, strings.TrimSuffix(endpoint, "/")+"/xrpc/"+nsid, bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
-	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
-	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		n.T.Fatal(err)
 	}
-	resp.Body.Close()
-	return resp.StatusCode
-}
-
-// SignServiceAuth mints a service-auth JWT from any account.
-func (n *Net) SignServiceAuth(a *Account, aud, lxm string) string {
-	n.T.Helper()
-	tok, err := serviceJWT(a, aud, lxm)
-	if err != nil {
-		n.T.Fatal(err)
-	}
-	return tok
-}
-
-// RegisterService publishes a DID document for a service DID with one
-// service entry, so notifications can reach it.
-func (n *Net) RegisterService(did, fragment, endpoint string) {
-	n.Dir.Insert(identity.Identity{
-		DID:      syntax.DID(did),
-		Handle:   syntax.HandleInvalid,
-		Services: map[string]identity.ServiceEndpoint{fragment: {Type: "AtprotoSpaceSyncer", URL: endpoint}},
-	})
-}
-
-func serviceJWT(a *Account, aud, lxm string) (string, error) {
-	nsid, err := syntax.ParseNSID(lxm)
-	if err != nil {
-		return "", err
-	}
-	return auth.SignServiceAuth(syntax.DID(a.DID), aud, time.Minute, &nsid, a.Key)
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	return out, resp.StatusCode
 }
 
 // ---- HTTP ----
@@ -424,23 +427,33 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		}
 		return map[string]string{"token": tok}, nil
 
-	case "com.atproto.space.getSpaceCredential":
+	case "com.atproto.space.authorizeSpaceSync":
 		var body struct {
 			Space             string `json:"space"`
-			CredentialKid     string `json:"credentialKid"`
+			CredentialKey     string `json:"credentialKey"`
 			DelegationToken   string `json:"delegationToken"`
 			ClientAttestation string `json:"clientAttestation"`
+			Notify            *struct {
+				Endpoint string `json:"endpoint"`
+				Token    string `json:"token"`
+			} `json:"notify"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			return nil, &xerr{400, "InvalidRequest", err.Error()}
 		}
-		if !space.IsP256DIDKey(body.CredentialKid) {
-			return nil, &xerr{400, "InvalidRequest", "credentialKid must be a P-256 did:key"}
+		if !space.IsP256DIDKey(body.CredentialKey) {
+			return nil, &xerr{400, "InvalidRequest", "credentialKey must be a P-256 did:key"}
 		}
 		if body.Space != n.Space {
 			// This host governs one space: anything else is unknown, not
 			// refused.
 			return nil, &xerr{400, "SpaceNotFound", "Space not found"}
+		}
+		n.mu.Lock()
+		deleted := n.deleted
+		n.mu.Unlock()
+		if deleted {
+			return nil, &xerr{400, "SpaceDeleted", "Space has been deleted"}
 		}
 		// The space gates on the user, so a request without a delegation
 		// token can't learn that it exists.
@@ -463,28 +476,85 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		member := n.members[tok.Payload.Iss] || tok.Payload.Iss == n.Authority.DID
 		n.mu.Unlock()
 		if !member {
-			return nil, &xerr{403, "UserNotAuthorized", "not a member"}
+			// As in Cocoon, a refused account is told the space doesn't exist,
+			// so as not to reveal it.
+			return nil, &xerr{400, "SpaceNotFound", "Space not found"}
 		}
-		cred, err := space.CreateSpaceToken(space.TokenCredential, space.CreateTokenOpts{Iss: n.Authority.DID, Sub: n.Space, KeyID: body.CredentialKid}, n.Authority.Key)
+		if nt := body.Notify; nt != nil {
+			if nt.Endpoint == "" || nt.Token == "" || len(nt.Token) > 512 {
+				return nil, &xerr{400, "InvalidRequest", "notify needs an endpoint and a token of up to 512 characters"}
+			}
+			key := nt.Endpoint + "\x00" + nt.Token
+			n.mu.Lock()
+			_, registered := n.registrations[key]
+			n.mu.Unlock()
+			// A new registration is confirmed first: the endpoint must
+			// recognize its token for the space and echo a challenge.
+			if !registered && !n.confirm(nt.Endpoint, nt.Token) {
+				return nil, &xerr{400, "RegistrationNotConfirmed", "Notify endpoint did not confirm the registration"}
+			}
+		}
+		cred, err := space.CreateSpaceToken(space.TokenCredential, space.CreateTokenOpts{Iss: n.Authority.DID, Sub: n.Space, KeyID: body.CredentialKey}, n.Authority.Key)
 		if err != nil {
 			return nil, &xerr{500, "InternalError", err.Error()}
 		}
-		return map[string]string{"credential": cred}, nil
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		if nt := body.Notify; nt != nil {
+			parsed, err := space.ParseSpaceToken(space.TokenCredential, cred)
+			if err != nil {
+				return nil, &xerr{500, "InternalError", err.Error()}
+			}
+			n.registrations[nt.Endpoint+"\x00"+nt.Token] = Registration{Endpoint: nt.Endpoint, Token: nt.Token, Expires: time.Unix(parsed.Payload.Exp, 0)}
+		}
+		out := map[string]any{"credential": cred}
+		if rev := n.latestSpaceRev(); rev != "" {
+			out["spaceRev"] = rev
+		}
+		return out, nil
 
-	case "com.atproto.space.listRepos":
+	case "com.atproto.space.listWriters":
 		if e := n.checkCredential(r, n.Authority.DID); e != nil {
 			return nil, e
 		}
 		n.mu.Lock()
 		defer n.mu.Unlock()
-		repos := []map[string]any{}
+		if n.deleted {
+			return nil, &xerr{400, "SpaceNotFound", "Space not found"}
+		}
+		limit := 100
+		if l, err := strconv.Atoi(q.Get("limit")); err == nil && l > 0 {
+			limit = l
+		}
+		// The latest update of each repo, ordered by spaceRev.
+		type entry struct {
+			rev string
+			m   map[string]any
+		}
+		var entries []entry
 		for _, a := range n.sortedAccounts() {
-			if a.rev == "" || !a.listed {
+			if !a.listed {
 				continue
 			}
-			repos = append(repos, map[string]any{"did": a.DID, "repoRev": a.rev, "data": testHash, "spaceRev": a.spaceRev})
+			switch {
+			case a.removedRev != "":
+				entries = append(entries, entry{a.removedRev, map[string]any{"$type": "com.atproto.space.defs#repoRemoved", "repo": a.DID, "spaceRev": a.removedRev}})
+			case a.rev != "":
+				entries = append(entries, entry{a.spaceRev, map[string]any{"$type": "com.atproto.space.defs#repoWrite", "repo": a.DID, "repoRev": a.rev, "data": testHash, "spaceRev": a.spaceRev}})
+			}
 		}
-		return map[string]any{"repos": repos}, nil
+		sort.Slice(entries, func(i, j int) bool { return entries[i].rev < entries[j].rev })
+		repos := []map[string]any{}
+		for _, e := range entries {
+			if e.rev > q.Get("cursor") && len(repos) < limit {
+				repos = append(repos, e.m)
+			}
+		}
+		out := map[string]any{"repos": repos}
+		if len(repos) > 0 {
+			out["cursor"] = repos[len(repos)-1]["spaceRev"]
+		}
+		return out, nil
 
 	case "com.atproto.space.getRecord", "com.atproto.space.listRecords":
 		repo := q.Get("repo")
@@ -499,13 +569,13 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		}
 		// A record read is MAC'd when one is asked for; with a credential,
 		// one must be. listRecords carries no MAC.
-		var secret []byte
+		var mac *space.CreateMacParams
 		if nsid == "com.atproto.space.getRecord" {
-			s, e := n.macSecret(r, repo, space.RecordMacType)
+			m, e := n.macParams(r, repo, space.RecordMacProfile)
 			if e != nil {
 				return nil, e
 			}
-			secret = s
+			mac = m
 		}
 		n.mu.Lock()
 		defer n.mu.Unlock()
@@ -530,7 +600,7 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 			if e != nil {
 				return nil, e
 			}
-			n.setRecordMac(w, secret, v["uri"].(string), rec.Cid)
+			n.setRecordMac(w, mac, v["uri"].(string), rec.Cid)
 			return v, nil
 		}
 		paths := make([]string, 0, len(a.records))
@@ -607,41 +677,23 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		n.mu.Unlock()
 		return map[string]any{"uri": uri, "cid": c, "validationStatus": "unknown"}, nil
 
-	case "com.atproto.space.registerNotify":
-		if e := n.checkCredential(r, n.Authority.DID); e != nil {
-			return nil, e
-		}
-		var body struct {
-			Space   string `json:"space"`
-			Service string `json:"service"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body.Space != n.Space || body.Service == "" {
-			return nil, &xerr{400, "InvalidRequest", "bad registration"}
-		}
-		n.mu.Lock()
-		n.registrations[body.Service] = true
-		n.mu.Unlock()
-		return map[string]string{"expiresAt": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)}, nil
-
 	case "com.atproto.space.listRepoOps":
 		repo := q.Get("repo")
 		if e := n.checkCredential(r, repo); e != nil {
 			return nil, e
 		}
-		// Every page is asked for a MAC, commit or not.
-		secret, e := n.macSecret(r, repo, space.CommitMacType)
+		mac, e := n.macParams(r, repo, space.CommitMacProfile)
 		if e != nil {
 			return nil, e
 		}
-		return n.listRepoOps(w, repo, secret, q.Get("since"), q.Get("cursor"), q.Get("limit"))
+		return n.listRepoOps(w, repo, mac, q.Get("since"), q.Get("cursor"), q.Get("limit"))
 
 	case "com.atproto.space.getRepo":
 		repo := q.Get("repo")
 		if e := n.checkCredential(r, repo); e != nil {
 			return nil, e
 		}
-		secret, e := n.macSecret(r, repo, space.CommitMacType)
+		mac, e := n.macParams(r, repo, space.CommitMacProfile)
 		if e != nil {
 			return nil, e
 		}
@@ -659,8 +711,8 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		if err := space.SerializeRepo(&buf, commit, records); err != nil {
 			return nil, &xerr{500, "InternalError", err.Error()}
 		}
-		n.setCommitMac(w, secret, commit)
-		w.Header().Set("Content-Type", "application/octet-stream")
+		n.setCommitMac(w, mac, commit)
+		w.Header().Set("Content-Type", "application/vnd.dasl.star")
 		_, _ = w.Write(buf.Bytes())
 		return nil, nil
 	case "com.atproto.space.listSpaces":
@@ -688,21 +740,25 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 					continue
 				}
 			}
-			out = append(out, map[string]string{"uri": u})
+			out = append(out, map[string]string{"space": u})
 		}
 		return map[string]any{"spaces": out}, nil
 
-	case "com.atproto.simplespace.createSpace":
+	case "com.atproto.space.createSpace":
 		a := n.account(r.Header.Get("X-Test-Did"))
 		if a == nil {
 			return nil, &xerr{401, "AuthRequired", "no session"}
 		}
 		var body struct {
-			SpaceType string `json:"spaceType"`
-			Skey      string `json:"skey"`
+			SpaceType string         `json:"spaceType"`
+			Skey      string         `json:"skey"`
+			Policy    map[string]any `json:"policy"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SpaceType == "" {
 			return nil, &xerr{400, "InvalidRequest", "spaceType is required"}
+		}
+		if body.Policy["$type"] != "com.atproto.memberspace.policy" {
+			return nil, &xerr{400, "UnsupportedPolicy", "only member-list spaces are emulated"}
 		}
 		if body.Skey == "" {
 			n.mu.Lock()
@@ -719,18 +775,16 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 			return nil, &xerr{400, "SpaceAlreadyExists", "Space already exists"}
 		}
 		n.extra[uri] = map[string]bool{}
-		return map[string]string{"uri": uri}, nil
+		return map[string]string{"space": uri}, nil
 
-	case "com.atproto.simplespace.getSpace", "com.atproto.simplespace.listMembers":
+	case "com.atproto.space.getSpace", "com.atproto.memberspace.listMembers":
 		uri := q.Get("space")
 		members, e := n.ownedSpace(r, uri)
 		if e != nil {
 			return nil, e
 		}
-		if nsid == "com.atproto.simplespace.getSpace" {
-			policy := map[string]string{"$type": "com.atproto.simplespace.defs#memberListPolicy"}
-			return map[string]any{"uri": uri, "readPolicy": policy, "writePolicy": policy,
-				"appAccess": map[string]string{"$type": "com.atproto.simplespace.defs#open"}}, nil
+		if nsid == "com.atproto.space.getSpace" {
+			return map[string]any{"space": uri, "policy": map[string]string{"$type": "com.atproto.memberspace.policy"}}, nil
 		}
 		n.mu.Lock()
 		defer n.mu.Unlock()
@@ -747,33 +801,47 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		}
 		return map[string]any{"members": out}, nil
 
-	case "com.atproto.simplespace.putMember", "com.atproto.simplespace.removeMember":
+	case "com.atproto.memberspace.putMembers", "com.atproto.memberspace.removeMembers":
 		var body struct {
-			Space string `json:"space"`
-			Did   string `json:"did"`
-			Read  *bool  `json:"read"`
-			Write *bool  `json:"write"`
+			Space   string `json:"space"`
+			Members []struct {
+				Did   string `json:"did"`
+				Read  *bool  `json:"read"`
+				Write *bool  `json:"write"`
+			} `json:"members"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(raw, &body); err != nil {
 			return nil, &xerr{400, "InvalidRequest", err.Error()}
 		}
-		if _, err := syntax.ParseDID(body.Did); err != nil {
-			return nil, &xerr{400, "InvalidRequest", "did must be a DID"}
+		var dids struct {
+			DIDs []string `json:"dids"`
 		}
+		_ = json.Unmarshal(raw, &dids)
 		members, e := n.ownedSpace(r, body.Space)
 		if e != nil {
 			return nil, e
 		}
 		n.mu.Lock()
 		defer n.mu.Unlock()
-		if nsid == "com.atproto.simplespace.removeMember" {
-			delete(members, body.Did)
+		if nsid == "com.atproto.memberspace.removeMembers" {
+			for _, d := range dids.DIDs {
+				if _, err := syntax.ParseDID(d); err != nil {
+					return nil, &xerr{400, "InvalidRequest", "dids must be DIDs"}
+				}
+				delete(members, d)
+			}
 			return map[string]any{}, nil
 		}
-		if body.Read == nil || body.Write == nil {
-			return nil, &xerr{400, "InvalidRequest", "Input must have the properties \"read\" and \"write\""}
+		for _, m := range body.Members {
+			if _, err := syntax.ParseDID(m.Did); err != nil {
+				return nil, &xerr{400, "InvalidRequest", "did must be a DID"}
+			}
+			if m.Read == nil || m.Write == nil {
+				return nil, &xerr{400, "InvalidRequest", "Input/members must have the properties \"read\" and \"write\""}
+			}
+			members[m.Did] = *m.Read
 		}
-		members[body.Did] = *body.Read
 		return map[string]any{}, nil
 	}
 	return nil, &xerr{404, "MethodNotImplemented", nsid}
@@ -843,8 +911,7 @@ func (n *Net) keyFunc(ctx context.Context) space.SigningKeyFunc {
 		if err != nil {
 			return "", err
 		}
-		// The October 22, 2026 alpha issues every space token under the
-		// account's #atproto key.
+		// Every space token is issued under the account's #atproto key.
 		pub, err := ident.GetPublicKey("atproto")
 		if err != nil {
 			return "", err
@@ -874,53 +941,83 @@ func (n *Net) checkCredential(r *http.Request, audience string) *xerr {
 	return nil
 }
 
-// macSecret establishes the shared secret a response about repo's commits or
-// records is MAC'd with, from the request's Atproto-Space-Want-Mac header.
-// A read with a space credential must ask for one; the account's own session
-// read may or may not.
-func (n *Net) macSecret(r *http.Request, repo, typ string) ([]byte, *xerr) {
-	want := r.Header.Values(space.HeaderWantMac)
-	if len(want) == 0 {
+// macParams establishes what a response about repo's commits or records is
+// MAC'd with, from the request's Accept-Signature header: the shared secret
+// for the key share it carries. A read with a space credential must ask for
+// one; the account's own session read may or may not.
+func (n *Net) macParams(r *http.Request, repo, profile string) (*space.CreateMacParams, *xerr) {
+	req, err := space.ParseMacRequest(r.Header.Values(space.HeaderAcceptSignature), profile)
+	if err != nil {
+		return nil, &xerr{400, "InvalidSpaceMac", err.Error()}
+	}
+	if req == nil {
 		if r.Header.Get("X-Test-Did") == repo {
 			return nil, nil
 		}
-		return nil, &xerr{400, "BadSpaceMac", "missing Atproto-Space-Want-Mac"}
-	}
-	keyShare, err := space.ParseWantMacHeader(want, typ)
-	if err != nil {
-		return nil, &xerr{400, "BadSpaceMac", err.Error()}
+		return nil, &xerr{400, "InvalidSpaceMac", fmt.Sprintf("A MAC must be requested with tag %q", profile)}
 	}
 	n.mu.Lock()
 	a := n.accounts[repo]
 	n.mu.Unlock()
 	if a == nil || a.Kem == nil {
-		return nil, &xerr{400, "BadSpaceMac", "account has no KEM key"}
+		return nil, &xerr{400, "InvalidSpaceMac", "account has no KEM key"}
 	}
-	secret, err := space.Decapsulate(a.Kem, keyShare)
+	secret, err := space.Decapsulate(a.Kem, req.KeyShare)
 	if err != nil {
-		return nil, &xerr{400, "BadSpaceMac", err.Error()}
+		return nil, &xerr{400, "InvalidSpaceMac", err.Error()}
 	}
-	return secret, nil
+	return &space.CreateMacParams{MacRequest: *req, SharedSecret: secret}, nil
 }
 
-func (n *Net) setCommitMac(w http.ResponseWriter, secret []byte, c space.Commit) {
-	if secret == nil {
+func setMacHeaders(w http.ResponseWriter, headers map[string]string) {
+	for k, v := range headers {
+		w.Header().Set(k, v)
+	}
+}
+
+func (n *Net) setCommitMac(w http.ResponseWriter, mac *space.CreateMacParams, c space.Commit) {
+	if mac == nil {
 		return
 	}
 	if n.BadMacs {
-		secret = bytes.Repeat([]byte{0x01}, 32)
+		mac = &space.CreateMacParams{MacRequest: mac.MacRequest, SharedSecret: bytes.Repeat([]byte{0x01}, 32)}
 	}
-	w.Header().Set(space.HeaderMac, space.FormatMacHeader(space.CommitMacType, space.ComputeCommitMac(secret, c)))
+	setMacHeaders(w, space.CreateCommitMacHeaders(c, *mac))
 }
 
-func (n *Net) setRecordMac(w http.ResponseWriter, secret []byte, uri string, c cid.Cid) {
-	if secret == nil {
+func (n *Net) setRecordMac(w http.ResponseWriter, mac *space.CreateMacParams, uri string, c cid.Cid) {
+	if mac == nil {
 		return
 	}
 	if n.BadMacs {
-		secret = bytes.Repeat([]byte{0x01}, 32)
+		mac = &space.CreateMacParams{MacRequest: mac.MacRequest, SharedSecret: bytes.Repeat([]byte{0x01}, 32)}
 	}
-	w.Header().Set(space.HeaderMac, space.FormatMacHeader(space.RecordMacType, space.ComputeRecordMac(secret, uri, c)))
+	setMacHeaders(w, space.CreateRecordMacHeaders(uri, c, *mac))
+}
+
+// latestSpaceRev is the newest spaceRev of any write or removal, empty before
+// the space's first update. n.mu must be held.
+func (n *Net) latestSpaceRev() string {
+	rev := ""
+	for _, a := range n.accounts {
+		rev = max(rev, a.spaceRev, a.removedRev)
+	}
+	return rev
+}
+
+// confirm asks a notify endpoint to confirm a registration for the space, as
+// the host does before registering it: the endpoint echoes the challenge if it
+// issued the token.
+func (n *Net) confirm(endpoint, token string) bool {
+	if n.RefuseConfirmation {
+		return false
+	}
+	challenge := n.clock.Next().String()
+	out, status := n.Post(endpoint, "com.atproto.space.confirmRegistration", map[string]string{"space": n.Space, "token": token, "challenge": challenge})
+	var res struct {
+		Challenge string `json:"challenge"`
+	}
+	return status == http.StatusOK && json.Unmarshal(out, &res) == nil && res.Challenge == challenge
 }
 
 func (n *Net) commit(a *Account) (space.Commit, []space.SerializedRecord, *xerr) {
@@ -940,12 +1037,12 @@ func (n *Net) commit(a *Account) (space.Commit, []space.SerializedRecord, *xerr)
 	if n.CorruptCommits {
 		repo.SetHash.Add("bogus")
 	}
-	// Commits are no longer signed: a repo host authenticates them with the
-	// MAC it returns beside them (commits are MAC'd in the response header).
+	// Commits are not signed: a repo host authenticates them with the MAC it
+	// returns beside them, over the Atproto-Space-Commit response header.
 	return repo.ToCommit(space.CommitCtx{Space: n.Space, Repo: a.DID, Rev: a.rev}), records, nil
 }
 
-func (n *Net) listRepoOps(w http.ResponseWriter, repo string, secret []byte, since, cursor, limitStr string) (any, *xerr) {
+func (n *Net) listRepoOps(w http.ResponseWriter, repo string, mac *space.CreateMacParams, since, cursor, limitStr string) (any, *xerr) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	a := n.accounts[repo]
@@ -985,17 +1082,15 @@ func (n *Net) listRepoOps(w http.ResponseWriter, repo string, secret []byte, sin
 		}
 		ops = append(ops, m)
 	}
-	res := map[string]any{"ops": ops}
-	if end-start < limit {
-		c, _, e := n.commit(a)
-		if e != nil {
-			return nil, e
-		}
-		// A page without a commit has nothing to MAC: its ops are checked
-		// once the final page's commit is compared with the set hash.
-		n.setCommitMac(w, secret, c)
-		res["commit"] = c
-	} else {
+	// Every page carries the repo's current commit with a MAC. A full page may
+	// not be the last: it says so with a cursor.
+	c, _, e := n.commit(a)
+	if e != nil {
+		return nil, e
+	}
+	n.setCommitMac(w, mac, c)
+	res := map[string]any{"ops": ops, "commit": c}
+	if end-start >= limit {
 		res["cursor"] = strconv.Itoa(end)
 	}
 	return res, nil

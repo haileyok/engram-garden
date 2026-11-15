@@ -9,7 +9,6 @@ import base64
 import hashlib
 import json
 import math
-import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -237,7 +236,7 @@ class World:
             did = self._refresh.pop(rj)
             return json_resp(200, self._session(did, self.accounts[did].handle))
         # Everything else needs a session.
-        if nsid == "com.atproto.space.getSpaceCredential":
+        if nsid == "com.atproto.space.authorizeSpaceSync":
             return self._exchange(req, body)
         tok = req.headers.get("authorization", "").removeprefix("Bearer ")
         # Credentialed reads at the authority's PDS (the space config).
@@ -259,11 +258,11 @@ class World:
         return {"did": did, "handle": handle, "accessJwt": access, "refreshJwt": refresh}
 
     def _exchange(self, req: httpx.Request, body: dict[str, Any]) -> httpx.Response:
-        """getSpaceCredential: the request's assertions are in its body, not its headers."""
+        """authorizeSpaceSync: the request's assertions are in its body, not its headers."""
         self.exchanges += 1
-        kid = body.get("credentialKid", "")
+        kid = body.get("credentialKey", "")
         if not kid.startswith("did:key:"):
-            return xrpc_err(400, "InvalidRequest", "credentialKid must be a P-256 did:key")
+            return xrpc_err(400, "InvalidRequest", "credentialKey must be a P-256 did:key")
         space_uri = body.get("space")
         # A space this fake knows of (the authority's own, or one created here) exists; anything
         # else doesn't, and a space that gates on the user can't be found without a delegation
@@ -284,10 +283,11 @@ class World:
         checked = self._check_credentialed(req, q.get("repo"))
         if isinstance(checked, httpx.Response):
             return checked
-        if nsid == "com.atproto.space.listRepos":
+        if nsid == "com.atproto.space.listWriters":
             sp = q["space"]
             dids = sorted({r for (s2, r, _), recs in self.records.items() if s2 == sp and recs})
-            return json_resp(200, {"repos": [{"did": d} for d in dids]})
+            writes = [{"$type": "com.atproto.space.defs#repoWrite", "repo": d} for d in dids]
+            return json_resp(200, {"repos": writes})
         if nsid == "com.atproto.space.listRecords":
             if q.get("repo") in self.reject_member_reads:
                 return xrpc_err(502, "UpstreamFailure", "that PDS is down")
@@ -305,23 +305,22 @@ class World:
 
     def _record_mac(self, req: httpx.Request, resp: dict[str, Any], q: httpx.QueryParams) -> httpx.Response:
         """Answer a getRecord with the MAC the request asked for. A credential read must ask."""
-        want = req.headers.get(space.HEADER_WANT_MAC, "")
-        if not want:
-            return xrpc_err(400, "BadSpaceMac", "missing Atproto-Space-Want-Mac")
-        m = re.fullmatch(rf'type="{space.RECORD_MAC_TYPE}", ver={space.RECORD_MAC_VERSION}, key_share="([^"]+)"', want)
-        if not m:
-            return xrpc_err(400, "BadSpaceMac", "malformed Atproto-Space-Want-Mac")
         try:
-            secret = space.decapsulate(self.kem_of(q["repo"]), m.group(1))
+            request = space.parse_mac_request(
+                req.headers.get_list(space.HEADER_ACCEPT_SIGNATURE), space.RECORD_MAC_PROFILE
+            )
         except ValueError as e:
-            return xrpc_err(400, "BadSpaceMac", str(e))
+            return xrpc_err(400, "InvalidSpaceMac", str(e))
+        if request is None:
+            return xrpc_err(400, "InvalidSpaceMac", f'A MAC must be requested with tag "{space.RECORD_MAC_PROFILE}"')
+        try:
+            secret = space.decapsulate(self.kem_of(q["repo"]), request.key_share)
+        except ValueError as e:
+            return xrpc_err(400, "InvalidSpaceMac", str(e))
         if self.bad_macs:
             secret = bytes(32)
-        mac = space.compute_record_mac(secret, resp["uri"], space.cid_bytes(resp["cid"]))
-        header = (
-            f'type="{space.RECORD_MAC_TYPE}", ver={space.RECORD_MAC_VERSION}, mac=:{base64.b64encode(mac).decode()}:'
-        )
-        return httpx.Response(200, json=resp, headers={space.HEADER_MAC: header})
+        headers = space.create_record_mac_headers(resp["uri"], resp["cid"], request, secret)
+        return httpx.Response(200, json=resp, headers=headers)
 
     def _pds_session(self, did: str, nsid: str, q: httpx.QueryParams, body: dict[str, Any]) -> httpx.Response:
         acct = self.accounts[did]
@@ -389,21 +388,23 @@ class World:
         self, did: str, acct: Account, nsid: str, q: httpx.QueryParams, body: dict[str, Any]
     ) -> httpx.Response:
         if nsid == "com.atproto.space.listSpaces":
-            return json_resp(200, {"spaces": [{"uri": u} for u in acct.member_of]})
-        if nsid == "com.atproto.simplespace.createSpace":
+            return json_resp(200, {"spaces": [{"space": u} for u in acct.member_of]})
+        if nsid == "com.atproto.space.createSpace":
             self.spaces_created.append(body)
             uri = f"at://{did}/space/{body['spaceType']}/{body['skey']}"
             self.members[uri] = {did: (True, True)}
             acct.member_of[uri] = (True, True)
-            return json_resp(200, {"uri": uri})
-        if nsid == "com.atproto.simplespace.listMembers":
+            return json_resp(200, {"space": uri})
+        if nsid == "com.atproto.memberspace.listMembers":
             ms = self.members.get(q["space"], {})
             return json_resp(200, {"members": [{"did": d, "read": r, "write": w} for d, (r, w) in ms.items()]})
-        if nsid == "com.atproto.simplespace.putMember":
-            self.members.setdefault(body["space"], {})[body["did"]] = (body["read"], body["write"])
+        if nsid == "com.atproto.memberspace.putMembers":
+            for m in body["members"]:
+                self.members.setdefault(body["space"], {})[m["did"]] = (m["read"], m["write"])
             return json_resp(200, {})
-        if nsid == "com.atproto.simplespace.removeMember":
-            self.members.get(body["space"], {}).pop(body["did"], None)
+        if nsid == "com.atproto.memberspace.removeMembers":
+            for d in body["dids"]:
+                self.members.get(body["space"], {}).pop(d, None)
             return json_resp(200, {})
         return xrpc_err(404, "MethodNotImplemented", nsid)
 

@@ -153,7 +153,7 @@ async def test_config_record_with_a_bad_mac_is_refused(world: World, http):
     """The authority's config is read with a space credential, so its record must come back MAC'd."""
     world.bad_macs = True
     async with await eg.open_spaces(make_settings(), http=http) as s:
-        with pytest.raises(eg.EngramError, match="MAC did not verify"):
+        with pytest.raises(eg.EngramError, match="MAC does not match"):
             await s.remember("hello")
         assert world.memories(SPACE) == {}
 

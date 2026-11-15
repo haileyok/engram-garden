@@ -1127,7 +1127,7 @@
     {
       "type": "timeseries",
       "title": "Notification registrations",
-      "description": "Requests asking authorities to send write notifications; renewed about every 12 hours per space.",
+      "description": "Authorizations that register the appview for a space's updates; a registration lasts as long as its credential, about 10 minutes, so each space renews about once per poll.",
       "id": 20,
       "datasource": {
         "type": "prometheus",

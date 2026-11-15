@@ -1,26 +1,56 @@
 {
-  "didKey": "did:key:zDnaefU8kBCYycEauRVuzSAvwK58ZwqsUpEB4HghRFhtFZDPC",
+  "didKey": "did:key:zDnaebXP39YEc2oqpQRjL1FnVwW6Ysx5uSXSQbSgxwyyP4Fiw",
   "sigs": [
     {
       "authorization": "Atproto-Space-Credential eyJ.credential.jwt",
       "audience": "did:web:api.engram.garden",
-      "keyId": "did:key:zDnaefU8kBCYycEauRVuzSAvwK58ZwqsUpEB4HghRFhtFZDPC",
+      "keyId": "did:key:zDnaebXP39YEc2oqpQRjL1FnVwW6Ysx5uSXSQbSgxwyyP4Fiw",
       "headers": {
         "authorization": "Atproto-Space-Credential eyJ.credential.jwt",
         "atproto-space-audience": "did:web:api.engram.garden",
-        "signature-input": "atproto-space-credential=(\"authorization\" \"atproto-space-audience\");tag=\"atproto-space-credential\"",
-        "signature": "atproto-space-credential=:3GDYcSsLgXQi8Pud6jNVfBQGwkQ0T39uWp3ATIbfPs1pZx3KzJk2PS6MNGiCET63SUNIu30cp9Rmwp1ys8iHNw==:"
+        "signature-input": "sig=(\"authorization\" \"atproto-space-audience\");tag=\"atproto-space-credential\"",
+        "signature": "sig=:pF21nl0F3dlfgWry2XctRS7zks51nXoqNhf5cHvZfgAS4m2Y9GzjVHQRKQ+5+r73gpXBy7GoTAoR7AoSh2yo9w==:"
       }
     },
     {
       "authorization": "Atproto-Space-Credential eyJ.credential.jwt",
       "audience": "did:plc:abcdefghijklmnopqrstuvwx",
-      "keyId": "did:key:zDnaefU8kBCYycEauRVuzSAvwK58ZwqsUpEB4HghRFhtFZDPC",
+      "keyId": "did:key:zDnaebXP39YEc2oqpQRjL1FnVwW6Ysx5uSXSQbSgxwyyP4Fiw",
       "headers": {
         "authorization": "Atproto-Space-Credential eyJ.credential.jwt",
         "atproto-space-audience": "did:plc:abcdefghijklmnopqrstuvwx",
-        "signature-input": "atproto-space-credential=(\"authorization\" \"atproto-space-audience\");tag=\"atproto-space-credential\"",
-        "signature": "atproto-space-credential=:DX02KJ2VNNwNbRwhkbXRcBUHncQIjH1cbPCoJdTA8rskcwa1+ooqkpwshiJUhci5aJmMp3r9uFthRElPIGj5Jg==:"
+        "signature-input": "sig=(\"authorization\" \"atproto-space-audience\");tag=\"atproto-space-credential\"",
+        "signature": "sig=:Lk6HfKwsAb3eoayvhiUpgtuK79FdR7feGcYSBzG9CIpiNrvSVZdlzZLObvSzZKm9OOE5Ym4VM+qdqv7okvLbPQ==:"
+      }
+    }
+  ],
+  "macs": [
+    {
+      "kemKeyHex": "2f2e2d2c2b2a292827262524232221201f1e1d1c1b1a19181716151413121110",
+      "kemDidKey": "did:key:zDnaeuZPZ1tY8i1EwSGzBzBrxAJLUzuZwG19Un7oygutkhos9",
+      "keyShare": "did:key:zDnaeY1FKspGdVVSe3rpeZLnyQGXhV3r5346q7wKYyg7htpHE",
+      "sharedSecretHex": "f4a9838ddc09bcc9104d28f36c934cebcbeae42cc2e0d7e998209b94ce07f4ed",
+      "acceptSignature": "mac=(\"atproto-space-record\";sf);keyid=\"did:key:zDnaeY1FKspGdVVSe3rpeZLnyQGXhV3r5346q7wKYyg7htpHE\";tag=\"atproto-space-record\"",
+      "uri": "at://did:plc:authority/space/garden.engram.space/memory/did:plc:alice/garden.engram.memory/3kbcq3p7ad400",
+      "cid": "bafyreigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+      "headers": {
+        "atproto-space-record": "uri=\"at://did:plc:authority/space/garden.engram.space/memory/did:plc:alice/garden.engram.memory/3kbcq3p7ad400\", cid=\"bafyreigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi\"",
+        "signature-input": "mac=(\"atproto-space-record\";sf);keyid=\"did:key:zDnaeY1FKspGdVVSe3rpeZLnyQGXhV3r5346q7wKYyg7htpHE\";tag=\"atproto-space-record\"",
+        "signature": "mac=:7VUh7gh57wH89QhWDQN9yHSUW7xQWfFjH/Z6XXBkN9w=:"
+      }
+    },
+    {
+      "kemKeyHex": "2f2e2d2c2b2a292827262524232221201f1e1d1c1b1a19181716151413121110",
+      "kemDidKey": "did:key:zDnaeuZPZ1tY8i1EwSGzBzBrxAJLUzuZwG19Un7oygutkhos9",
+      "keyShare": "did:key:zDnaeZf8NnH1et91uSL7MAgub89SCkH5DcuiVifveMW6iyci5",
+      "sharedSecretHex": "5b053e7a7c0f40da2b6636320d5c6b0601cc76835b59e08fd726aaa595068442",
+      "acceptSignature": "mac=(\"atproto-space-record\";sf);keyid=\"did:key:zDnaeZf8NnH1et91uSL7MAgub89SCkH5DcuiVifveMW6iyci5\";tag=\"atproto-space-record\"",
+      "uri": "at://did:plc:authority/space/garden.engram.space/memory/did:plc:alice/garden.engram.memory/3kbcq3p7ad400",
+      "cid": "bafyreigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+      "headers": {
+        "atproto-space-record": "uri=\"at://did:plc:authority/space/garden.engram.space/memory/did:plc:alice/garden.engram.memory/3kbcq3p7ad400\", cid=\"bafyreigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi\"",
+        "signature-input": "mac=(\"atproto-space-record\";sf);keyid=\"did:key:zDnaeZf8NnH1et91uSL7MAgub89SCkH5DcuiVifveMW6iyci5\";tag=\"atproto-space-record\"",
+        "signature": "mac=:a1vtuysyc4GSx9KFLrYXqn/4QXK7VIBEViEVBwHDRRk=:"
       }
     }
   ],

@@ -99,7 +99,7 @@ type spaceInfo struct {
 func (s *Server) listSpaces(ctx context.Context, u *user) ([]spaceInfo, error) {
 	var out struct {
 		Spaces []struct {
-			URI string `json:"uri"`
+			URI string `json:"space"`
 		} `json:"spaces"`
 	}
 	if err := u.api.Get(ctx, "com.atproto.space.listSpaces", map[string]any{"spaceType": lex.SpaceType, "limit": 100}, &out); err != nil {

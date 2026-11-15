@@ -6,6 +6,7 @@ package appview
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bluesky-social/indigo/atproto/auth"
 	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 	"github.com/haileyok/cocoon/space"
@@ -31,9 +31,6 @@ import (
 	"github.com/haileyok/engram-garden/internal/spaceclient"
 	"github.com/haileyok/engram-garden/internal/spacestore"
 )
-
-// SyncerFragment names the DID document service that receives notifications.
-const SyncerFragment = "atproto_space_syncer"
 
 // ForwardedHeader marks a request one node forwarded to a space's owner.
 const ForwardedHeader = "X-Engram-Forwarded-By"
@@ -138,8 +135,17 @@ func (s *Server) acquireNodeSlot(ctx context.Context) (func(), error) {
 	}
 }
 
-// ServiceID is the identifier notifications are addressed to.
-func (s *Server) ServiceID() string { return s.ServiceDID + "#" + SyncerFragment }
+// Notify is the registration this service asks a space's host for, to be
+// told of the space's updates: its own address, and a token only it can mint,
+// which the host presents back with every update and when it confirms the
+// registration.
+func (s *Server) Notify(spaceURI string) spaceclient.Notify {
+	return spaceclient.Notify{Endpoint: strings.TrimSuffix(s.PublicURL, "/"), Token: s.notifyToken(spaceURI)}
+}
+
+// notifyToken is the token registered for a space. It is derived from a key
+// every node shares, so whichever node the host reaches can check it.
+func (s *Server) notifyToken(spaceURI string) string { return s.mac("notify." + spaceURI) }
 
 func (s *Server) log() *slog.Logger {
 	if s.Log == nil {
@@ -173,8 +179,8 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /oauth/client-metadata.json", docs.ServeMetadata)
 		mux.HandleFunc("GET /oauth/jwks.json", docs.ServeJWKS)
 	}
-	mux.HandleFunc("POST /xrpc/com.atproto.space.notifyWrite", s.ownedBody(s.handleNotifyWrite))
-	mux.HandleFunc("POST /xrpc/com.atproto.space.notifySpaceDeleted", s.ownedBody(s.handleNotifySpaceDeleted))
+	mux.HandleFunc("POST /xrpc/com.atproto.space.confirmRegistration", s.ownedBody(s.handleConfirmRegistration))
+	mux.HandleFunc("POST /xrpc/com.atproto.space.notifySpaceUpdate", s.ownedBody(s.handleNotifySpaceUpdate))
 	mux.HandleFunc("GET /.well-known/did.json", s.handleDIDDoc)
 	mux.HandleFunc("GET /_health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -822,49 +828,162 @@ func (s *Server) handleWarm(w http.ResponseWriter, r *http.Request) {
 
 // ---- notifications ----
 
-// authorizeAuthority checks a notification carries service auth from the
-// space's authority, addressed to this service for the method.
-func (s *Server) authorizeAuthority(r *http.Request, spaceURI, lxm string) error {
+// checkToken checks a request from a space's host carries the token this
+// service registered for the space, which is what authenticates it. A host
+// asked to notify an endpoint it knows nothing else about can only be told by
+// the token that this service asked.
+func (s *Server) checkToken(spaceURI, token string) error {
 	if !s.indexes(spaceURI) {
 		return errf(http.StatusBadRequest, "UnknownSpace", "this service does not index %s", spaceURI)
 	}
-	ref, err := space.ParseRef(spaceURI)
-	if err != nil {
-		return errf(http.StatusBadRequest, "InvalidRequest", "bad space: %v", err)
-	}
-	jwt, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok {
-		return errf(http.StatusUnauthorized, "AuthRequired", "requires service auth")
-	}
-	nsid := syntax.NSID(lxm)
-	v := auth.ServiceAuthValidator{Audience: s.ServiceID(), Dir: s.Dir}
-	iss, err := v.Validate(r.Context(), jwt, &nsid)
-	if err != nil {
-		return errf(http.StatusUnauthorized, "InvalidToken", "%v", err)
-	}
-	if iss.String() != ref.Authority {
-		return errf(http.StatusForbidden, "Forbidden", "only the space authority may notify")
+	if token == "" || !hmac.Equal([]byte(token), []byte(s.notifyToken(spaceURI))) {
+		return errf(http.StatusForbidden, "InvalidToken", "this service did not register that token for %s", spaceURI)
 	}
 	return nil
 }
 
-func (s *Server) handleNotifyWrite(w http.ResponseWriter, r *http.Request) {
-	var n indexer.Notification
-	if err := json.NewDecoder(r.Body).Decode(&n); err != nil || n.Space == "" || n.Repo == "" {
-		// Authorities don't retry a rejected notification, so the write
-		// waits for the periodic sync: worth a line in the log.
-		s.log().Warn("rejected a write notification", "reason", "bad body", "err", err)
-		notifications.WithLabelValues("write", "bad_body").Inc()
-		s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "bad notification body"))
+// handleConfirmRegistration answers a space host checking, before it
+// registers this service for a space's updates, that the registration was
+// asked for: it echoes the host's challenge if the token is the one issued
+// for the space.
+func (s *Server) handleConfirmRegistration(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Space     string `json:"space"`
+		Token     string `json:"token"`
+		Challenge string `json:"challenge"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&in); err != nil || in.Space == "" || in.Challenge == "" {
+		s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "bad body"))
 		return
 	}
-	if err := s.authorizeAuthority(r, n.Space, "com.atproto.space.notifyWrite"); err != nil {
-		s.log().Warn("rejected a write notification", "space", n.Space, "repo", n.Repo, "err", err)
-		notifications.WithLabelValues("write", rejection(err)).Inc()
+	if err := s.checkToken(in.Space, in.Token); err != nil {
+		s.log().Warn("refused to confirm a registration", "space", in.Space, "err", err)
 		s.writeErr(w, err)
 		return
 	}
-	if !s.granted(r.Context(), n.Space) {
+	writeJSON(w, http.StatusOK, map[string]string{"challenge": in.Challenge})
+}
+
+// updateType names the kind of a notifySpaceUpdate update.
+type updateType struct {
+	Type string `json:"$type"`
+}
+
+const (
+	typeRepoWrite           = "com.atproto.space.defs#repoWrite"
+	typeRepoRemoved         = "com.atproto.space.defs#repoRemoved"
+	typeSpaceDeleted        = "com.atproto.space.notifySpaceUpdate#spaceDeleted"
+	typeRegistrationExpired = "com.atproto.space.notifySpaceUpdate#registrationExpired"
+)
+
+// handleNotifySpaceUpdate takes an update from a space's host: a repo wrote
+// or left the space, the space was deleted, or this service's registration
+// expired. The token in the body is the only authentication.
+func (s *Server) handleNotifySpaceUpdate(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Space  string          `json:"space"`
+		Token  string          `json:"token"`
+		Update json.RawMessage `json:"update"`
+	}
+	var kind updateType
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil || in.Space == "" || json.Unmarshal(in.Update, &kind) != nil {
+		// Hosts don't retry a rejected update, so a write waits for the
+		// periodic sync: worth a line in the log.
+		s.log().Warn("rejected a space update", "reason", "bad body", "err", err)
+		notifications.WithLabelValues("update", "bad_body").Inc()
+		s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "bad notification body"))
+		return
+	}
+	if err := s.checkToken(in.Space, in.Token); err != nil {
+		s.log().Warn("rejected a space update", "space", in.Space, "err", err)
+		notifications.WithLabelValues(updateLabel(kind.Type), rejection(err)).Inc()
+		s.writeErr(w, err)
+		return
+	}
+	switch kind.Type {
+	case typeRepoWrite:
+		var n indexer.Notification
+		if err := json.Unmarshal(in.Update, &n); err != nil || n.Repo == "" {
+			notifications.WithLabelValues("write", "bad_body").Inc()
+			s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "bad repoWrite"))
+			return
+		}
+		n.Space = in.Space
+		s.handleWrite(w, n)
+	case typeRepoRemoved:
+		var n indexer.Removal
+		if err := json.Unmarshal(in.Update, &n); err != nil || n.Repo == "" {
+			notifications.WithLabelValues("removed", "bad_body").Inc()
+			s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "bad repoRemoved"))
+			return
+		}
+		n.Space = in.Space
+		s.handleRemoved(w, n)
+	case typeSpaceDeleted:
+		s.handleDeleted(w, in.Space)
+	case typeRegistrationExpired:
+		s.handleExpired(w, in.Space)
+	default:
+		// An update kind this service doesn't know is not an error: the
+		// periodic sync covers whatever it said.
+		notifications.WithLabelValues("other", "ignored").Inc()
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+func updateLabel(typ string) string {
+	switch typ {
+	case typeRepoWrite:
+		return "write"
+	case typeRepoRemoved:
+		return "removed"
+	case typeSpaceDeleted:
+		return "space_deleted"
+	case typeRegistrationExpired:
+		return "expired"
+	}
+	return "other"
+}
+
+// background runs a space's work after a notification is answered, within the
+// space's slot and the node's, so a burst of updates doesn't start a burst of
+// syncs. A space already at its cap gets a follow-up space sync from the
+// running job instead. It reports whether the work was started.
+func (s *Server) background(spaceURI, label string, work func(ctx context.Context) (needSpaceSync bool)) bool {
+	releaseSpace, ok := s.trySpaceSlot(spaceURI)
+	if !ok {
+		s.followUp.Store(spaceURI, true)
+		notifications.WithLabelValues(label, "deferred").Inc()
+		return false
+	}
+	notifications.WithLabelValues(label, "accepted").Inc()
+	s.Jobs.Add(1)
+	go func() {
+		defer s.Jobs.Done()
+		defer releaseSpace()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		releaseNode, err := s.acquireNodeSlot(ctx)
+		if err != nil {
+			notifiedSyncs.WithLabelValues("no_slot").Inc()
+			s.log().Warn("notified sync never got a slot; the periodic sync will catch up", "space", spaceURI)
+			return
+		}
+		defer releaseNode()
+		needSync := work(ctx)
+		if _, more := s.followUp.LoadAndDelete(spaceURI); more {
+			needSync = true
+		}
+		if needSync {
+			s.log().Info("syncing the whole space", "space", spaceURI)
+			s.syncSpaceOnce(ctx, spaceURI)
+		}
+	}()
+	return true
+}
+
+func (s *Server) handleWrite(w http.ResponseWriter, n indexer.Notification) {
+	if !s.granted(context.Background(), n.Space) {
 		// Nothing can be read until the authority approves, however often
 		// this is retried. Say so, since the write will never be searchable.
 		notifications.WithLabelValues("write", "not_granted").Inc()
@@ -875,42 +994,81 @@ func (s *Server) handleNotifyWrite(w http.ResponseWriter, r *http.Request) {
 	// A write is a sign the space is in use: start loading it now.
 	s.Store.Warm(n.Space)
 	// Sync in the background; the periodic space sync catches anything
-	// that fails here. A space already at its cap gets a follow-up space
-	// sync from a running job instead of another goroutine.
-	releaseSpace, ok := s.trySpaceSlot(n.Space)
-	if !ok {
-		s.followUp.Store(n.Space, true)
-		notifications.WithLabelValues("write", "deferred").Inc()
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	notifications.WithLabelValues("write", "accepted").Inc()
-	s.Jobs.Add(1)
-	go func() {
-		defer s.Jobs.Done()
-		defer releaseSpace()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		releaseNode, err := s.acquireNodeSlot(ctx)
-		if err != nil {
-			notifiedSyncs.WithLabelValues("no_slot").Inc()
-			s.log().Warn("notified sync never got a slot; the periodic sync will catch up", "space", n.Space)
-			return
-		}
-		defer releaseNode()
+	// that fails here.
+	s.background(n.Space, "write", func(ctx context.Context) bool {
 		needSync, err := s.Indexer.HandleWrite(ctx, n)
 		notifiedSyncs.WithLabelValues(metrics.Result(err)).Inc()
 		if err != nil {
 			s.log().Warn("notified sync failed", "space", n.Space, "repo", n.Repo, "err", err)
 		}
-		if _, more := s.followUp.LoadAndDelete(n.Space); more {
-			needSync = true
+		return needSync
+	})
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleRemoved(w http.ResponseWriter, n indexer.Removal) {
+	if !s.granted(context.Background(), n.Space) {
+		notifications.WithLabelValues("removed", "not_granted").Inc()
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	s.Store.Warm(n.Space)
+	s.background(n.Space, "removed", func(ctx context.Context) bool {
+		needSync, err := s.Indexer.HandleRemoved(ctx, n)
+		notifiedSyncs.WithLabelValues(metrics.Result(err)).Inc()
+		if err != nil {
+			s.log().Warn("handling a repo's removal failed", "space", n.Space, "repo", n.Repo, "err", err)
+			return true
 		}
-		if needSync {
-			s.log().Info("syncing the whole space", "space", n.Space)
-			s.syncSpaceOnce(ctx, n.Space)
+		return needSync
+	})
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleDeleted takes the host's word that a space was deleted only after
+// asking it again: the notice carries nothing but the token.
+func (s *Server) handleDeleted(w http.ResponseWriter, spaceURI string) {
+	if !s.granted(context.Background(), spaceURI) {
+		notifications.WithLabelValues("space_deleted", "not_granted").Inc()
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	notifications.WithLabelValues("space_deleted", "accepted").Inc()
+	s.Jobs.Add(1)
+	go func() {
+		defer s.Jobs.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		deleted, err := s.Indexer.ConfirmDeleted(ctx, spaceURI)
+		switch {
+		case deleted:
+			s.log().Info("space deleted", "space", spaceURI)
+		case err != nil:
+			s.log().Warn("could not confirm a space's deletion; the periodic sync will", "space", spaceURI, "err", err)
+		default:
+			s.log().Warn("a host reported a space deleted, but still authorizes it", "space", spaceURI)
 		}
 	}()
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleExpired renews a registration the host says has lapsed, and syncs
+// what was missed meanwhile.
+func (s *Server) handleExpired(w http.ResponseWriter, spaceURI string) {
+	if !s.granted(context.Background(), spaceURI) {
+		notifications.WithLabelValues("expired", "not_granted").Inc()
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	s.background(spaceURI, "expired", func(ctx context.Context) bool {
+		_, err := s.Indexer.Register(ctx, spaceURI, s.Notify(spaceURI))
+		notifyRegistrations.WithLabelValues(metrics.Result(err)).Inc()
+		if err != nil {
+			s.log().Warn("renewing an expired registration failed", "space", spaceURI, "err", err)
+		}
+		// Updates after the registration lapsed were never sent.
+		return true
+	})
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -955,31 +1113,6 @@ func (s *Server) syncSpaceOnce(ctx context.Context, spaceURI string) {
 	}
 }
 
-func (s *Server) handleNotifySpaceDeleted(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Space string `json:"space"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Space == "" {
-		notifications.WithLabelValues("space_deleted", "bad_body").Inc()
-		s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "bad body"))
-		return
-	}
-	if err := s.authorizeAuthority(r, body.Space, "com.atproto.space.notifySpaceDeleted"); err != nil {
-		s.log().Warn("rejected a space deletion notification", "space", body.Space, "err", err)
-		notifications.WithLabelValues("space_deleted", rejection(err)).Inc()
-		s.writeErr(w, err)
-		return
-	}
-	if err := s.Store.MarkSpaceDeleted(r.Context(), body.Space); err != nil {
-		notifications.WithLabelValues("space_deleted", "error").Inc()
-		s.writeErr(w, err)
-		return
-	}
-	notifications.WithLabelValues("space_deleted", "accepted").Inc()
-	s.log().Info("space deleted", "space", body.Space)
-	w.WriteHeader(http.StatusOK)
-}
-
 // ---- did:web ----
 
 func (s *Server) handleDIDDoc(w http.ResponseWriter, r *http.Request) {
@@ -990,11 +1123,6 @@ func (s *Server) handleDIDDoc(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"@context": []string{"https://www.w3.org/ns/did/v1"},
 		"id":       s.ServiceDID,
-		"service": []map[string]string{{
-			"id":              "#" + SyncerFragment,
-			"type":            "AtprotoSpaceSyncer",
-			"serviceEndpoint": s.PublicURL,
-		}},
 	})
 }
 
@@ -1002,7 +1130,8 @@ func (s *Server) handleDIDDoc(w http.ResponseWriter, r *http.Request) {
 
 // Run keeps the index current until ctx ends. For every space this node
 // owns, it syncs at start and on each poll tick, and renews notification
-// registrations when the service is publicly reachable. The coordinator
+// registrations (which last as long as a credential, minutes) before the next
+// tick would find them lapsed, when the service is publicly reachable. The coordinator
 // also clears abandoned sign-ins.
 func (s *Server) Run(ctx context.Context, poll time.Duration, register bool) {
 	renewAt := map[string]time.Time{}
@@ -1028,15 +1157,15 @@ func (s *Server) Run(ctx context.Context, poll time.Duration, register bool) {
 			}
 			owned++
 			if register && time.Now().After(renewAt[sp]) {
-				exp, err := s.Indexer.Register(ctx, sp, s.ServiceID())
+				exp, err := s.Indexer.Register(ctx, sp, s.Notify(sp))
 				notifyRegistrations.WithLabelValues(metrics.Result(err)).Inc()
 				if err != nil {
 					s.log().Warn("registering for notifications failed", "space", sp, "err", err)
 					renewAt[sp] = time.Now().Add(5 * time.Minute)
 				} else {
-					// Renew well before the registration lapses.
-					renewAt[sp] = time.Now().Add(max(time.Minute, time.Until(exp)/2))
-					s.log().Info("registered for notifications", "space", sp, "service", s.ServiceID(), "expires", exp)
+					// Renew before the registration would lapse between ticks.
+					renewAt[sp] = exp.Add(-poll - 30*time.Second)
+					s.log().Info("registered for notifications", "space", sp, "endpoint", s.PublicURL, "expires", exp)
 				}
 			}
 			s.syncSpaceOnce(ctx, sp)

@@ -26,7 +26,7 @@ async def test_create_space_declares_the_model_and_becomes_usable(world: World, 
         assert "Add members" in out.next
         body = world.spaces_created[0]
         assert body["spaceType"] == "garden.engram.space" and body["skey"] == "mine"
-        assert body["readPolicy"] == {"$type": "com.atproto.simplespace.defs#memberListPolicy"}
+        assert body["policy"] == {"$type": "com.atproto.memberspace.policy"}
         sp.save_settings()
         assert saved[0].default_space == "mine"
         assert [e.uri for e in saved[0].spaces] == [out.space.uri]

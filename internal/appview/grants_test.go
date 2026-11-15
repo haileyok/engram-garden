@@ -505,12 +505,12 @@ func TestGrantSyncWaitsForASlot(t *testing.T) {
 		t.Fatalf("grant: %d %s", resp.StatusCode, page)
 	}
 	time.Sleep(50 * time.Millisecond)
-	if n := f.net.Calls("com.atproto.space.listRepos"); n != 0 {
+	if n := f.net.Calls("com.atproto.space.listWriters"); n != 0 {
 		t.Fatalf("synced while every slot was taken (%d listRepos calls)", n)
 	}
 	hold()
 	f.srv.Jobs.Wait()
-	if f.net.Calls("com.atproto.space.listRepos") == 0 {
+	if f.net.Calls("com.atproto.space.listWriters") == 0 {
 		t.Fatal("never synced")
 	}
 }

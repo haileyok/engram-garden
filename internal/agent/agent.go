@@ -102,7 +102,7 @@ func (t *Agent) Config(ctx context.Context, refresh bool) (*lex.Config, error) {
 	uri := ref.RecordURI(auth, lex.ConfigCollection, lex.ConfigRkey)
 	var rec map[string]any
 	for attempt := 0; ; attempt++ {
-		mac, err := t.Client.QueryMac(ctx, host, t.Space, auth, space.RecordMacType, "com.atproto.space.getRecord", params, &out)
+		mac, err := t.Client.QueryMac(ctx, host, t.Space, auth, space.RecordMacProfile, "com.atproto.space.getRecord", params, &out)
 		if err != nil {
 			if spaceclient.IsError(err, "RecordNotFound") || spaceclient.IsError(err, "RepoNotFound") {
 				return nil, errors.New("the space hasn't declared an embedding model yet: its authority needs to declare one (engram model --set <model>)")
@@ -113,18 +113,14 @@ func (t *Agent) Config(ctx context.Context, refresh bool) (*lex.Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("the space's config: %w", err)
 		}
-		m, err := mac.RecordMac()
-		if err != nil {
-			return nil, fmt.Errorf("reading the space's config: %w", err)
-		}
-		verified := space.VerifyRecord(uri, out.CID, rec, space.VerifyRecordParams{URI: uri, SharedSecret: mac.SharedSecret, Mac: m})
-		if verified {
+		verifyErr := space.VerifyRecord(uri, out.CID, rec, space.VerifyRecordParams{URI: uri, VerifyMacParams: mac.Params()})
+		if verifyErr == nil {
 			break
 		}
 		// The authority's #atproto_kem key may have rotated: refetch its DID
 		// document and try once more.
 		if attempt > 0 || t.Client.Dir == nil {
-			return nil, errors.New("reading the space's config: the record's MAC did not verify")
+			return nil, fmt.Errorf("reading the space's config: %w", verifyErr)
 		}
 		if d, err := syntax.ParseDID(auth); err == nil {
 			_ = t.Client.Dir.Purge(ctx, d.AtIdentifier())

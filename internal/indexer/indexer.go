@@ -78,11 +78,20 @@ func (ix *Indexer) takeResync(spaceURI string) bool {
 	return r
 }
 
+// repoRemovedType is the $type of a listWriters entry (or notification) for
+// a repo that left the writer set.
+const repoRemovedType = "com.atproto.space.defs#repoRemoved"
+
+// listedRepo is a com.atproto.space.listWriters entry: a repoWrite, or a
+// repoRemoved (which has no repoRev).
 type listedRepo struct {
-	DID      string `json:"did"`
+	Type     string `json:"$type"`
+	DID      string `json:"repo"`
 	RepoRev  string `json:"repoRev"`
 	SpaceRev string `json:"spaceRev"`
 }
+
+func (r listedRepo) removed() bool { return r.Type == repoRemovedType }
 
 // SyncSpace lists the space's writers at the authority and syncs every repo
 // whose latest write the index hasn't seen. The authority's repo goes
@@ -116,10 +125,13 @@ func (ix *Indexer) syncSpaceOnce(ctx context.Context, spaceURI string) error {
 	if err != nil {
 		return err
 	}
+	// The whole writer set, not just what changed since some revision: a
+	// repo it no longer lists has left the space.
 	var listed []listedRepo
 	cursor := ""
 	for {
-		params := url.Values{"space": {spaceURI}, "limit": {"100"}}
+		const pageSize = 100
+		params := url.Values{"space": {spaceURI}, "limit": {fmt.Sprint(pageSize)}}
 		if cursor != "" {
 			params.Set("cursor", cursor)
 		}
@@ -127,14 +139,21 @@ func (ix *Indexer) syncSpaceOnce(ctx context.Context, spaceURI string) error {
 			Repos  []listedRepo `json:"repos"`
 			Cursor string       `json:"cursor"`
 		}
-		if err := ix.Client.Query(ctx, host, spaceURI, ref.Authority, "com.atproto.space.listRepos", params, &out); err != nil {
+		if err := ix.Client.Query(ctx, host, spaceURI, ref.Authority, "com.atproto.space.listWriters", params, &out); err != nil {
 			if spaceclient.IsError(err, "SpaceDeleted") {
 				return ix.Store.MarkSpaceDeleted(ctx, spaceURI)
 			}
-			return fmt.Errorf("listRepos: %w", err)
+			if spaceclient.IsError(err, "SpaceNotFound") {
+				// A deleted space may answer this way to a credential it
+				// issued before; authorizing again says which.
+				if deleted, _ := ix.ConfirmDeleted(ctx, spaceURI); deleted {
+					return nil
+				}
+			}
+			return fmt.Errorf("listWriters: %w", err)
 		}
 		listed = append(listed, out.Repos...)
-		if out.Cursor == "" || len(out.Repos) == 0 {
+		if out.Cursor == "" || len(out.Repos) < pageSize {
 			break
 		}
 		cursor = out.Cursor
@@ -149,8 +168,13 @@ func (ix *Indexer) syncSpaceOnce(ctx context.Context, spaceURI string) error {
 	maxRev := ""
 	isListed := map[string]bool{}
 	for _, r := range listed {
-		isListed[r.DID] = true
 		maxRev = max(maxRev, r.SpaceRev)
+		if r.removed() {
+			// Left the writer set, which is dropped below like a repo that
+			// isn't listed at all.
+			continue
+		}
+		isListed[r.DID] = true
 		if p, ok := known[r.DID]; ok && p.SpaceRev >= r.SpaceRev {
 			continue
 		}
@@ -159,8 +183,8 @@ func (ix *Indexer) syncSpaceOnce(ctx context.Context, spaceURI string) error {
 			errs = append(errs, fmt.Errorf("%s: %w", r.DID, err))
 		}
 	}
-	// The listing completed: a repo the authority no longer lists has left
-	// the space, so its memories go too.
+	// The listing completed: a repo the authority removed, or no longer
+	// lists, has left the space, so its memories go too.
 	for did := range known {
 		if isListed[did] {
 			continue
@@ -185,30 +209,17 @@ func (ix *Indexer) syncSpaceOnce(ctx context.Context, spaceURI string) error {
 	return errors.Join(errs...)
 }
 
-// Register asks the space's authority to forward write notifications to the
-// service identifier (a DID with a fragment naming the DID document entry to
-// deliver to). Registrations lapse after a day, so call it periodically.
-func (ix *Indexer) Register(ctx context.Context, spaceURI, service string) (time.Time, error) {
-	ref, err := space.ParseRef(spaceURI)
+// Register has the space's authority deliver the space's updates to an
+// endpoint (notifySpaceUpdate), by authorizing a new credential with the
+// endpoint and its token. The registration lasts as long as the credential, a
+// few minutes, so call it again before the returned time. It returns when the
+// registration lapses.
+func (ix *Indexer) Register(ctx context.Context, spaceURI string, n spaceclient.Notify) (time.Time, error) {
+	a, err := ix.Client.Authorize(ctx, spaceURI, &n)
 	if err != nil {
 		return time.Time{}, err
 	}
-	host, err := ix.Client.SpaceHost(ctx, ref.Authority)
-	if err != nil {
-		return time.Time{}, err
-	}
-	var out struct {
-		ExpiresAt string `json:"expiresAt"`
-	}
-	body := map[string]string{"space": spaceURI, "service": service}
-	if err := ix.Client.Procedure(ctx, host, spaceURI, ref.Authority, "com.atproto.space.registerNotify", body, &out); err != nil {
-		return time.Time{}, fmt.Errorf("registerNotify: %w", err)
-	}
-	exp, err := syntax.ParseDatetimeLenient(out.ExpiresAt)
-	if err != nil {
-		return time.Time{}, nil
-	}
-	return exp.Time(), nil
+	return a.Expires, nil
 }
 
 // noteSpaceRev records the newest spaceRev seen and returns the previous one.
@@ -225,28 +236,42 @@ func (ix *Indexer) noteSpaceRev(spaceURI, rev string) string {
 	return prev
 }
 
-// Notification is a com.atproto.space.notifyWrite body.
+// Notification is a repoWrite update from a com.atproto.space.notifySpaceUpdate
+// body: a repo advanced to a new revision.
 type Notification struct {
 	Space   string `json:"space"`
 	Repo    string `json:"repo"`
 	RepoRev string `json:"repoRev"`
-	// Data is the repo's set-hash digest, lexicon bytes ({"$bytes": …}). The
-	// protocol called this field hash before the October 22, 2026 alpha.
+	// Data is the repo's set-hash digest, lexicon bytes ({"$bytes": …}).
 	Data         space.LexBytes `json:"data"`
 	SpaceRev     string         `json:"spaceRev,omitempty"`
 	PrevSpaceRev string         `json:"prevSpaceRev,omitempty"`
+}
+
+// Removal is a repoRemoved update: a repo left the space's writer set.
+type Removal struct {
+	Space        string `json:"space"`
+	Repo         string `json:"repo"`
+	SpaceRev     string `json:"spaceRev,omitempty"`
+	PrevSpaceRev string `json:"prevSpaceRev,omitempty"`
+}
+
+// missedUpdate notes an update's spaceRev and reports whether the one before
+// it was missed: prevSpaceRev names the update before this one, and if that
+// is newer than any seen, a notification went missing.
+func (ix *Indexer) missedUpdate(spaceURI, spaceRev, prevSpaceRev string) bool {
+	if spaceRev == "" {
+		return false
+	}
+	prev := ix.noteSpaceRev(spaceURI, spaceRev)
+	return prev != "" && prevSpaceRev != prev && prevSpaceRev > prev
 }
 
 // HandleWrite syncs the repo a notification names. It reports whether the
 // caller should run SyncSpace: a notification went missing, or the space's
 // model changed and every repo needs a full sync.
 func (ix *Indexer) HandleWrite(ctx context.Context, n Notification) (needSpaceSync bool, err error) {
-	if n.SpaceRev != "" {
-		prev := ix.noteSpaceRev(n.Space, n.SpaceRev)
-		// prevSpaceRev names the write before this one in the space. If it
-		// isn't the newest one we saw, a notification went missing.
-		needSpaceSync = prev != "" && n.PrevSpaceRev != prev && n.PrevSpaceRev > prev
-	}
+	needSpaceSync = ix.missedUpdate(n.Space, n.SpaceRev, n.PrevSpaceRev)
 	err = ix.SyncRepo(ctx, n.Space, n.Repo, n.SpaceRev)
 	if ix.takeResync(n.Space) {
 		needSpaceSync = true
@@ -257,6 +282,35 @@ func (ix *Indexer) HandleWrite(ctx context.Context, n Notification) (needSpaceSy
 		needSpaceSync = true
 	}
 	return needSpaceSync, err
+}
+
+// HandleRemoved drops the memories of a repo that left the writer set. It
+// reports whether the caller should run SyncSpace, because a notification went
+// missing.
+func (ix *Indexer) HandleRemoved(ctx context.Context, n Removal) (needSpaceSync bool, err error) {
+	if _, err := syntax.ParseDID(n.Repo); err != nil {
+		return false, fmt.Errorf("bad repo DID %q", n.Repo)
+	}
+	needSpaceSync = ix.missedUpdate(n.Space, n.SpaceRev, n.PrevSpaceRev)
+	unlock := ix.lock(n.Space, n.Repo)
+	defer unlock()
+	if err := ix.Store.RemoveRepo(ctx, n.Space, n.Repo); err != nil {
+		return needSpaceSync, err
+	}
+	ix.log().Info("repo left the space, removed its memories", "space", n.Space, "repo", n.Repo)
+	return needSpaceSync, nil
+}
+
+// ConfirmDeleted checks, with the space's host, that a space a notification
+// said was deleted really is, and drops its data if so. A notice alone is not
+// enough: only a host's own answer to a new authorization is durable.
+func (ix *Indexer) ConfirmDeleted(ctx context.Context, spaceURI string) (bool, error) {
+	ix.Client.Invalidate(spaceURI)
+	_, err := ix.Client.Credential(ctx, spaceURI)
+	if spaceclient.IsError(err, "SpaceDeleted") {
+		return true, ix.Store.MarkSpaceDeleted(ctx, spaceURI)
+	}
+	return false, err
 }
 
 // SyncRepo brings one member's repo up to date: incrementally from the
@@ -358,7 +412,7 @@ func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st
 		mac    *spaceclient.Mac
 	)
 	cursor := ""
-	for commit == nil {
+	for {
 		params := url.Values{"space": {spaceURI}, "repo": {did}, "limit": {fmt.Sprint(pageSize)}}
 		if cursor != "" {
 			params.Set("cursor", cursor)
@@ -370,7 +424,7 @@ func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st
 			Cursor string        `json:"cursor"`
 			Commit *space.Commit `json:"commit"`
 		}
-		pageMac, err := ix.Client.QueryMac(ctx, host, spaceURI, did, space.CommitMacType, "com.atproto.space.listRepoOps", params, &out)
+		pageMac, err := ix.Client.QueryMac(ctx, host, spaceURI, did, space.CommitMacProfile, "com.atproto.space.listRepoOps", params, &out)
 		if err != nil {
 			return fmt.Errorf("listRepoOps: %w", err)
 		}
@@ -386,16 +440,19 @@ func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st
 			}
 			final[path] = &pathState{cid: rop.Cid, value: op.Value}
 		}
-		commit = out.Commit
-		if commit != nil {
-			mac = pageMac
+		// Every page carries the repo's current commit, but only the last
+		// page's, which has no cursor, says what the ops should add up to.
+		if out.Cursor == "" {
+			commit, mac = out.Commit, pageMac
+			break
 		}
-		if commit == nil {
-			if out.Cursor == "" || out.Cursor == cursor {
-				return fmt.Errorf("%w: oplog page ended without a commit or cursor", errResync)
-			}
-			cursor = out.Cursor
+		if out.Cursor == cursor {
+			return fmt.Errorf("%w: oplog cursor did not advance", errResync)
 		}
+		cursor = out.Cursor
+	}
+	if commit == nil {
+		return fmt.Errorf("%w: oplog ended without a commit", errResync)
 	}
 	if err := verifyCommit(spaceURI, did, *commit, repo, mac); err != nil {
 		return err
@@ -527,13 +584,9 @@ func verifyCommit(spaceURI, did string, c space.Commit, repo *space.RepoCommit, 
 	if mac == nil {
 		return fmt.Errorf("%w: no MAC in the response", errResync)
 	}
-	m, err := mac.CommitMac()
-	if err != nil {
-		return fmt.Errorf("%w: %v", errResync, err)
-	}
-	params := space.VerifyCommitParams{Space: spaceURI, Repo: did, SharedSecret: mac.SharedSecret, Mac: m}
-	if !space.VerifyCommit(c, params) {
-		return fmt.Errorf("%w: commit MAC did not verify", errKemRotated)
+	params := space.VerifyCommitParams{Space: spaceURI, Repo: did, VerifyMacParams: mac.Params()}
+	if err := space.VerifyCommit(c, params); err != nil {
+		return fmt.Errorf("%w: %v", errKemRotated, err)
 	}
 	if !repo.Matches(c) {
 		return fmt.Errorf("%w: ops do not add up to the commit", errResync)
@@ -549,23 +602,22 @@ func (ix *Indexer) syncFull(ctx context.Context, spaceURI, did, spaceRev string,
 	if fresh {
 		ix.purgeDID(ctx, did)
 	}
-	mac, body, err := ix.Client.QueryRawMac(ctx, host, spaceURI, did, space.CommitMacType, "com.atproto.space.getRepo", url.Values{"space": {spaceURI}, "repo": {did}})
+	mac, body, err := ix.Client.QueryRawMac(ctx, host, spaceURI, did, space.CommitMacProfile, "com.atproto.space.getRepo", url.Values{"space": {spaceURI}, "repo": {did}})
 	if err != nil {
 		return fmt.Errorf("getRepo: %w", err)
 	}
 	defer body.Close()
-	m, err := mac.CommitMac()
-	if err != nil {
-		return fmt.Errorf("getRepo: %w", err)
-	}
-	vr, err := space.VerifyRepoStarFull(body, space.VerifyRepoParams{Space: spaceURI, Repo: did, SharedSecret: mac.SharedSecret, Mac: m})
+	vr, err := space.VerifyRepoStarFull(body, space.VerifyRepoParams{Space: spaceURI, Repo: did, VerifyMacParams: mac.Params()})
 	if spaceclient.IsError(err, "RepoNotFound") {
 		// The member has no repo (any more): nothing of theirs to index.
 		return ix.Store.RemoveRepo(ctx, spaceURI, did)
 	}
 	if err != nil {
-		var verr *space.RepoVerificationError
-		if errors.As(err, &verr) && !fresh {
+		var (
+			verr *space.RepoVerificationError
+			merr *space.MacError
+		)
+		if (errors.As(err, &verr) || errors.As(err, &merr)) && !fresh {
 			return fmt.Errorf("%w: %v", errKemRotated, err)
 		}
 		return fmt.Errorf("verifying %s's repo: %w", did, err)

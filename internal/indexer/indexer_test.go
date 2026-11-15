@@ -2,7 +2,6 @@ package indexer
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -475,14 +474,61 @@ func TestRepoDroppedFromListingIsRemoved(t *testing.T) {
 	}
 }
 
+// TestForgottenWriterIsRemoved: a writer whose removal has been garbage
+// collected, so listWriters no longer mentions it, is dropped like one it
+// reports removed.
+func TestForgottenWriterIsRemoved(t *testing.T) {
+	t.Parallel()
+	f := setup(t)
+	ctx := context.Background()
+	f.net.Put(f.alice, Collection, "a1", memory("alice stays"))
+	f.net.Put(f.bob, Collection, "b1", memory("bob is forgotten"))
+	if err := f.ix.SyncSpace(ctx, f.net.Space); err != nil {
+		t.Fatal(err)
+	}
+	f.net.ForgetWriter(f.bob)
+	if err := f.ix.SyncSpace(ctx, f.net.Space); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.count(t); got != 1 {
+		t.Fatalf("got %d, want 1", got)
+	}
+}
+
+// TestWriterReturnsAfterRemoval: a repo that writes again after being removed
+// is listed as a writer again and indexed afresh.
+func TestWriterReturnsAfterRemoval(t *testing.T) {
+	t.Parallel()
+	f := setup(t)
+	ctx := context.Background()
+	f.net.Put(f.bob, Collection, "b1", memory("bob first"))
+	if err := f.ix.SyncSpace(ctx, f.net.Space); err != nil {
+		t.Fatal(err)
+	}
+	f.net.DropWriter(f.bob)
+	if err := f.ix.SyncSpace(ctx, f.net.Space); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.count(t); got != 0 {
+		t.Fatalf("got %d, want 0", got)
+	}
+	f.net.Put(f.bob, Collection, "b2", memory("bob again"))
+	if err := f.ix.SyncSpace(ctx, f.net.Space); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.count(t); got != 2 {
+		t.Fatalf("got %d, want 2 (the repo is read in full again)", got)
+	}
+}
+
 func TestNonMemberCannotSync(t *testing.T) {
 	t.Parallel()
 	f := setup(t)
 	f.net.RemoveMember("did:plc:appview")
 	f.net.Put(f.alice, Collection, "a1", memory("one"))
 	err := f.ix.SyncSpace(context.Background(), f.net.Space)
-	var xe *spaceclient.Error
-	if !errors.As(err, &xe) || xe.Status != 403 {
-		t.Fatalf("err = %v, want a 403 from getSpaceCredential", err)
+	// The host answers as if the space didn't exist, so as not to reveal it.
+	if !spaceclient.IsError(err, "SpaceNotFound") {
+		t.Fatalf("err = %v, want SpaceNotFound from authorizeSpaceSync", err)
 	}
 }

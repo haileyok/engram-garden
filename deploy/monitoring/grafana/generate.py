@@ -152,7 +152,7 @@ timeseries("Re-exports, over-limit, space syncs", [
 timeseries("Space sync time p95", [(q(0.95, "engram_space_sync_duration_seconds", APPVIEW), "p95")], unit="s")
 timeseries("Notification registrations", [
     (f"sum by (result) (increase(engram_notify_registrations_total{{{APPVIEW}}}[1h]))", "{{result}}")],
-    desc="Requests asking authorities to send write notifications; renewed about every 12 hours per space.")
+    desc="Authorizations that register the appview for a space's updates; a registration lasts as long as its credential, about 10 minutes, so each space renews about once per poll.")
 timeseries("Spaces", [
     (f"sum(engram_spaces_indexed{{{APPVIEW}}})", "indexed"),
     (f"sum(engram_spaces_owned{{{APPVIEW}}})", "owned by these nodes"),

@@ -5,7 +5,7 @@ go 1.26.10
 require (
 	github.com/RoaringBitmap/roaring/v2 v2.29.0
 	github.com/bluesky-social/indigo v0.0.0-20260308004230-c55a189a51a9
-	github.com/haileyok/cocoon v0.13.4-0.20261022163822-cfc9db451c7b
+	github.com/haileyok/cocoon v0.14.4-0.20261115182217-6f5f1f59df70
 	github.com/ipfs/go-cid v0.6.1
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/johannesboyne/gofakes3 v1.2.0
@@ -18,9 +18,9 @@ require (
 	github.com/rivo/uniseg v0.4.7
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/sync v0.23.0
-	golang.org/x/sys v0.47.0
-	golang.org/x/term v0.45.0
-	golang.org/x/text v0.41.0
+	golang.org/x/sys v0.48.0
+	golang.org/x/term v0.46.0
+	golang.org/x/text v0.42.0
 	golang.org/x/time v0.16.0
 )
 
@@ -73,10 +73,10 @@ require (
 	gitlab.com/yawning/tuplehash v0.0.0-20230713102510-df83abbf9a02 // indirect
 	go.shabbyrobe.org/gocovmerge v0.0.0-20230507111327-fa4f82cfbf4d // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
-	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
-	golang.org/x/tools v0.48.0 // indirect
+	golang.org/x/tools v0.49.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect

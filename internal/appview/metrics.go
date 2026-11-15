@@ -12,7 +12,7 @@ import (
 var (
 	notifications = metrics.Factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "engram_notifications_total",
-		Help: "Notifications from space authorities, by kind (write, space_deleted) and result: accepted, deferred (the space was at its sync cap; a running sync picks it up), not_granted (the space's authority hasn't let the appview read it, so the write can't be indexed), bad_body, unauthorized, forbidden, unknown_space, error.",
+		Help: "Updates from space hosts, by kind of update (write, removed, space_deleted, expired; update when the body wasn't one) and result: accepted, deferred (the space was at its sync cap; a running sync picks it up), not_granted (the space's authority hasn't let the appview read it, so the write can't be indexed), bad_body, forbidden (the token isn't the one registered for the space), unknown_space, error.",
 	}, []string{"kind", "result"})
 	notifiedSyncs = metrics.Factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "engram_notified_syncs_total",
@@ -20,7 +20,7 @@ var (
 	}, []string{"result"})
 	notifyRegistrations = metrics.Factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "engram_notify_registrations_total",
-		Help: "Requests to space authorities to send this service write notifications, by result.",
+		Help: "Authorizations that register (or renew the registration of) this service for a space's updates, by result.",
 	}, []string{"result"})
 	textSearches = metrics.Factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "engram_text_searches_total",
@@ -39,7 +39,7 @@ var (
 func init() {
 	// Start the outcomes worth alerting on at zero, so increase() sees the
 	// first one.
-	for _, kind := range []string{"write", "space_deleted"} {
+	for _, kind := range []string{"write", "removed", "space_deleted", "expired"} {
 		for _, r := range []string{"accepted", "not_granted", "bad_body", "unauthorized", "forbidden", "unknown_space", "error"} {
 			notifications.WithLabelValues(kind, r)
 		}

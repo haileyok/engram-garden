@@ -17,7 +17,7 @@ inside the skill's directory); `internal/skillfile` converts records to and from
 
 ## Reading
 
-Skills aren't indexed. An agent asks the space's authority for the members (`listRepos`) and reads each
+Skills aren't indexed. An agent asks the space's authority for the members (`listWriters`) and reads each
 member's `garden.engram.skill` records from its PDS with the space credential (`listRecords`). A space
 has few skills and they change rarely, so this costs a few requests at session start and saves the
 appview a second kind of index. The appview's indexer ignores the collection.

@@ -143,13 +143,13 @@ class ManageMixin:
         the first), and optionally declare its model. Call save_settings afterwards to keep it."""
         if not valid_record_key(name):
             raise EngramError("names use letters, digits and . _ ~ : - (up to 512)")
-        member = {"$type": "com.atproto.simplespace.defs#memberListPolicy"}
-        body = {"spaceType": lex.SPACE_TYPE, "skey": name, "readPolicy": member, "writePolicy": member}
+        # A member list: only members read, and only members with write access write, through any app.
+        body = {"spaceType": lex.SPACE_TYPE, "skey": name, "policy": {"$type": "com.atproto.memberspace.policy"}}
         try:
-            out = await self.client.session.post("com.atproto.simplespace.createSpace", body)
+            out = await self.client.session.post("com.atproto.space.createSpace", body)
         except XrpcError as e:
             raise manage_err("creating the space", e) from e
-        e = self._add_space(out["uri"])
+        e = self._add_space(out["space"])
         res = CreateSpaceOut(space=e)
         if model:
             try:
@@ -184,7 +184,7 @@ class ManageMixin:
             if cursor:
                 params["cursor"] = cursor
             try:
-                page = await self.client.session.get("com.atproto.simplespace.listMembers", params)
+                page = await self.client.session.get("com.atproto.memberspace.listMembers", params)
             except XrpcError as err:
                 raise manage_err("listing members", err) from err
             members = page.get("members", [])
@@ -223,9 +223,9 @@ class ManageMixin:
         m = Member(did=did, read=True, write=not read_only)
         if not member.startswith("did:"):
             m.handle = member.strip().removeprefix("@")
-        body = {"space": str(ref), "did": did, "read": m.read, "write": m.write}
+        body = {"space": str(ref), "members": [{"did": did, "read": m.read, "write": m.write}]}
         try:
-            await self.client.session.post("com.atproto.simplespace.putMember", body)
+            await self.client.session.post("com.atproto.memberspace.putMembers", body)
         except XrpcError as err:
             raise manage_err("adding the member", err) from err
         return MemberOut(space=e.name, member=m)
@@ -235,7 +235,7 @@ class ManageMixin:
         e, ref = self._owned(space)
         did = await self._resolve_member(member)
         try:
-            await self.client.session.post("com.atproto.simplespace.removeMember", {"space": str(ref), "did": did})
+            await self.client.session.post("com.atproto.memberspace.removeMembers", {"space": str(ref), "dids": [did]})
         except XrpcError as err:
             raise manage_err("removing the member", err) from err
         return MemberOut(space=e.name, member=Member(did=did))
