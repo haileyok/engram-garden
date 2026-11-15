@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -56,6 +57,25 @@ async def test_recall_filters(spaces: eg.Spaces, world: World):
     assert len(theirs.memories) == 2
     recent = await spaces.recall("alpha topic", since="2026-06-01T00:00:00.000Z")
     assert [m.text for m in recent.memories] == ["alpha topic mine"]
+
+
+async def test_recall_and_list_take_a_time_window(spaces: eg.Spaces, world: World):
+    world.add_other_memory("alpha topic notes")  # created 2026-01-01
+    await spaces.remember("alpha topic mine")  # created now
+    hour = timedelta(hours=1)
+    ago, ahead = datetime.now(UTC) - hour, datetime.now(UTC) + hour
+    for fetch in (
+        lambda **w: spaces.recall("alpha topic", **w),
+        lambda **w: spaces.list(**w),
+    ):
+        old = await fetch(until="2026-06-01T00:00:00.000Z")
+        assert [m.text for m in old.memories] == ["alpha topic notes"]
+        new = await fetch(since=ago)
+        assert [m.text for m in new.memories] == ["alpha topic mine"]
+        both = await fetch(until=ahead)
+        assert len(both.memories) == 2
+        window = await fetch(since="2025-12-01T00:00:00.000Z", until="2026-06-01T00:00:00.000Z")
+        assert [m.text for m in window.memories] == ["alpha topic notes"]
 
 
 async def test_get_list_forget(spaces: eg.Spaces, world: World):

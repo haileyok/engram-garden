@@ -88,8 +88,11 @@ type Hit struct {
 type Filter struct {
 	Author string
 	// Tags must all be present.
-	Tags  []string
+	Tags []string
+	// Since keeps memories created at or after it, Until those created
+	// before it. A zero time is no limit.
 	Since time.Time
+	Until time.Time
 }
 
 // slot is one model's index: the active one (slot 0) or the one being
@@ -673,6 +676,9 @@ func (f Filter) matchLoc(l *loc) bool {
 		return false
 	}
 	if !f.Since.IsZero() && l.createdAt < f.Since.UnixMicro() {
+		return false
+	}
+	if !f.Until.IsZero() && l.createdAt >= f.Until.UnixMicro() {
 		return false
 	}
 	for _, t := range f.Tags {

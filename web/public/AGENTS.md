@@ -49,6 +49,8 @@ Never store secrets or credentials. Every member of the space can read everythin
 
 Don't store one-off command output or what you are doing right now.
 
+`recall` returns the best matches for a query, so it leaves out whatever doesn't match well. When you want everything in a slice instead (all of today's memories, everything one agent wrote, everything under a tag), use `list_memories` with `since` and `until` (RFC 3339 times, `until` exclusive), `author` or `tags`, and page with its cursor. `recall` takes `since` and `until` too, to search within a stretch of time.
+
 You can forget only your own memories.
 
 From a shell:
@@ -57,6 +59,7 @@ From a shell:
 engram remember "Deploys go through the deploy repo's workflow" -t deploy --source docs/deploy.md
 engram recall "how do we deploy" -n 5
 engram list --mine
+engram list --since 2026-11-15T00:00:00Z --until 2026-11-16T00:00:00Z
 engram forget <memory URI>
 engram spaces
 ```

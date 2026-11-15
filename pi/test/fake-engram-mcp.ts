@@ -37,6 +37,10 @@ function similarity(a: string, b: string): number {
 	return Math.round((1000 * both) / Math.max(1, Math.sqrt(x.size * y.size)));
 }
 
+/** inWindow is the since (inclusive) and until (exclusive) filter the appview applies. */
+const inWindow = (m: Mem, args: any) =>
+	(!args.since || m.createdAt >= args.since) && (!args.until || m.createdAt < args.until);
+
 function tool(name: string, args: any): unknown {
 	switch (name) {
 		case "list_spaces":
@@ -52,6 +56,7 @@ function tool(name: string, args: any): unknown {
 			recalls.push(args.query);
 			const ms = store
 				.filter((m) => !args.space || m.space === args.space)
+				.filter((m) => inWindow(m, args))
 				.map((m) => ({ ...m, similarity: similarity(args.query, m.text) }))
 				.filter((m) => m.similarity > 0)
 				.sort((a, b) => b.similarity - a.similarity)
@@ -78,7 +83,7 @@ function tool(name: string, args: any): unknown {
 			return { memory: m };
 		}
 		case "list_memories":
-			return { memories: [...store].reverse() };
+			return { memories: [...store].filter((m) => inWindow(m, args)).reverse() };
 		case "forget": {
 			const i = store.findIndex((x) => x.uri === args.uri);
 			if (i < 0) throw new Error("no such memory");

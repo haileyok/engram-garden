@@ -222,13 +222,21 @@ class Spaces(ManageMixin):
         author: str = "",
         tags: list[str] | None = None,
         since: datetime | str = "",
+        until: datetime | str = "",
         space: str = "",
         mode: str = "",
     ) -> MemoriesOut:
         """Search one space or, by default (or with space="all"), every space set up, merging the results with
         merge_ranked. Each space's query is embedded with that space's model. mode is "hybrid" (the default),
         "vector" or "keyword"."""
-        kw: dict[str, Any] = {"limit": limit, "author": author, "tags": tags, "since": since, "mode": mode}
+        kw: dict[str, Any] = {
+            "limit": limit,
+            "author": author,
+            "tags": tags,
+            "since": since,
+            "until": until,
+            "mode": mode,
+        }
         if space and space != ALL_SPACES:
             a, e = self.agent(space)
             out = await a.recall(query, **kw)
@@ -287,13 +295,23 @@ class Spaces(ManageMixin):
         return out
 
     async def list(
-        self, limit: int = 0, cursor: str = "", author: str = "", tags: list[str] | None = None, space: str = ""
+        self,
+        limit: int = 0,
+        cursor: str = "",
+        author: str = "",
+        tags: list[str] | None = None,
+        since: datetime | str = "",
+        until: datetime | str = "",
+        space: str = "",
     ) -> MemoriesOut:
-        """List one space's memories, newest first (default: the default space)."""
+        """List one space's memories, newest first (default: the default space). since keeps memories
+        created at or after it, until those created before it."""
         if space == ALL_SPACES:
             raise EngramError("list one space at a time; recall searches every space")
         a, e = self.agent(space)
-        return _label(await a.list(limit=limit, cursor=cursor, author=author, tags=tags), e.name)
+        return _label(
+            await a.list(limit=limit, cursor=cursor, author=author, tags=tags, since=since, until=until), e.name
+        )
 
     async def forget(self, uri: str) -> ForgetOut:
         """Delete one of the agent's own memories, by URI."""

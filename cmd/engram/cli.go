@@ -124,8 +124,10 @@ Spaces you run (--space picks one; otherwise the default):
 
 Use (--space <name|URI> picks a space; otherwise the default):
   engram remember <text> [-t tag]... [--source s]   store a memory (text from stdin if omitted)
-  engram recall <query> [-n 10] [-t tag]...          search by meaning, in every space unless --space
-  engram list [-n 25] [--author did] [-t tag]...     newest memories first
+  engram recall <query> [-n 10] [-t tag]... [--since t] [--until t]
+                                                     search by meaning, in every space unless --space
+  engram list [-n 25] [--author did] [-t tag]... [--since t] [--until t]
+                                                     newest memories first (times are RFC 3339)
   engram get <uri>                                   one memory
   engram forget <uri>                                delete one of your own memories
   engram status                                      account, spaces, models and sign-in
@@ -686,6 +688,7 @@ func (c *cli) cmdRecall(ctx context.Context, args []string) error {
 	n := fs.Int("n", 10, "how many results (1-50)")
 	author := fs.String("author", "", "only memories by this agent DID")
 	since := fs.String("since", "", "only memories created at or after this RFC 3339 time")
+	until := fs.String("until", "", "only memories created before this RFC 3339 time")
 	sp := fs.String("space", agent.AllSpaces, "search only this space, by name or URI (default: every space)")
 	mode := fs.String("mode", "", "hybrid (default: meaning and exact words), vector (meaning only) or keyword (exact words only)")
 	pos, err := parse(fs, args)
@@ -700,7 +703,7 @@ func (c *cli) cmdRecall(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	out, err := a.Recall(ctx, agent.RecallIn{Query: q, Limit: *n, Author: *author, Tags: tags, Since: *since, Space: *sp, Mode: *mode})
+	out, err := a.Recall(ctx, agent.RecallIn{Query: q, Limit: *n, Author: *author, Tags: tags, Since: *since, Until: *until, Space: *sp, Mode: *mode})
 	if err != nil {
 		return err
 	}
@@ -716,6 +719,8 @@ func (c *cli) cmdList(ctx context.Context, args []string) error {
 	n := fs.Int("n", 25, "how many (1-100)")
 	author := fs.String("author", "", "only memories by this agent DID")
 	mine := fs.Bool("mine", false, "only this agent's memories")
+	since := fs.String("since", "", "only memories created at or after this RFC 3339 time")
+	until := fs.String("until", "", "only memories created before this RFC 3339 time")
 	cursor := fs.String("cursor", "", "continue from a previous page")
 	sp := fs.String("space", "", "the space to list, by name or URI (default: the default space)")
 	if _, err := parse(fs, args); err != nil {
@@ -728,16 +733,29 @@ func (c *cli) cmdList(ctx context.Context, args []string) error {
 	if *mine {
 		*author = a.Client.DID().String()
 	}
-	out, err := a.List(ctx, agent.ListIn{Limit: *n, Cursor: *cursor, Author: *author, Tags: tags, Space: *sp})
+	out, err := a.List(ctx, agent.ListIn{Limit: *n, Cursor: *cursor, Author: *author, Tags: tags, Since: *since, Until: *until, Space: *sp})
 	if err != nil {
 		return err
 	}
 	c.print(out, func(w io.Writer) {
 		writeMemories(w, out)
 		if out.Cursor != "" {
+			// The cursor continues a listing with the same filters.
 			more := "engram list --cursor " + out.Cursor
 			if *sp != "" {
 				more += " --space " + *sp
+			}
+			if *author != "" {
+				more += " --author " + *author
+			}
+			for _, t := range tags {
+				more += " -t " + t
+			}
+			if *since != "" {
+				more += " --since " + *since
+			}
+			if *until != "" {
+				more += " --until " + *until
 			}
 			fmt.Fprintf(w, "More: %s\n", more)
 		}

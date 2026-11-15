@@ -100,6 +100,8 @@ type segFilter struct {
 	tags     []uint32
 	since    int64
 	hasSince bool
+	until    int64
+	hasUntil bool
 }
 
 // resolve returns the filter for a segment, or false when no row of the
@@ -111,6 +113,12 @@ func (f Filter) resolve(sg *seg) (segFilter, bool) {
 			return sf, false
 		}
 		sf.since, sf.hasSince = f.Since.UnixMicro(), true
+	}
+	if !f.Until.IsZero() {
+		if !sg.info.MinCreatedAt.Before(f.Until) {
+			return sf, false
+		}
+		sf.until, sf.hasUntil = f.Until.UnixMicro(), true
 	}
 	if f.Author != "" {
 		id, ok := sg.ix.StringID(f.Author)
@@ -136,6 +144,9 @@ func (sf segFilter) match(ix *segment.Index, row int) bool {
 	if sf.hasSince && ix.CreatedAtMicros(row) < sf.since {
 		return false
 	}
+	if sf.hasUntil && ix.CreatedAtMicros(row) >= sf.until {
+		return false
+	}
 	return len(sf.tags) == 0 || ix.HasTags(row, sf.tags)
 }
 
@@ -144,6 +155,9 @@ func (f Filter) matchDoc(d *segment.Doc) bool {
 		return false
 	}
 	if !f.Since.IsZero() && d.CreatedAt.Before(f.Since) {
+		return false
+	}
+	if !f.Until.IsZero() && !d.CreatedAt.Before(f.Until) {
 		return false
 	}
 	for _, t := range f.Tags {

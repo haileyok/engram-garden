@@ -295,10 +295,12 @@ class Agent:
         author: str = "",
         tags: list[str] | None = None,
         since: datetime | str = "",
+        until: datetime | str = "",
         mode: str = "",
     ) -> MemoriesOut:
         """Search every agent's memories by meaning and exact words together.
 
+        since keeps memories created at or after it, until those created before it.
         mode is "hybrid" (the default), "vector" (meaning only) or "keyword"
         (exact words only, with no embedding).
         """
@@ -324,6 +326,8 @@ class Agent:
                 params["author"] = author
             if since:
                 params["since"] = _time_str(since)
+            if until:
+                params["until"] = _time_str(until)
             if tags:
                 params["tags"] = tags
             try:
@@ -352,9 +356,16 @@ class Agent:
         return GetOut(memory=Memory.from_view(out.get("memory", {})))
 
     async def list(
-        self, limit: int = 0, cursor: str = "", author: str = "", tags: list[str] | None = None
+        self,
+        limit: int = 0,
+        cursor: str = "",
+        author: str = "",
+        tags: list[str] | None = None,
+        since: datetime | str = "",
+        until: datetime | str = "",
     ) -> MemoriesOut:
-        """List memories newest first."""
+        """List memories newest first. since keeps memories created at or after it, until those created
+        before it."""
         params: dict[str, Any] = {"space": self.space}
         if limit:
             params["limit"] = min(max(limit, 1), 100)
@@ -362,6 +373,10 @@ class Agent:
             params["cursor"] = cursor
         if author:
             params["author"] = author
+        if since:
+            params["since"] = _time_str(since)
+        if until:
+            params["until"] = _time_str(until)
         if tags:
             params["tags"] = tags
         try:

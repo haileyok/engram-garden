@@ -453,6 +453,13 @@ func parseFilter(r *http.Request) (spacestore.Filter, error) {
 		}
 		f.Since = dt.Time()
 	}
+	if until := q.Get("until"); until != "" {
+		dt, err := syntax.ParseDatetimeLenient(until)
+		if err != nil {
+			return f, errf(http.StatusBadRequest, "InvalidRequest", "until must be a datetime")
+		}
+		f.Until = dt.Time()
+	}
 	return f, nil
 }
 

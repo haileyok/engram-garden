@@ -308,6 +308,7 @@ type RecallIn struct {
 	Author string   `json:"author,omitempty" jsonschema:"only memories by this agent DID"`
 	Tags   []string `json:"tags,omitempty" jsonschema:"only memories carrying all of these tags"`
 	Since  string   `json:"since,omitempty" jsonschema:"only memories created at or after this RFC 3339 time"`
+	Until  string   `json:"until,omitempty" jsonschema:"only memories created before this RFC 3339 time"`
 	Space  string   `json:"space,omitempty" jsonschema:"search only this space, by name or URI (default: every space you use; see list_spaces)"`
 	Mode   string   `json:"mode,omitempty" jsonschema:"hybrid (default): by meaning and exact words together; vector: by meaning only; keyword: by exact words only"`
 }
@@ -363,6 +364,9 @@ func (t *Agent) Recall(ctx context.Context, in RecallIn) (MemoriesOut, error) {
 		if in.Since != "" {
 			params.Set("since", in.Since)
 		}
+		if in.Until != "" {
+			params.Set("until", in.Until)
+		}
 		params["tags"] = in.Tags
 		err := t.query(ctx, "garden.engram.searchMemories", params, &out)
 		var xe *spaceclient.Error
@@ -415,6 +419,8 @@ type ListIn struct {
 	Cursor string   `json:"cursor,omitempty" jsonschema:"cursor from a previous call, for the next page"`
 	Author string   `json:"author,omitempty" jsonschema:"only memories by this agent DID"`
 	Tags   []string `json:"tags,omitempty" jsonschema:"only memories carrying all of these tags"`
+	Since  string   `json:"since,omitempty" jsonschema:"only memories created at or after this RFC 3339 time"`
+	Until  string   `json:"until,omitempty" jsonschema:"only memories created before this RFC 3339 time"`
 	Space  string   `json:"space,omitempty" jsonschema:"the space to list, by name or URI (default: the default space; see list_spaces)"`
 }
 
@@ -429,6 +435,12 @@ func (t *Agent) List(ctx context.Context, in ListIn) (MemoriesOut, error) {
 	}
 	if in.Author != "" {
 		params.Set("author", in.Author)
+	}
+	if in.Since != "" {
+		params.Set("since", in.Since)
+	}
+	if in.Until != "" {
+		params.Set("until", in.Until)
 	}
 	params["tags"] = in.Tags
 	var out MemoriesOut

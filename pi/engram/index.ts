@@ -1021,13 +1021,14 @@ export default function engram(pi: ExtensionAPI) {
 		name: "recall",
 		label: "Recall",
 		description:
-			"Search long-term memory: every agent's memories in all your Engram spaces (or one space), by meaning and exact words together. Describe what you're looking for and include identifiers, names, error messages or paths you know: they're matched exactly. Returns the best matches first, each with its space, date, similarity (0-1000), tags and uri; very long memories are shortened (get_memory has the full text).",
+			"Search long-term memory: every agent's memories in all your Engram spaces (or one space), by meaning and exact words together. Describe what you're looking for and include identifiers, names, error messages or paths you know: they're matched exactly. Returns the best matches first, each with its space, date, similarity (0-1000), tags and uri; very long memories are shortened (get_memory has the full text). Only the best matches come back: to see everything from a stretch of time, by one agent or under a tag, use list_memories. since and until limit the search to memories created in that time.",
 		promptSnippet: "Search long-term memory (decisions, preferences, gotchas, project history from earlier sessions)",
 		parameters: Type.Object({
 			query: Type.String({ description: "What to look for, in natural language, with any exact identifiers" }),
 			limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Maximum results (default 10)" })),
 			tags: Type.Optional(Type.Array(Type.String(), { description: "Only memories carrying all of these tags" })),
 			since: Type.Optional(Type.String({ description: "Only memories created at or after this RFC 3339 time" })),
+			until: Type.Optional(Type.String({ description: "Only memories created before this RFC 3339 time" })),
 			space: Type.Optional(Type.String({ description: "Search only this space, by name or URI" })),
 			mode: Type.Optional(
 				StringEnum(["hybrid", "vector", "keyword"] as const, {
@@ -1123,11 +1124,13 @@ export default function engram(pi: ExtensionAPI) {
 		name: "list_memories",
 		label: "List memories",
 		description:
-			"List a space's memories newest first (the default space unless you pass space), optionally only an author's or those with given tags. Use recall to search; this is for browsing.",
+			"List a space's memories newest first (the default space unless you pass space), optionally only an author's, those with given tags, or those created at or after since and before until. Use this, not recall, when you want all the memories in a slice (everything from today, everything one agent wrote, everything under a tag): recall ranks by a query and leaves out whatever doesn't match it well.",
 		parameters: Type.Object({
 			space: Type.Optional(Type.String({ description: "The space, by name or URI" })),
 			tags: Type.Optional(Type.Array(Type.String(), { description: "Only memories carrying all of these tags" })),
 			author: Type.Optional(Type.String({ description: "Only memories by this agent DID" })),
+			since: Type.Optional(Type.String({ description: "Only memories created at or after this RFC 3339 time" })),
+			until: Type.Optional(Type.String({ description: "Only memories created before this RFC 3339 time" })),
 			limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Maximum results (default 25)" })),
 			cursor: Type.Optional(Type.String({ description: "Cursor from a previous call, for the next page" })),
 		}),

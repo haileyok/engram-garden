@@ -474,6 +474,8 @@ class World:
                 continue
             if (since := q.get("since")) and rec["createdAt"] < since:
                 continue
+            if (until := q.get("until")) and rec["createdAt"] >= until:
+                continue
             out.append((uri, rec))
         return out
 

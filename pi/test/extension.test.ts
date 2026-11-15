@@ -716,6 +716,31 @@ const recallQueries = async (h: Harness) => {
 	return (out.structuredContent as any).queries as string[];
 };
 
+test("recall and list_memories take a window of time, and say when to use which", async () => {
+	const h = await harness();
+	try {
+		await start(h);
+		const iso = (ms: number) => new Date(Date.now() + ms).toISOString();
+		for (const name of ["recall", "list_memories"]) {
+			const props = (h.tools.get(name).parameters as any).properties;
+			assert.ok(props.since && props.until, `${name} declares since and until, or pi drops them`);
+		}
+		assert.match(h.tools.get("list_memories").description, /not recall[\s\S]*all the memories/);
+		assert.match(h.tools.get("recall").description, /list_memories/);
+		await h.tools.get("remember").execute("r", { text: "Hailey's espresso grinder setting is 14 for the house blend." }, undefined, undefined, h.ctx);
+		const run = async (name: string, args: object) =>
+			(await h.tools.get(name).execute("w", name === "recall" ? { query: "espresso grinder", ...args } : args, undefined, undefined, h.ctx)).details.memories.filter((m: any) => /espresso/.test(m.text)).length;
+		for (const name of ["recall", "list_memories"]) {
+			assert.equal(await run(name, { until: iso(-3600_000) }), 0, `${name}: until before it was written`);
+			assert.equal(await run(name, { since: iso(-3600_000) }), 1, `${name}: since before it was written`);
+			assert.equal(await run(name, { since: iso(-3600_000), until: iso(3600_000) }), 1, `${name}: a window around it`);
+			assert.equal(await run(name, { since: iso(3600_000) }), 0, `${name}: since after it was written`);
+		}
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
 test("auto-recall lets the model pick memories and shows the part that matters", async () => {
 	const h = await harness({ recallCandidateSimilarity: 100 });
 	try {
