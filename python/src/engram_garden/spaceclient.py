@@ -77,8 +77,7 @@ class Client:
         return self.session.did if self.session else ""
 
     async def space_host(self, authority: str) -> str:
-        """Where a space authority serves its spaces: its PDS, which is also its space host. The
-        October 22, 2026 alpha retired the dedicated #atproto_space_host service."""
+        """Where a space authority serves its spaces: its PDS, which is also its space host."""
         ident = await self.dir.lookup_did(authority)
         host = ident.pds_endpoint()
         if not host:
@@ -112,18 +111,18 @@ class Client:
         # user, and the credential is bound to our key.
         body = {
             "space": space_uri,
-            "credentialKid": spacelib.did_key(self._key.public_key()),
+            "credentialKey": spacelib.did_key(self._key.public_key()),
             "delegationToken": token,
         }
         try:
-            out = await self._do("POST", host, "com.atproto.space.getSpaceCredential", None, body, {})
+            out = await self._do("POST", host, "com.atproto.space.authorizeSpaceSync", None, body, {})
         except XrpcError as e:
-            raise EngramError(f"getSpaceCredential: {e}") from e
+            raise EngramError(f"authorizeSpaceSync: {e}") from e
         jwt = out["credential"]
         try:
             exp = float(spacelib.jwt_payload(jwt)["exp"])
         except (ValueError, KeyError, TypeError) as e:
-            raise EngramError(f"getSpaceCredential returned a bad credential: {e}") from e
+            raise EngramError(f"authorizeSpaceSync returned a bad credential: {e}") from e
         self._creds[space_uri] = _Credential(jwt, exp)
         return jwt
 
@@ -146,24 +145,24 @@ class Client:
         host: str,
         space_uri: str,
         audience: str,
-        mac_type: str,
+        profile: str,
         nsid: str,
         params: dict[str, Any] | None = None,
-    ) -> tuple[Any, bytes, bytes]:
-        """A credentialed GET that must be authenticated: it asks the repo host for a MAC of mac_type
-        (space.RECORD_MAC_TYPE or space.COMMIT_MAC_TYPE) and returns the body, the shared secret and
-        the MAC. Read other accounts' space repos with this, never with query()."""
+    ) -> tuple[Any, spacelib.Encapsulation, httpx.Headers]:
+        """A credentialed GET that must be authenticated: it asks the repo host for a MAC under a
+        profile (space.RECORD_MAC_PROFILE or space.COMMIT_MAC_PROFILE) and returns the body, the
+        encapsulation the MAC is checked with and the response headers. Read other accounts' space
+        repos with this, never with query()."""
 
-        async def go(h: dict[str, str]) -> tuple[Any, bytes, bytes]:
+        async def go(h: dict[str, str]) -> tuple[Any, spacelib.Encapsulation, httpx.Headers]:
             kem = await self.kem_key(audience)
-            key_share, secret = spacelib.encapsulate(kem)
-            sent = {**h, spacelib.HEADER_WANT_MAC: spacelib.format_want_mac_header(mac_type, key_share)}
+            enc = spacelib.encapsulate(kem)
+            sent = {**h, spacelib.HEADER_ACCEPT_SIGNATURE: spacelib.format_mac_request(profile, enc.key_share)}
             resp = await self._send("GET", host, nsid, params, None, sent)
             if resp.status_code != 200:
                 raise read_error(resp)
-            mac = spacelib.parse_mac_header(resp.headers.get_list(spacelib.HEADER_MAC), mac_type)
             value = resp.json() if resp.content else None
-            return value, secret, mac
+            return value, enc, resp.headers
 
         return await self._with_credential(space_uri, audience, go)
 

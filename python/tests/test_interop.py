@@ -52,6 +52,12 @@ def test_go_signature_rejects_missing_tag():
         space.verify_credential_sig(headers, s["keyId"])
 
 
+def test_go_signature_is_found_by_its_tag_under_any_label():
+    s = GO["sigs"][0]
+    headers = {k: v.replace("sig=", "other=", 1) if k.startswith("signature") else v for k, v in s["headers"].items()}
+    space.verify_credential_sig(headers, s["keyId"])
+
+
 def test_signature_shape_matches_go():
     """Same header names and structure, whatever the (random) signature bytes."""
     key = ec.derive_private_key(int(GO["privateKeyHex"], 16), ec.SECP256R1())
@@ -61,6 +67,70 @@ def test_signature_shape_matches_go():
         for name in ("authorization", "signature-input", "atproto-space-audience"):
             assert mine.get(name) == s["headers"].get(name)
         assert len(mine["signature"]) == len(s["headers"]["signature"])
+
+
+def _kem_of(m: dict) -> ec.EllipticCurvePrivateKey:
+    return ec.derive_private_key(int(m["kemKeyHex"], 16), ec.SECP256R1())
+
+
+@pytest.mark.parametrize("i", range(len(GO["macs"])))
+def test_mac_secret_matches_go(i):
+    m = GO["macs"][i]
+    assert space.did_key(_kem_of(m).public_key()) == m["kemDidKey"]
+    assert space.decapsulate(_kem_of(m), m["keyShare"]).hex() == m["sharedSecretHex"]
+
+
+@pytest.mark.parametrize("i", range(len(GO["macs"])))
+def test_mac_request_and_response_match_go(i):
+    m = GO["macs"][i]
+    assert space.format_mac_request(space.RECORD_MAC_PROFILE, m["keyShare"]) == m["acceptSignature"]
+    req = space.parse_mac_request([m["acceptSignature"]], space.RECORD_MAC_PROFILE)
+    assert req is not None and req.key_share == m["keyShare"]
+    secret = bytes.fromhex(m["sharedSecretHex"])
+    assert space.create_record_mac_headers(m["uri"], m["cid"], req, secret) == m["headers"]
+
+
+@pytest.mark.parametrize("i", range(len(GO["macs"])))
+def test_verifies_go_mac(i):
+    m = GO["macs"][i]
+    enc = space.Encapsulation(m["keyShare"], bytes.fromhex(m["sharedSecretHex"]))
+    h = m["headers"]
+
+    def verify(uri=m["uri"], cid=m["cid"], enc=enc, headers=h):
+        space.verify_record_mac(
+            uri, cid, enc, [headers["signature-input"]], [headers["signature"]], [headers["atproto-space-record"]]
+        )
+
+    verify()
+    for bad in (
+        lambda: verify(uri=m["uri"] + "x"),
+        lambda: verify(cid=GO["macs"][0]["cid"][:-1] + "a"),
+        lambda: verify(enc=space.Encapsulation(m["keyShare"], bytes(32))),
+        lambda: verify(headers={**h, "atproto-space-record": h["atproto-space-record"].replace("uri=", "uri =")}),
+    ):
+        with pytest.raises(ValueError):
+            bad()
+
+
+def test_hpke_export_matches_the_reference_vector():
+    """cocoon's space/kem_test.go: the export-only DHKEM(P-256, HKDF-SHA256) vector, with info
+    "atproto-mac" and an empty exporter context."""
+    enc = bytes.fromhex(
+        "04d804370b7e24b94749eb1dc8df6d4d4a5d75f9effad01739ebcad5c54a40d57aaa8b4190fc124dbde2e4f1e1d1b012a3bc4038157dc29b55533a932306d8d38d"
+    )
+    sk = ec.derive_private_key(
+        int("62c3868357a464f8461d03aa0182c7cebcde841036aea7230ddc7339f1088346", 16), ec.SECP256R1()
+    )
+    pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), enc)
+    got = space.decapsulate(sk, space.did_key(pub))
+    assert got.hex() == "2060e0558d1b34c10086bc137f849bb79ba59fcdc30544418e35c9cd301f0d0d"
+
+
+def test_encapsulation_agrees_with_decapsulation():
+    kem = ec.generate_private_key(ec.SECP256R1())
+    enc = space.encapsulate(space.did_key(kem.public_key()))
+    assert space.decapsulate(kem, enc.key_share) == enc.shared_secret
+    assert space.encapsulate(space.did_key(kem.public_key())).key_share != enc.key_share
 
 
 @pytest.mark.parametrize("i", range(len(GO["vectors"])))

@@ -1,11 +1,12 @@
 """Space primitives the client needs: references, P-256 did:key encoding, the HTTP message signatures
 space requests carry (RFC 9421) and the MACs a repo host authenticates its responses with, as in
-cocoon's space package (the October 22, 2026 alpha)."""
+cocoon's space package (the November 12, 2026 alpha)."""
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import re
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature, encode_dss_signature
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF, HKDFExpand
 
 # ---- references ----
 
@@ -110,7 +111,9 @@ def public_key_from_did_key(s: str) -> ec.EllipticCurvePublicKey:
 
 #: The Authorization scheme a space credential is presented with.
 CREDENTIAL_SCHEME = "Atproto-Space-Credential"
-SIG_LABEL = "atproto-space-credential"
+#: The label signers use. Labels carry no meaning (RFC 9421 §7.2.5): verifiers find the signature by
+#: its tag.
+SIG_LABEL = "sig"
 SIG_TAG = "atproto-space-credential"
 SIG_ALG = "ecdsa-p256-sha256"
 HEADER_SPACE_AUDIENCE = "Atproto-Space-Audience"
@@ -119,17 +122,23 @@ _COVERED = '("authorization" "atproto-space-audience")'
 
 # ---- repo MACs ----
 
-COMMIT_MAC_TYPE = "atproto-space-repo"
-RECORD_MAC_TYPE = "atproto-space-record"
-RECORD_MAC_VERSION = 1
-#: The request header asking for a MAC, and the response header carrying it.
-HEADER_WANT_MAC = "Atproto-Space-Want-Mac"
-HEADER_MAC = "Atproto-Space-Mac"
+#: A MAC is an HTTP message signature (hmac-sha256) over the response header its profile names. The
+#: syncer requests one with an Accept-Signature header whose tag is the profile.
+COMMIT_MAC_PROFILE = "atproto-space-commit"
+RECORD_MAC_PROFILE = "atproto-space-record"
+HEADER_ACCEPT_SIGNATURE = "Accept-Signature"
+HEADER_COMMIT = "Atproto-Space-Commit"
+HEADER_RECORD = "Atproto-Space-Record"
+MAC_ALG = "hmac-sha256"
+#: The label a syncer requests its MAC under.
+MAC_LABEL = "mac"
 
 _P256_ORDER = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
 
 
 def signature_base(authorization: str, sig_input: str, audience: str) -> bytes:
+    """The RFC 9421 signature base for a credential use; sig_input is the signature-input inner list
+    with its parameters."""
     lines = [f'"authorization": {authorization.strip()}', f'"atproto-space-audience": {audience.strip()}']
     lines.append(f'"@signature-params": {sig_input}')
     return "\n".join(lines).encode()
@@ -166,24 +175,28 @@ def create_space_sig_headers(key: ec.EllipticCurvePrivateKey, authorization: str
 
 def verify_credential_sig(headers: dict[str, str], key_id: str) -> None:
     """Verify the signature on a request authorized by a space credential, against the key the
-    credential is bound to (its cnf.kid). Only the shape this library produces is accepted, which is
-    enough for tests and for checking interoperability with the Go implementation."""
+    credential is bound to (its cnf.kid). The signature is found by its tag, under any label. Only the
+    shape this library produces is accepted, which is enough for tests and for checking
+    interoperability with the Go implementation."""
     h = {k.lower(): v for k, v in headers.items()}
-    m_in = re.fullmatch(rf'{SIG_LABEL}=({re.escape(_COVERED)};tag="{SIG_TAG}")', h.get("signature-input", ""))
-    m_sig = re.fullmatch(rf"{SIG_LABEL}=:([A-Za-z0-9+/=]+):", h.get("signature", ""))
-    if not m_in or not m_sig:
-        raise ValueError(f"missing or malformed {SIG_LABEL} signature")
-    sig_input = m_in.group(1)
+    found = _find_signature(
+        [h.get("signature-input", "")],
+        [h.get("signature", "")],
+        tag=SIG_TAG,
+        components=_COVERED,
+        alg=SIG_ALG,
+        key_id=key_id,
+    )
     audience = h.get("atproto-space-audience", "")
     if not audience:
         raise ValueError("missing atproto-space-audience")
     if not key_id:
         raise ValueError("signature key must be a P-256 did:key")
     pub = public_key_from_did_key(key_id)
-    sig = base64.b64decode(m_sig.group(1))
+    sig = found.signature
     if len(sig) != 64:
         raise ValueError("invalid HTTP message signature")
-    base = signature_base(h["authorization"], sig_input, audience)
+    base = signature_base(h["authorization"], found.params, audience)
     try:
         pub.verify(
             encode_dss_signature(int.from_bytes(sig[:32], "big"), int.from_bytes(sig[32:], "big")),
@@ -194,114 +207,294 @@ def verify_credential_sig(headers: dict[str, str], key_id: str) -> None:
         raise ValueError("invalid HTTP message signature") from None
 
 
-# ---- MACs: a shared secret per request, and an HMAC over what the host served ----
+@dataclass
+class _Found:
+    params: str  # the signature-input inner list with its parameters, as sent
+    signature: bytes
+
+
+def _split_top(s: str, sep: str) -> list[str]:
+    """Split on a separator outside quotes and parentheses."""
+    out, depth, quoted, cur, i = [], 0, False, "", 0
+    while i < len(s):
+        c = s[i]
+        if quoted:
+            cur += c
+            if c == "\\" and i + 1 < len(s):
+                i += 1
+                cur += s[i]
+            elif c == '"':
+                quoted = False
+        elif c == '"':
+            quoted = True
+            cur += c
+        elif c == "(":
+            depth += 1
+            cur += c
+        elif c == ")":
+            depth -= 1
+            cur += c
+        elif c == sep and depth == 0:
+            out.append(cur.strip())
+            cur = ""
+        else:
+            cur += c
+        i += 1
+    if cur.strip():
+        out.append(cur.strip())
+    return out
+
+
+def _inner_list(member: str) -> tuple[str, dict[str, str]] | None:
+    """An inner list member's covered components text and its parameters (values as serialized)."""
+    m = re.fullmatch(r"\(([^)]*)\)((?:;.*)?)", member)
+    if not m:
+        return None
+    params: dict[str, str] = {}
+    for p in _split_top(m.group(2), ";"):
+        if not p:
+            continue
+        key, _, value = p.partition("=")
+        params[key] = value if value else "?1"
+    return m.group(1), params
+
+
+def _unquote(v: str) -> str | None:
+    if len(v) >= 2 and v[0] == v[-1] == '"':
+        return re.sub(r"\\(.)", r"\1", v[1:-1])
+    return None
+
+
+def _find_signature(inputs: list[str], sigs: list[str], *, tag: str, components: str, alg: str, key_id: str) -> _Found:
+    """The one signature tagged `tag` in a Signature-Input / Signature pair, which must cover exactly
+    `components` and carry no other algorithm or key than the ones expected (RFC 9421 §3.2.1)."""
+    err = f'missing or malformed signature with tag "{tag}"'
+    members = _split_top(", ".join(inputs), ",")
+    tagged = []
+    for member in members:
+        label, _, rest = member.partition("=")
+        parsed = _inner_list(rest)
+        if parsed and _unquote(parsed[1].get("tag", "")) == tag:
+            tagged.append((label, rest, parsed))
+    if not tagged:
+        raise ValueError(err)
+    if len(tagged) > 1:
+        raise ValueError(f'more than one signature with tag "{tag}"')
+    label, rest, (comps, params) = tagged[0]
+    if re.sub(r"\s+", " ", comps) != re.sub(r"\s+", " ", components.strip("()")):
+        raise ValueError(f"signature must cover exactly {components}")
+    if "alg" in params and _unquote(params["alg"]) != alg:
+        raise ValueError(f"signature algorithm must be {alg}")
+    if "keyid" in params and _unquote(params["keyid"]) != key_id:
+        raise ValueError("signature keyid does not match the expected key")
+    raw = None
+    for member in _split_top(", ".join(sigs), ","):
+        sl, _, sv = member.partition("=")
+        if sl == label:
+            raw = sv
+    m = re.fullmatch(r":([A-Za-z0-9+/=]+):", raw or "")
+    if not m:
+        raise ValueError(err)
+    return _Found(params=rest, signature=base64.b64decode(m.group(1)))
+
+
+# ---- MACs: a shared secret per request, and an HMAC signature over what the host served ----
 
 #: "HPKE-v1" || "KEM" || uint16be(0x0010), naming DHKEM(P-256, HKDF-SHA256).
 _KEM_PREFIX = b"HPKE-v1KEM\x00\x10"
+#: The HPKE suite: DHKEM(P-256, HKDF-SHA256) 0x0010, HKDF-SHA256 0x0001, export-only AEAD 0xFFFF.
+_HPKE_SUITE = b"HPKE\x00\x10\x00\x01\xff\xff"
+_HPKE_INFO = b"atproto-mac"
+_HPKE_SECRET_LEN = 32
 
 
-def encapsulate(kem_did_key: str) -> tuple[str, bytes]:
-    """A syncer's side of one request: the ephemeral key share to send and the shared secret it
-    establishes with the repo author's #atproto_kem key. Use a new one for every request."""
+@dataclass(frozen=True)
+class Encapsulation:
+    """A syncer's side of one request: the ephemeral public key (HPKE's enc) as a did:key, sent as
+    the keyid of its MAC request, and the secret it shares with the repo host."""
+
+    key_share: str
+    shared_secret: bytes
+
+
+def encapsulate(kem_did_key: str) -> Encapsulation:
+    """Generate a fresh ephemeral key and derive the shared secret against the repo author's
+    #atproto_kem key, as HPKE's secret export does (RFC 9180 §6.2: base mode, DHKEM(P-256,
+    HKDF-SHA256), HKDF-SHA256, export-only AEAD, info "atproto-mac", empty exporter context). Use a
+    new one for every request."""
     author = public_key_from_did_key(kem_did_key)
     eph = ec.generate_private_key(ec.SECP256R1())
     dh = eph.exchange(ec.ECDH(), author)
-    ours = _uncompressed(eph.public_key())
-    secret = _derive_shared_secret(dh, ours, _uncompressed(author))
-    return did_key(eph.public_key()), secret
+    shared = _derive_shared_secret(dh, _uncompressed(eph.public_key()), _uncompressed(author))
+    return Encapsulation(did_key(eph.public_key()), _export_secret(shared))
 
 
 def decapsulate(kem: ec.EllipticCurvePrivateKey, key_share: str) -> bytes:
-    """The repo host's side: derive the shared secret for a syncer's key_share using the author's KEM
+    """The repo host's side: derive the shared secret for a syncer's key share using the author's KEM
     private key."""
     syncer = public_key_from_did_key(key_share)
     dh = kem.exchange(ec.ECDH(), syncer)
-    return _derive_shared_secret(dh, _uncompressed(syncer), _uncompressed(kem.public_key()))
+    return _export_secret(_derive_shared_secret(dh, _uncompressed(syncer), _uncompressed(kem.public_key())))
 
 
 def _uncompressed(pub: ec.EllipticCurvePublicKey) -> bytes:
     return pub.public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
 
 
-def _derive_shared_secret(dh: bytes, syncer_pub: bytes, author_pub: bytes) -> bytes:
-    """DHKEM(P-256, HKDF-SHA256) from RFC 9180 §4.1, as the space alpha derives a MAC's key."""
+def _derive_shared_secret(dh: bytes, enc: bytes, author_pub: bytes) -> bytes:
+    """DHKEM(P-256, HKDF-SHA256) from RFC 9180 §4.1: the KEM's shared secret."""
     input_key = _KEM_PREFIX + b"eae_prk" + dh
-    info = b"\x00\x20" + _KEM_PREFIX + b"shared_secret" + syncer_pub + author_pub
+    info = b"\x00\x20" + _KEM_PREFIX + b"shared_secret" + enc + author_pub
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(input_key)
 
 
-def _mac_version(mac_type: str) -> int:
-    return 1
+def _labeled_extract(salt: bytes, label: bytes, ikm: bytes) -> bytes:
+    return hmac.new(salt or bytes(32), b"HPKE-v1" + _HPKE_SUITE + label + ikm, hashlib.sha256).digest()
 
 
-def format_want_mac_header(mac_type: str, key_share: str) -> str:
-    """The Atproto-Space-Want-Mac request header, e.g.
-    type="atproto-space-repo", ver=1, key_share="did:key:zDna..."."""
-    return f'type="{mac_type}", ver={_mac_version(mac_type)}, key_share="{key_share}"'
+def _labeled_expand(prk: bytes, label: bytes, info: bytes, length: int) -> bytes:
+    labeled = length.to_bytes(2, "big") + b"HPKE-v1" + _HPKE_SUITE + label + info
+    return HKDFExpand(algorithm=hashes.SHA256(), length=length, info=labeled).derive(prk)
 
 
-def parse_mac_header(values: list[str], mac_type: str) -> bytes:
-    """The MAC a response carried, from every field line of Atproto-Space-Mac."""
-    fields = _parse_mac_dictionary(values, mac_type)
-    m = re.fullmatch(r":([A-Za-z0-9+/=]+):", fields.get("mac", ""))
-    if not m:
-        raise ValueError("missing or malformed mac")
-    return base64.b64decode(m.group(1))
+def _export_secret(shared_secret: bytes) -> bytes:
+    """HPKE's key schedule (RFC 9180 §5.1, base mode, no PSK) and Export("", 32)."""
+    psk_id_hash = _labeled_extract(b"", b"psk_id_hash", b"")
+    info_hash = _labeled_extract(b"", b"info_hash", _HPKE_INFO)
+    context = b"\x00" + psk_id_hash + info_hash
+    secret = _labeled_extract(shared_secret, b"secret", b"")
+    exporter_secret = _labeled_expand(secret, b"exp", context, 32)
+    return _labeled_expand(exporter_secret, b"sec", b"", _HPKE_SECRET_LEN)
 
 
-def _parse_mac_dictionary(values: list[str], mac_type: str) -> dict[str, str]:
+def _covered_components(profile: str) -> str:
+    return f'("{profile_header(profile).lower()}";sf)'
+
+
+def profile_header(profile: str) -> str:
+    """The response header a profile's MAC covers."""
+    return HEADER_COMMIT if profile == COMMIT_MAC_PROFILE else HEADER_RECORD
+
+
+def format_mac_request(profile: str, key_share: str) -> str:
+    """The Accept-Signature request header asking for a MAC under a profile, keyed by the shared
+    secret for key_share, e.g.
+    mac=("atproto-space-record";sf);keyid="did:key:zDna...";tag="atproto-space-record"."""
+    return f'{MAC_LABEL}={_covered_components(profile)};keyid="{key_share}";tag="{profile}"'
+
+
+@dataclass(frozen=True)
+class MacRequest:
+    """A MAC request as the host reads it from Accept-Signature."""
+
+    label: str
+    key_share: str
+    #: The requested signature parameters, serialized; the host's MAC uses them as given.
+    params: str
+
+
+def parse_mac_request(values: list[str], profile: str) -> MacRequest | None:
+    """The MAC requested for profile in the Accept-Signature field lines, or None if there is none.
+    Other tags are ignored."""
     if not values:
-        raise ValueError("missing or malformed MAC header")
+        return None
+    tagged = []
+    for member in _split_top(", ".join(values), ","):
+        label, _, rest = member.partition("=")
+        parsed = _inner_list(rest)
+        if parsed and _unquote(parsed[1].get("tag", "")) == profile:
+            tagged.append((label, rest, parsed))
+    if not tagged:
+        return None
+    if len(tagged) > 1:
+        raise ValueError(f'more than one MAC requested with tag "{profile}"')
+    label, rest, (comps, params) = tagged[0]
+    if comps != _covered_components(profile).strip("()"):
+        raise ValueError(f"MAC must cover exactly {_covered_components(profile)}")
+    for key in params:
+        if key not in ("keyid", "tag", "alg"):
+            raise ValueError(f"unsupported MAC parameter: {key}")
+    if "alg" in params and _unquote(params["alg"]) != MAC_ALG:
+        raise ValueError(f"MAC algorithm must be {MAC_ALG}")
+    keyid = _unquote(params.get("keyid", ""))
+    if not keyid or not valid_did(keyid):
+        raise ValueError("missing or malformed keyid")
+    return MacRequest(label=label, key_share=keyid, params=rest)
+
+
+def _sf_string(v: str) -> str:
+    return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _mac_base(profile: str, covered: str, params: str) -> bytes:
+    return f'"{profile_header(profile).lower()}";sf: {covered}\n"@signature-params": {params}'.encode()
+
+
+def create_record_mac_headers(uri: str, cid: str, request: MacRequest, secret: bytes) -> dict[str, str]:
+    """The response headers for a record: an Atproto-Space-Record header naming it, and a MAC covering
+    that header, keyed by lowercase header name (what a repo host sends; here, for tests)."""
+    covered = f"uri={_sf_string(uri)}, cid={_sf_string(cid)}"
+    mac = hmac.new(secret, _mac_base(RECORD_MAC_PROFILE, covered, request.params), hashlib.sha256).digest()
+    return {
+        HEADER_RECORD.lower(): covered,
+        "signature-input": f"{request.label}={request.params}",
+        "signature": f"{request.label}=:{base64.b64encode(mac).decode()}:",
+    }
+
+
+def verify_record_mac(
+    uri: str, cid: str, enc: Encapsulation, signature_input: list[str], signature: list[str], covered: list[str]
+) -> None:
+    """Verify a response's MAC, and that the Atproto-Space-Record header it covers names uri and cid.
+    Raises ValueError otherwise."""
+    found = _find_signature(
+        signature_input,
+        signature,
+        tag=RECORD_MAC_PROFILE,
+        components=_covered_components(RECORD_MAC_PROFILE),
+        alg=MAC_ALG,
+        key_id=enc.key_share,
+    )
+    if not covered:
+        raise ValueError(f"missing or malformed {HEADER_RECORD} header")
     fields: dict[str, str] = {}
-    for member in ", ".join(values).split(","):
-        key, _, value = member.strip().partition("=")
-        fields[key] = value.strip()
-    if fields.get("type") != f'"{mac_type}"':
-        raise ValueError(f"unsupported MAC type, expected {mac_type}")
-    if fields.get("ver") != str(_mac_version(mac_type)):
-        raise ValueError(f"unsupported MAC version for {mac_type}")
-    return fields
+    for member in _split_top(", ".join(covered), ","):
+        key, _, value = member.partition("=")
+        v = _unquote(value)
+        if v is None:
+            raise ValueError(f"malformed {HEADER_RECORD} header")
+        fields[key] = v
+    # The sf flag covers the header as re-serialized from its parsed form.
+    reserialized = ", ".join(f"{k}={_sf_string(v)}" for k, v in fields.items())
+    expected = hmac.new(enc.shared_secret, _mac_base(RECORD_MAC_PROFILE, reserialized, found.params), hashlib.sha256)
+    if not hmac.compare_digest(expected.digest(), found.signature):
+        raise ValueError("MAC does not match")
+    if fields.get("uri") != uri or fields.get("cid") != cid:
+        raise ValueError("record does not match its MAC")
 
 
-def _length_prefixed(s: str) -> bytes:
-    b = s.encode()
-    return len(b).to_bytes(2, "big") + b
-
-
-def compute_record_mac(secret: bytes, uri: str, cid: bytes) -> bytes:
-    """HMAC-SHA256 over the record's URI and CID, keyed by the request's shared secret."""
-    import hmac
-
-    return hmac.new(
-        secret, f"{RECORD_MAC_TYPE}-v{RECORD_MAC_VERSION}".encode() + _length_prefixed(uri) + cid, hashlib.sha256
-    ).digest()
-
-
-def verify_record_mac(secret: bytes, uri: str, cid: bytes, mac: bytes) -> bool:
-    import hmac
-
-    return hmac.compare_digest(compute_record_mac(secret, uri, cid), mac)
+def verify_record(
+    want_uri: str,
+    response: dict,
+    enc: Encapsulation,
+    signature_input: list[str],
+    signature: list[str],
+    covered: list[str],
+) -> None:
+    """Check a getRecord response against the MAC it carried: it must be the record requested and the
+    MAC must cover its URI and CID. (Go also re-encodes the value to compare with the CID; this client
+    has no DRISL encoder.) Raises ValueError if it doesn't."""
+    if response.get("uri") != want_uri:
+        raise ValueError(f"record is not the one requested: {response.get('uri')}")
+    verify_record_mac(want_uri, response.get("cid") or "", enc, signature_input, signature, covered)
 
 
 def cid_bytes(c: str) -> bytes:
-    """A CID string's binary form, as a MAC covers it."""
+    """A CID string's binary form."""
     if not c.startswith("b"):
         raise ValueError(f"not a base32 CID: {c}")
     body = c[1:].upper()
     return base64.b32decode(body + "=" * (-len(body) % 8))
-
-
-def verify_record(want_uri: str, response: dict, secret: bytes, mac: bytes) -> bool:
-    """Check a getRecord response against the MAC it carried: it must be the record requested and
-    the MAC must cover its URI and CID. (Go also re-encodes the value to compare with the CID; this
-    client has no DRISL encoder.)"""
-    if response.get("uri") != want_uri:
-        return False
-    try:
-        cid = cid_bytes(response.get("cid") or "")
-    except ValueError:
-        return False
-    return verify_record_mac(secret, want_uri, cid, mac)
 
 
 def jwt_payload(token: str) -> dict:

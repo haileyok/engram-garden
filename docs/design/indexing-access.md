@@ -64,10 +64,12 @@ no place in the member list.
    ▼
  back to the web app (return URL)
 
- later, every ~8 minutes per space:
+ later, every poll (5 minutes) per space:
  appview ──getDelegationToken (OAuth, DPoP)──► authority's PDS
-         ──getSpaceCredential────────────────► authority (space host)
-         ──listRepos / listRepoOps / getRepo─► members' PDSes
+         ──authorizeSpaceSync (+ notify)─────► authority (space host)
+         ──listWriters───────────────────────► authority (space host)
+         ──listRepoOps / getRepo─────────────► members' PDSes
+ and the host calls back: confirmRegistration once, then notifySpaceUpdate
 ```
 
 ### The grant

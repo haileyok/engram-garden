@@ -489,7 +489,7 @@ func (s *Spaces) memberSpaces(ctx context.Context) ([]string, error) {
 		}
 		var out struct {
 			Spaces []struct {
-				URI string `json:"uri"`
+				URI string `json:"space"`
 			} `json:"spaces"`
 			Cursor string `json:"cursor"`
 		}

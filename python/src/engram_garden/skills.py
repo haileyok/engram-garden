@@ -280,13 +280,13 @@ async def members(a: Agent) -> list[str]:
         if cursor:
             params["cursor"] = cursor
         try:
-            out = await a.client.query(host, a.space, ref.authority, "com.atproto.space.listRepos", params) or {}
+            out = await a.client.query(host, a.space, ref.authority, "com.atproto.space.listWriters", params) or {}
         except XrpcError as e:
             raise EngramError(f"listing the space's members: {e}") from e
         repos = out.get("repos") or []
-        dids += [r["did"] for r in repos if r.get("did")]
+        dids += [r["repo"] for r in repos if r.get("repo") and r.get("$type") != "com.atproto.space.defs#repoRemoved"]
         cursor = out.get("cursor") or ""
-        if not cursor or not repos:
+        if not cursor or len(repos) < 100:
             return dids
 
 

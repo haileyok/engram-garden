@@ -188,6 +188,13 @@ func upstreamErr(err error) *Error {
 	}
 	var se *spaceclient.Error
 	if errors.As(err, &se) {
+		switch se.Name {
+		case "SpaceNotFound", "AccountNotAuthorized", "AppNotAuthorized", "NotAuthorized":
+			// A space host refusing to authorize a read says so with a 400, and
+			// may call a space the account can't read missing, so as not to
+			// reveal it. To the user, the space is off limits.
+			return &Error{Status: http.StatusForbidden, Name: se.Name, Message: se.Message}
+		}
 		return passthrough(se.Status, se.Name, se.Message)
 	}
 	var ae *atclient.APIError

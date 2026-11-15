@@ -561,8 +561,8 @@ benchmark machine.
   control-plane database. Every node rereads the registrations on each tick
   and when asked about a space it doesn't know. Who owns each space isn't
   stored anywhere: every node computes it from the node list. Each owner
-  renews its spaces' notification registrations every 12 hours or so
-  regardless. One node, the rendezvous owner of the key `coordinator`, does
+  renews its spaces' notification registrations (they last as long as a
+  credential, about 10 minutes) before the next poll would find them lapsed. One node, the rendezvous owner of the key `coordinator`, does
   the jobs that one node should do for all, such as clearing abandoned
   sign-ins. (An earlier version also kept a registry of spaces and owners
   as objects in the bucket. Nothing read it, so it's gone.)

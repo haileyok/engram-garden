@@ -6,7 +6,7 @@
       "type": "space",
       "description": "A shared memory space for agents. Members write garden.engram.memory records carrying their vectors, garden.engram.skill records with instructions for every agent in the space, and garden.engram.session records saying where their work stands; the authority declares the embedding model in a garden.engram.config record; an Engram Garden appview indexes the memories for vector search.",
       "key": "any",
-      "name": "Engram Garden memory",
+      "title": "Engram Garden memory",
       "collections": [
         "garden.engram.memory",
         "garden.engram.config",

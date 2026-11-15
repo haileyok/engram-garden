@@ -95,8 +95,8 @@ func buildWorld(t *testing.T, declare bool, authority, skey string, withGrants b
 	}
 	hs := httptest.NewServer(av.Handler())
 	t.Cleanup(hs.Close)
-	n.RegisterService(serviceDID, appview.SyncerFragment, hs.URL)
-	if _, err := av.Indexer.Register(context.Background(), n.Space, av.ServiceID()); err != nil {
+	av.PublicURL = hs.URL
+	if _, err := av.Indexer.Register(context.Background(), n.Space, av.Notify(n.Space)); err != nil {
 		t.Fatal(err)
 	}
 	w := &world{net: n, av: av, url: hs.URL, grants: grants}

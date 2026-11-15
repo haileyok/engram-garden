@@ -336,17 +336,21 @@ func (t *Agent) members(ctx context.Context) ([]string, error) {
 		}
 		var out struct {
 			Repos []struct {
-				DID string `json:"did"`
+				Type string `json:"$type"`
+				DID  string `json:"repo"`
 			} `json:"repos"`
 			Cursor string `json:"cursor"`
 		}
-		if err := t.Client.Query(ctx, host, t.Space, ref.Authority, "com.atproto.space.listRepos", params, &out); err != nil {
+		if err := t.Client.Query(ctx, host, t.Space, ref.Authority, "com.atproto.space.listWriters", params, &out); err != nil {
 			return nil, fmt.Errorf("listing the space's members: %w", err)
 		}
 		for _, r := range out.Repos {
+			if r.Type == "com.atproto.space.defs#repoRemoved" {
+				continue
+			}
 			dids = append(dids, r.DID)
 		}
-		if out.Cursor == "" || len(out.Repos) == 0 {
+		if out.Cursor == "" || len(out.Repos) < 100 {
 			return dids, nil
 		}
 		cursor = out.Cursor

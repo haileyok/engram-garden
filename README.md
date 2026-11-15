@@ -10,9 +10,9 @@ space can search them by meaning. An MCP server gives each agent `remember`
 and `recall` tools.
 
 ```
- agent ──MCP──► engram-mcp ──createRecord (memory + vector)──► agent's PDS ──notifyWrite──► space authority
+ agent ──MCP──► engram-mcp ──createRecord (memory + vector)──► agent's PDS ──notifyRepoUpdate──► space authority
                     │ embeds memories and queries                                                │
-                    │ (Ollama by default)                                             forwards notifyWrite
+                    │ (Ollama by default)                                          forwards notifySpaceUpdate
                     │                                                                            ▼
                     └──searchMemories (query vector, space credential)──────────►  engram-appview ──► object storage
                                                                                     pulls + verifies     (one index
@@ -24,7 +24,8 @@ and `recall` tools.
 
 - **The memory space.** A space of type `garden.engram.space`, for example
   `at://did:plc:you/space/garden.engram.space/memory`. Its authority (your
-  account) decides who's a member. Keep its read policy members-only.
+  account) decides who's a member. Give it a member-list policy
+  (`com.atproto.memberspace.policy`) and keep `publicRead` off.
 - **The space's model.** The authority declares the embedding model in a
   `garden.engram.config` record in its own repo: the model's name, its exact
   digest, its dimensions, and any task prefixes. Every vector in the space
@@ -421,9 +422,10 @@ An agent with `engram-mcp` can do the same with the `create_space`,
 the link for a person to approve). By hand:
 
 1. Create an account for each agent.
-2. As the authority, create the space with `com.atproto.simplespace.createSpace`
-   (type `garden.engram.space`, read policy `member-list`).
-3. Add the agents with `com.atproto.simplespace.putMember`.
+2. As the authority, create the space with `com.atproto.space.createSpace`
+   (type `garden.engram.space`, policy `com.atproto.memberspace.policy`, a
+   member list).
+3. Add the agents with `com.atproto.memberspace.putMembers`.
 4. Declare the model with `engram model --set nomic-embed-text`.
 5. Let the appview index it: open its `grantUrl` (from
    `garden.engram.describeService`) with `?space=<space URI>&mode=grant` in a

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -374,6 +375,27 @@ func run(log *slog.Logger) error {
 	if !register {
 		log.Warn("ENGRAM_PUBLIC_URL isn't https: not registering for notifications, relying on polling", "interval", poll)
 	}
+	// Prometheus metrics on their own address, off unless set: the public
+	// listener doesn't serve them.
+	if err := metrics.Serve(ctx, config.Get("ENGRAM_METRICS_LISTEN", ""), log); err != nil {
+		return fmt.Errorf("ENGRAM_METRICS_LISTEN: %w", err)
+	}
+	addr := config.Get("ENGRAM_LISTEN", ":8080")
+	// Bind before the background loops start: registering for notifications
+	// makes the space's host call back (confirmRegistration) at once, and a
+	// connection that arrives before Serve is queued by the listener rather
+	// than refused.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	hs := &http.Server{Addr: addr, Handler: metrics.Instrument(srv.Handler()), ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = hs.Shutdown(shutdown)
+	}()
 	var bg sync.WaitGroup
 	bg.Add(2)
 	go func() {
@@ -385,22 +407,9 @@ func run(log *slog.Logger) error {
 		st.Run(ctx, time.Minute) // flush full or hour-old buffers
 	}()
 
-	// Prometheus metrics on their own address, off unless set: the public
-	// listener doesn't serve them.
-	if err := metrics.Serve(ctx, config.Get("ENGRAM_METRICS_LISTEN", ""), log); err != nil {
-		return fmt.Errorf("ENGRAM_METRICS_LISTEN: %w", err)
-	}
-	addr := config.Get("ENGRAM_LISTEN", ":8080")
-	hs := &http.Server{Addr: addr, Handler: metrics.Instrument(srv.Handler()), ReadHeaderTimeout: 10 * time.Second}
-	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = hs.Shutdown(shutdown)
-	}()
-	log.Info("engram-appview listening", "addr", addr, "service", srv.ServiceID(), "grants", srv.GrantURL(),
+	log.Info("engram-appview listening", "addr", addr, "service", srv.ServiceDID, "grants", srv.GrantURL(),
 		"spaces", srv.Spaces, "indexed", len(srv.IndexedSpaces()), "registration", openRegistration, "node", ring.Self, "nodes", len(ring.Nodes), "epoch", ring.Epoch)
-	err = hs.ListenAndServe()
+	err = hs.Serve(ln)
 	// Stop the background loops (if the server failed on its own), wait
 	// for notification syncs, then publish every buffer.
 	stop()

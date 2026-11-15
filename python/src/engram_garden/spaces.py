@@ -458,7 +458,7 @@ class Spaces(ManageMixin):
                 params["cursor"] = cursor
             out = await self.client.session.get("com.atproto.space.listSpaces", params)
             spaces = out.get("spaces", [])
-            uris.extend(sp["uri"] for sp in spaces)
+            uris.extend(sp["space"] for sp in spaces)
             cursor = out.get("cursor", "")
             if not cursor or not spaces:
                 break

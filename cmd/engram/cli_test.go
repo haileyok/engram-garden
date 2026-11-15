@@ -97,13 +97,13 @@ func buildWorld(t *testing.T, authority, skey string, withGrants bool) *world {
 	}
 	hs := httptest.NewServer(av.Handler())
 	t.Cleanup(hs.Close)
-	n.RegisterService(serviceDID, appview.SyncerFragment, hs.URL)
+	av.PublicURL = hs.URL
 	n.Put(n.Authority, lex.ConfigCollection, lex.ConfigRkey, lex.Config{ModelInfo: model}.Record(time.Now()))
 	w := &world{net: n, av: av, url: hs.URL, grants: grants}
 	if withGrants {
 		w.grant(t)
 	}
-	if _, err := av.Indexer.Register(context.Background(), n.Space, av.ServiceID()); err != nil {
+	if _, err := av.Indexer.Register(context.Background(), n.Space, av.Notify(n.Space)); err != nil {
 		t.Fatal(err)
 	}
 	if err := av.Indexer.SyncSpace(context.Background(), n.Space); err != nil {

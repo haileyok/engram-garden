@@ -53,7 +53,7 @@ func metricValue(t *testing.T, name string, labels map[string]string) float64 {
 func TestMetricsFollowNotifications(t *testing.T) {
 	t.Parallel()
 	f := setup(t)
-	if _, err := f.srv.Indexer.Register(context.Background(), f.net.Space, f.srv.ServiceID()); err != nil {
+	if _, err := f.srv.Indexer.Register(context.Background(), f.net.Space, f.srv.Notify(f.net.Space)); err != nil {
 		t.Fatal(err)
 	}
 	accepted := func() float64 {
@@ -80,10 +80,9 @@ func TestMetricsFollowNotifications(t *testing.T) {
 	if status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", searchParams(f.net.Space, "milk")); status != 200 || len(memories(body)) != 2 {
 		t.Fatalf("search: %d %v", status, body)
 	}
-	svc := f.srv.ServiceID()
-	if s := f.net.Deliver(svc, "com.atproto.space.notifyWrite", map[string]any{"space": f.net.Space, "repo": f.alice.DID, "data": "not bytes"},
-		f.net.ServiceAuth(svc, "com.atproto.space.notifyWrite")); s != 400 {
-		t.Fatalf("malformed notification: %d", s)
+	bad := map[string]any{"$type": "com.atproto.space.defs#repoWrite", "repo": f.alice.DID, "data": "not bytes"}
+	if got := f.net.DeliverUpdate(bad); len(got) != 1 || got[0] != 400 {
+		t.Fatalf("malformed notification: %v", got)
 	}
 
 	for name, want := range map[string]float64{"accepted": 2, "bad_body": 1, "syncs": 2, "upserts": 2, "lag": 1, "searches": 1, "repo_syncs": 2} {

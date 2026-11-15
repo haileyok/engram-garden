@@ -10,6 +10,8 @@ import json
 import struct
 from pathlib import Path
 
+from cryptography.hazmat.primitives.asymmetric import ec
+
 from engram_garden import lex, space, vec
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -30,6 +32,27 @@ def main() -> None:
                 "headers": space.create_space_sig_headers(key, auth, aud),
             }
         )
+    # MACs: a repo host's answer to a record request, for Go to verify.
+    kem_hex = go["macs"][0]["kemKeyHex"]
+    kem = ec.derive_private_key(int(kem_hex, 16), ec.SECP256R1())
+    macs = []
+    for _ in range(2):
+        enc = space.encapsulate(space.did_key(kem.public_key()))
+        accept = space.format_mac_request(space.RECORD_MAC_PROFILE, enc.key_share)
+        req = space.parse_mac_request([accept], space.RECORD_MAC_PROFILE)
+        uri, cid = go["macs"][0]["uri"], go["macs"][0]["cid"]
+        macs.append(
+            {
+                "kemKeyHex": kem_hex,
+                "kemDidKey": space.did_key(kem.public_key()),
+                "keyShare": enc.key_share,
+                "sharedSecretHex": enc.shared_secret.hex(),
+                "acceptSignature": accept,
+                "uri": uri,
+                "cid": cid,
+                "headers": space.create_record_mac_headers(uri, cid, req, enc.shared_secret),
+            }
+        )
     vectors = []
     for v in go["vectors"]:
         floats = [struct.unpack("<f", struct.pack("<I", b))[0] for b in v["bits"]]
@@ -43,7 +66,7 @@ def main() -> None:
             }
         )
     (FIXTURES / "python.json").write_text(
-        json.dumps({"didKey": did_key, "sigs": sigs, "vectors": vectors}, indent=2) + "\n"
+        json.dumps({"didKey": did_key, "sigs": sigs, "macs": macs, "vectors": vectors}, indent=2) + "\n"
     )
 
 

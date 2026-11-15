@@ -173,8 +173,8 @@ class Agent:
         ref = Ref.parse(self.space)
         uri = ref.record_uri(auth, lex.CONFIG_COLLECTION, lex.CONFIG_RKEY)
         try:
-            out, secret, mac = await self.client.query_mac(
-                host, self.space, auth, spacelib.RECORD_MAC_TYPE, "com.atproto.space.getRecord", params
+            out, enc, headers = await self.client.query_mac(
+                host, self.space, auth, spacelib.RECORD_MAC_PROFILE, "com.atproto.space.getRecord", params
             )
         except XrpcError as e:
             if is_error(e, "RecordNotFound", "RepoNotFound"):
@@ -183,8 +183,17 @@ class Agent:
                     "(engram model --set <model>)"
                 ) from e
             raise EngramError(f"reading the space's config: {e}") from e
-        if not spacelib.verify_record(uri, out, secret, mac):
-            raise EngramError("reading the space's config: the record's MAC did not verify")
+        try:
+            spacelib.verify_record(
+                uri,
+                out,
+                enc,
+                headers.get_list("signature-input"),
+                headers.get_list("signature"),
+                headers.get_list(spacelib.HEADER_RECORD),
+            )
+        except ValueError as e:
+            raise EngramError(f"reading the space's config: {e}") from e
         c = lex.parse_config(out["value"])
         self._cfg, self._cfg_at = c, time.monotonic()
         return c

@@ -59,9 +59,10 @@ Guidance for working on Engram Garden.
   delegation token to credential exchange, cached credentials and signed
   requests. Delegation tokens come from a `Delegator`: the user's own PDS
   session (agents, the web app) or, in the appview, a space's grant.
-- `internal/indexer`: syncs member repos. It applies oplog entries to a set
-  hash, checks the result against the member's commit and the MAC the repo
-  host returns for it, and falls back to a verified `getRepo` export. The
+- `internal/indexer`: syncs member repos. It lists the writer set
+  (`listWriters`), applies oplog entries to a set hash, checks the result
+  against the member's commit and the MAC the repo host returns for it, and
+  falls back to a verified `getRepo` export. The
   authority's config record is honored only from the authority's repo.
 - `internal/spacestore`: the index. Per space: a manifest and segment files
   in object storage, a write buffer, flushes, merges, garbage collection,
@@ -85,8 +86,10 @@ Guidance for working on Engram Garden.
   Tables come from the numbered files in `migrations/`, applied at startup
   under an advisory lock. `controltest.New(t)` gives a test a store.
 - `internal/appview`: XRPC handlers, forwarding to a space's owner,
-  notification receivers, `did:web` document, background sync and
-  registration loop. `textsearch.go` embeds the text of a search for callers
+  notification receivers (`confirmRegistration`, `notifySpaceUpdate`,
+  authenticated by a token derived per space from the shared cookie key),
+  `did:web` document, background sync and registration loop (a registration
+  rides on `authorizeSpaceSync` and lasts as long as the credential). `textsearch.go` embeds the text of a search for callers
   with no model of their own (`ENGRAM_TEXT_SEARCH`); it is limited per space
   authority, because a space credential doesn't say who holds it.
 - `internal/mcpserver`: the MCP tools, over `internal/agent`.
@@ -130,8 +133,9 @@ Guidance for working on Engram Garden.
   metric, update `docs/monitoring.md` and, if it belongs on the dashboard,
   `deploy/monitoring/grafana/generate.py` (then run it).
 - `internal/spacetest`: in-memory Spaces network for tests.
-- Spaces primitives (tokens, HTTP signatures, commits, CARs) come from
-  `github.com/haileyok/cocoon/space`. Fix protocol bugs there, not here.
+- Spaces primitives (tokens, HTTP signatures, MACs, commits, STAR archives) come from
+  `github.com/haileyok/cocoon/space`, which tracks the reference
+  implementation's alphas (now November 12, 2026). Fix protocol bugs there, not here.
 
 ## Tests
 

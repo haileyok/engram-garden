@@ -74,15 +74,16 @@ func (s *Spaces) CreateSpace(ctx context.Context, in CreateSpaceIn) (CreateSpace
 	if _, err := syntax.ParseRecordKey(in.Name); err != nil || in.Name == "." || in.Name == ".." {
 		return CreateSpaceOut{}, errors.New("names use letters, digits and . _ ~ : - (up to 512)")
 	}
-	member := map[string]string{"$type": "com.atproto.simplespace.defs#memberListPolicy"}
-	body := map[string]any{"spaceType": lex.SpaceType, "skey": in.Name, "readPolicy": member, "writePolicy": member}
+	// A member list: only members read, and only members with write access
+	// write, through any app.
+	body := map[string]any{"spaceType": lex.SpaceType, "skey": in.Name, "policy": map[string]any{"$type": "com.atproto.memberspace.policy"}}
 	var out struct {
-		URI string `json:"uri"`
+		Space string `json:"space"`
 	}
-	if err := s.Client.Session.Post(ctx, "com.atproto.simplespace.createSpace", body, &out); err != nil {
+	if err := s.Client.Session.Post(ctx, "com.atproto.space.createSpace", body, &out); err != nil {
 		return CreateSpaceOut{}, manageErr("creating the space", err)
 	}
-	e, err := s.addSpace(out.URI)
+	e, err := s.addSpace(out.Space)
 	if err != nil {
 		return CreateSpaceOut{}, err
 	}
@@ -139,7 +140,7 @@ func (s *Spaces) ListMembers(ctx context.Context, in MembersIn) (MembersOut, err
 			Members []Member `json:"members"`
 			Cursor  string   `json:"cursor"`
 		}
-		if err := s.Client.Session.Get(ctx, "com.atproto.simplespace.listMembers", params, &page); err != nil {
+		if err := s.Client.Session.Get(ctx, "com.atproto.memberspace.listMembers", params, &page); err != nil {
 			return out, manageErr("listing members", err)
 		}
 		out.Members = append(out.Members, page.Members...)
@@ -200,8 +201,8 @@ func (s *Spaces) AddMember(ctx context.Context, in AddMemberIn) (MemberOut, erro
 	if !strings.HasPrefix(in.Member, "did:") {
 		m.Handle = strings.TrimPrefix(strings.TrimSpace(in.Member), "@")
 	}
-	body := map[string]any{"space": ref.String(), "did": did, "read": m.Read, "write": m.Write}
-	if err := s.Client.Session.Post(ctx, "com.atproto.simplespace.putMember", body, nil); err != nil {
+	body := map[string]any{"space": ref.String(), "members": []Member{{DID: did, Read: m.Read, Write: m.Write}}}
+	if err := s.Client.Session.Post(ctx, "com.atproto.memberspace.putMembers", body, nil); err != nil {
 		return MemberOut{}, manageErr("adding the member", err)
 	}
 	return MemberOut{Space: e.Name, Member: m}, nil
@@ -223,7 +224,7 @@ func (s *Spaces) RemoveMember(ctx context.Context, in RemoveMemberIn) (MemberOut
 	if err != nil {
 		return MemberOut{}, err
 	}
-	if err := s.Client.Session.Post(ctx, "com.atproto.simplespace.removeMember", map[string]any{"space": ref.String(), "did": did}, nil); err != nil {
+	if err := s.Client.Session.Post(ctx, "com.atproto.memberspace.removeMembers", map[string]any{"space": ref.String(), "dids": []string{did}}, nil); err != nil {
 		return MemberOut{}, manageErr("removing the member", err)
 	}
 	return MemberOut{Space: e.Name, Member: Member{DID: did}}, nil

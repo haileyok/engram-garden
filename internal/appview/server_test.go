@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,7 +93,6 @@ func setup(t *testing.T) *fixture {
 	hs := httptest.NewServer(s.Handler())
 	t.Cleanup(hs.Close)
 	s.PublicURL = hs.URL
-	n.RegisterService(serviceDID, SyncerFragment, hs.URL)
 	return &fixture{net: n, srv: s, url: hs.URL, alice: accts[0], bob: accts[1], mallory: accts[2], client: client, grants: grants, auth: auth}
 }
 
@@ -291,7 +291,7 @@ func TestNotificationForSpaceWithoutGrant(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 	// The registration outlives the grant at the authority's server.
-	if _, err := f.srv.Indexer.Register(ctx, f.net.Space, f.srv.ServiceID()); err != nil {
+	if _, err := f.srv.Indexer.Register(ctx, f.net.Space, f.srv.Notify(f.net.Space)); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.srv.Indexer.SyncSpace(ctx, f.net.Space); err != nil {
@@ -341,10 +341,10 @@ func TestNotificationsKeepTheIndexCurrent(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 
-	if _, err := f.srv.Indexer.Register(ctx, f.net.Space, f.srv.ServiceID()); err != nil {
+	if _, err := f.srv.Indexer.Register(ctx, f.net.Space, f.srv.Notify(f.net.Space)); err != nil {
 		t.Fatal(err)
 	}
-	if regs := f.net.Registrations(); len(regs) != 1 || regs[0] != serviceDID+"#"+SyncerFragment {
+	if regs := f.net.Registrations(); len(regs) != 1 || regs[0].Endpoint != f.url || regs[0].Token != f.srv.Notify(f.net.Space).Token {
 		t.Fatalf("registrations: %v", regs)
 	}
 
@@ -358,29 +358,103 @@ func TestNotificationsKeepTheIndexCurrent(t *testing.T) {
 		t.Fatalf("notified write not indexed: %d %v", status, body)
 	}
 
-	// Only the authority may notify, and only addressed to this service.
-	svc := f.srv.ServiceID()
-	body2 := map[string]any{"space": f.net.Space, "repo": f.alice.DID, "repoRev": "x", "hash": space.LexBytes{1}}
-	if s := f.net.Deliver(svc, "com.atproto.space.notifyWrite", body2, f.net.SignServiceAuth(f.mallory, svc, "com.atproto.space.notifyWrite")); s != 403 {
-		t.Fatalf("non-authority notification: %d", s)
+	// Only the host this service registered with, which holds the token for
+	// the space, may notify.
+	reg := f.net.Registrations()[0]
+	update := map[string]any{"$type": "com.atproto.space.defs#repoWrite", "repo": f.alice.DID, "repoRev": "x", "data": space.LexBytes{1}}
+	for name, body := range map[string]map[string]any{
+		"wrong token":   {"space": f.net.Space, "token": "guess", "update": update},
+		"no token":      {"space": f.net.Space, "update": update},
+		"another space": {"space": "at://did:plc:x/space/garden.engram.space/other", "token": reg.Token, "update": update},
+	} {
+		if s := f.net.Deliver(reg.Endpoint, "com.atproto.space.notifySpaceUpdate", body); s != 400 && s != 403 {
+			t.Fatalf("%s: notification answered %d", name, s)
+		}
 	}
-	if s := f.net.Deliver(svc, "com.atproto.space.notifyWrite", body2, f.net.ServiceAuth("did:web:elsewhere#"+SyncerFragment, "com.atproto.space.notifyWrite")); s != 401 {
-		t.Fatalf("misaddressed notification: %d", s)
-	}
-	if s := f.net.Deliver(svc, "com.atproto.space.notifyWrite", body2, f.net.ServiceAuth(svc, "com.atproto.space.notifySpaceDeleted")); s != 401 {
-		t.Fatalf("wrong lxm: %d", s)
-	}
-	if s := f.net.Deliver(svc, "com.atproto.space.notifyWrite", body2, ""); s != 401 {
-		t.Fatalf("unauthenticated notification: %d", s)
+	if out, s := f.net.Post(reg.Endpoint, "com.atproto.space.confirmRegistration", map[string]string{"space": f.net.Space, "token": "guess", "challenge": "c"}); s != 403 {
+		t.Fatalf("confirmed a registration for the wrong token: %d %s", s, out)
 	}
 
-	// Space deletion empties the index and closes reads.
-	del := map[string]string{"space": f.net.Space}
-	if s := f.net.Deliver(svc, "com.atproto.space.notifySpaceDeleted", del, f.net.ServiceAuth(svc, "com.atproto.space.notifySpaceDeleted")); s != 200 {
-		t.Fatalf("notifySpaceDeleted: %d", s)
+	// A registration is confirmed by echoing the challenge for the right token.
+	out, s := f.net.Post(reg.Endpoint, "com.atproto.space.confirmRegistration", map[string]string{"space": f.net.Space, "token": reg.Token, "challenge": "abc"})
+	if s != 200 || !strings.Contains(string(out), `"abc"`) {
+		t.Fatalf("confirmRegistration: %d %s", s, out)
 	}
-	if status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", searchParams(f.net.Space, "milk")); status != 400 || body["error"] != "UnknownSpace" {
-		t.Fatalf("read after deletion: %d %v", status, body)
+
+	// A host that reports the space deleted is asked again before the index
+	// drops it: a notice for a space that still authorizes changes nothing.
+	del := map[string]any{"$type": "com.atproto.space.notifySpaceUpdate#spaceDeleted"}
+	if got := f.net.DeliverUpdate(del); len(got) != 1 || got[0] != 200 {
+		t.Fatalf("spaceDeleted: %v", got)
+	}
+	f.srv.Jobs.Wait()
+	if status, body := f.get(t, f.bob, serviceDID, "garden.engram.searchMemories", searchParams(f.net.Space, "milk")); status != 200 || len(memories(body)) != 1 {
+		t.Fatalf("dropped a space that still authorizes: %d %v", status, body)
+	}
+	// Once the host really has deleted it, the notice empties the index and
+	// closes reads.
+	f.net.DeleteSpace()
+	if got := f.net.DeliverUpdate(del); len(got) != 1 || got[0] != 200 {
+		t.Fatalf("spaceDeleted: %v", got)
+	}
+	f.srv.Jobs.Wait()
+	if deleted, err := f.srv.Store.SpaceDeleted(ctx, f.net.Space); err != nil || !deleted {
+		t.Fatalf("space not marked deleted: %v %v", deleted, err)
+	}
+}
+
+// TestRemovedWriterNotification: a repoRemoved update drops the repo's
+// memories, and a lapsed registration is renewed on the host's notice.
+func TestRemovedWriterAndExpiryNotifications(t *testing.T) {
+	t.Parallel()
+	f := setup(t)
+	ctx := context.Background()
+	if _, err := f.srv.Indexer.Register(ctx, f.net.Space, f.srv.Notify(f.net.Space)); err != nil {
+		t.Fatal(err)
+	}
+	f.net.Put(f.alice, indexer.Collection, "a1", memory("alice stays"))
+	_, bobRev := f.net.Put(f.bob, indexer.Collection, "b1", memory("bob leaves"))
+	if err := f.srv.Indexer.SyncSpace(ctx, f.net.Space); err != nil {
+		t.Fatal(err)
+	}
+	removedRev := f.net.DropWriter(f.bob)
+	removal := map[string]any{"$type": "com.atproto.space.defs#repoRemoved", "repo": f.bob.DID, "spaceRev": removedRev, "prevSpaceRev": bobRev}
+	if got := f.net.DeliverUpdate(removal); len(got) != 1 || got[0] != 200 {
+		t.Fatalf("repoRemoved: %v", got)
+	}
+	f.srv.Jobs.Wait()
+	status, body := f.get(t, f.alice, serviceDID, "garden.engram.searchMemories", searchParams(f.net.Space, "bob leaves"))
+	if status != 200 {
+		t.Fatalf("search: %d %v", status, body)
+	}
+	for _, m := range memories(body) {
+		if m["author"] == f.bob.DID {
+			t.Fatalf("removed writer's memory still indexed: %v", m)
+		}
+	}
+	if len(memories(body)) != 1 {
+		t.Fatalf("want only alice's memory left: %v", body)
+	}
+
+	// An expiry notice has the service authorize again, and read what it
+	// missed.
+	before := f.net.Calls("com.atproto.space.authorizeSpaceSync")
+	f.net.Put(f.alice, indexer.Collection, "a2", memory("written while unregistered"))
+	expired := map[string]any{"$type": "com.atproto.space.notifySpaceUpdate#registrationExpired", "spaceRev": "3kbcq3p7ad400"}
+	if got := f.net.DeliverUpdate(expired); len(got) != 1 || got[0] != 200 {
+		t.Fatalf("registrationExpired: %v", got)
+	}
+	f.srv.Jobs.Wait()
+	if f.net.Calls("com.atproto.space.authorizeSpaceSync") <= before {
+		t.Fatal("did not reauthorize after the registration expired")
+	}
+	status, body = f.get(t, f.alice, serviceDID, "garden.engram.searchMemories", searchParams(f.net.Space, "unregistered"))
+	found := false
+	for _, m := range memories(body) {
+		found = found || m["text"] == "written while unregistered"
+	}
+	if status != 200 || !found {
+		t.Fatalf("missed write not synced after expiry: %d %v", status, body)
 	}
 }
 
@@ -458,10 +532,12 @@ func TestForwardingToOwner(t *testing.T) {
 		ownerIdx = 1
 	}
 	owner, other := srvs[ownerIdx], servers[1-ownerIdx]
-	n.RegisterService(serviceDID, SyncerFragment, other.URL) // notifications arrive at the non-owner
 
 	n.Put(alice, indexer.Collection, "a1", memory("forwarded memory about kites"))
-	if _, err := owner.Indexer.Register(context.Background(), n.Space, owner.ServiceID()); err != nil {
+	// Notifications arrive at the non-owner.
+	notify := owner.Notify(n.Space)
+	notify.Endpoint = other.URL
+	if _, err := owner.Indexer.Register(context.Background(), n.Space, notify); err != nil {
 		t.Fatal(err)
 	}
 	if got := n.DeliverWrite(n.Authority, ""); len(got) != 1 || got[0] != 200 {
@@ -509,7 +585,7 @@ func TestNotificationFloodIsBounded(t *testing.T) {
 	t.Parallel()
 	f := setup(t)
 	f.srv.MaxSpaceSyncs = 1
-	if _, err := f.srv.Indexer.Register(context.Background(), f.net.Space, f.srv.ServiceID()); err != nil {
+	if _, err := f.srv.Indexer.Register(context.Background(), f.net.Space, f.srv.Notify(f.net.Space)); err != nil {
 		t.Fatal(err)
 	}
 	release, ok := f.srv.trySpaceSlot(f.net.Space)
@@ -546,14 +622,10 @@ func TestDIDDocument(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	var doc struct {
-		ID      string `json:"id"`
-		Service []struct {
-			ID              string `json:"id"`
-			ServiceEndpoint string `json:"serviceEndpoint"`
-		} `json:"service"`
+		ID string `json:"id"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&doc)
-	if doc.ID != serviceDID || len(doc.Service) != 1 || doc.Service[0].ID != "#"+SyncerFragment || doc.Service[0].ServiceEndpoint != f.url {
+	if doc.ID != serviceDID {
 		t.Fatalf("did doc: %+v", doc)
 	}
 }
