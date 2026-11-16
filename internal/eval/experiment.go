@@ -59,6 +59,20 @@ func HybridSystem(f Fusion) System {
 	}}
 }
 
+// VariantSystems ranks with another index over the same memories (one whose
+// vectors differ), by vector alone and by each fusion. Names start with the
+// variant's name.
+func VariantSystems(name string, ix *Index, fusions []Fusion) []System {
+	out := []System{{name + " vector", func(e *Experiment, qi int) []Hit { return ix.Vector(e.QVecs[qi], e.Cand) }}}
+	for _, f := range fusions {
+		hs := HybridSystem(f)
+		out = append(out, System{name + " " + hs.Name, func(e *Experiment, qi int) []Hit {
+			return ix.Hybrid(e.QVecs[qi], &e.parsed[qi], e.Cand, f)
+		}})
+	}
+	return out
+}
+
 // Ranked holds each system's ranking of each query, as memory indexes.
 type Ranked map[string][][]int
 

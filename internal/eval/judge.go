@@ -25,6 +25,11 @@ Judge each memory on its own. Answer with a JSON object only.`
 // judgeBatch is how many memories one call grades.
 const judgeBatch = 20
 
+// JudgeMaxRunes is how much of each memory the judge reads. A memory
+// embedded in chunks can match on a passage far from its start, so a judge
+// that reads only the opening grades such a match as not useful.
+var JudgeMaxRunes = 1500
+
 // Judge grades memories for a query, in order.
 func Judge(ctx context.Context, l *LLM, query string, mems []Memory) ([]int, error) {
 	var out []int
@@ -33,7 +38,7 @@ func Judge(ctx context.Context, l *LLM, query string, mems []Memory) ([]int, err
 		var b strings.Builder
 		fmt.Fprintf(&b, "Query: %s\n\n", query)
 		for i, m := range batch {
-			fmt.Fprintf(&b, "Memory %d:\n<<<\n%s\n", i+1, truncateRunes(m.Text, 1500))
+			fmt.Fprintf(&b, "Memory %d:\n<<<\n%s\n", i+1, truncateRunes(m.Text, JudgeMaxRunes))
 			if len(m.Tags) > 0 {
 				fmt.Fprintf(&b, "Tags: %s\n", strings.Join(m.Tags, ", "))
 			}
@@ -43,16 +48,30 @@ func Judge(ctx context.Context, l *LLM, query string, mems []Memory) ([]int, err
 			b.WriteString(">>>\n\n")
 		}
 		fmt.Fprintf(&b, "Answer as {\"grades\": [...]} with exactly %d integers, one per memory in order.", len(batch))
-		var ans struct {
-			Grades []int `json:"grades"`
+		// A model sometimes answers with the wrong number of grades; asking
+		// again with the count stressed (a different prompt, so not the
+		// cached bad answer) nearly always fixes it.
+		var grades []int
+		for attempt := range 3 {
+			prompt := b.String()
+			if attempt > 0 {
+				prompt += fmt.Sprintf("\n(Your previous answer didn't have exactly %d grades; this is attempt %d. Grade every memory above: %d integers.)", len(batch), attempt+1, len(batch))
+			}
+			var ans struct {
+				Grades []int `json:"grades"`
+			}
+			if err := l.JSON(ctx, judgeSystem, prompt, &ans); err != nil {
+				return nil, err
+			}
+			if len(ans.Grades) == len(batch) {
+				grades = ans.Grades
+				break
+			}
+			if attempt == 2 {
+				return nil, fmt.Errorf("judge returned %d grades for %d memories", len(ans.Grades), len(batch))
+			}
 		}
-		if err := l.JSON(ctx, judgeSystem, b.String(), &ans); err != nil {
-			return nil, err
-		}
-		if len(ans.Grades) != len(batch) {
-			return nil, fmt.Errorf("judge returned %d grades for %d memories", len(ans.Grades), len(batch))
-		}
-		for _, g := range ans.Grades {
+		for _, g := range grades {
 			out = append(out, min(max(g, 0), 2))
 		}
 	}

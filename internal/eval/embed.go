@@ -68,6 +68,35 @@ func (e *Embeddings) Documents(ctx context.Context, mems []Memory) ([][]float32,
 	return e.texts(ctx, texts)
 }
 
+// Chunked embeds each memory as the windows Chunk cuts it into, each with
+// the memory's tags, as Documents does. With whole, a memory that was cut
+// also keeps its whole-text vector, so it ranks by the best of the two. A
+// memory that wasn't cut has one vector, the same as Documents'.
+func (e *Embeddings) Chunked(ctx context.Context, mems []Memory, p ChunkParams, whole bool) ([][][]float32, error) {
+	var texts []string
+	spans := make([][2]int, len(mems))
+	for i, m := range mems {
+		spans[i][0] = len(texts)
+		cs := Chunk(m.Text, p)
+		for _, c := range cs {
+			texts = append(texts, lex.EmbedText(e.Model.DocumentPrefix, c, m.Tags))
+		}
+		if whole && len(cs) > 1 {
+			texts = append(texts, lex.EmbedText(e.Model.DocumentPrefix, m.Text, m.Tags))
+		}
+		spans[i][1] = len(texts)
+	}
+	vs, err := e.texts(ctx, texts)
+	if err != nil {
+		return nil, err
+	}
+	out := make([][][]float32, len(mems))
+	for i, sp := range spans {
+		out[i] = vs[sp[0]:sp[1]]
+	}
+	return out, nil
+}
+
 // Queries embeds queries with the query prefix.
 func (e *Embeddings) Queries(ctx context.Context, qs []Query) ([][]float32, error) {
 	texts := make([]string, len(qs))
