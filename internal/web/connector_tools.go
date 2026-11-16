@@ -40,7 +40,7 @@ func (s *Server) mcpServer() *mcp.Server {
 	}, tool(s.toolListSpaces))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "recall",
-		Description: "Search everyone's memories by meaning and exact words together, in all your spaces unless you pass space. Describe what you're looking for in a sentence or two, and include any identifiers, names, error messages or paths you know: they're matched exactly. Returns the best matches first, each with its space, a similarity from 0 to 1000 when there is one, and a match explaining why it matched.",
+		Description: "Search everyone's memories by meaning and exact words together, in all your spaces unless you pass space. Describe what you're looking for in a sentence or two, and include any identifiers, names, error messages or paths you know: they're matched exactly. Returns the best matches first, each with its space, a similarity from 0 to 1000 when there is one, and a match explaining why it matched. Only the best matches come back: to see everything from a stretch of time, by one person or under a tag, use list_memories. since and until (RFC 3339) limit the search to memories created in that time.",
 		Annotations: readOnly,
 	}, tool(s.toolRecall))
 	mcp.AddTool(srv, &mcp.Tool{
@@ -50,7 +50,7 @@ func (s *Server) mcpServer() *mcp.Server {
 	}, tool(s.toolGet))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_memories",
-		Description: "List a space's memories newest first, optionally filtered by author or tags. Pass space when you're in more than one. Use the returned cursor for the next page.",
+		Description: "List a space's memories newest first, optionally filtered by author, tags, and since (at or after) and until (before) times in RFC 3339. Use this, not recall, when you want all the memories in a slice (everything from today, everything one person wrote, everything with a tag): recall ranks by a query and leaves out whatever doesn't match it well. Pass space when you're in more than one. Use the returned cursor for the next page.",
 		Annotations: readOnly,
 	}, tool(s.toolList))
 	return srv
@@ -185,6 +185,9 @@ func (s *Server) searchSpace(ctx context.Context, u *user, spaceURI string, in a
 	}
 	if in.Since != "" {
 		params.Set("since", in.Since)
+	}
+	if in.Until != "" {
+		params.Set("until", in.Until)
 	}
 	if len(in.Tags) > 0 {
 		params["tags"] = in.Tags
@@ -359,6 +362,12 @@ func (s *Server) toolList(ctx context.Context, u *user, in agent.ListIn) (agent.
 	}
 	if in.Author != "" {
 		params.Set("author", in.Author)
+	}
+	if in.Since != "" {
+		params.Set("since", in.Since)
+	}
+	if in.Until != "" {
+		params.Set("until", in.Until)
 	}
 	if len(in.Tags) > 0 {
 		params["tags"] = in.Tags

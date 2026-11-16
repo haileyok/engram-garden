@@ -13,7 +13,9 @@
           "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25 },
           "cursor": { "type": "string" },
           "author": { "type": "string", "format": "did" },
-          "tags": { "type": "array", "maxLength": 16, "items": { "type": "string" } }
+          "tags": { "type": "array", "maxLength": 16, "items": { "type": "string" } },
+          "since": { "type": "string", "format": "datetime", "description": "Only memories created at or after this time." },
+          "until": { "type": "string", "format": "datetime", "description": "Only memories created before this time." }
         }
       },
       "output": {

@@ -612,3 +612,46 @@ func TestSkillTools(t *testing.T) {
 		t.Fatalf("delete missing: %q", msg)
 	}
 }
+
+// recall and list_memories take since and until: a window of creation time.
+func TestTimeWindowOnRecallAndList(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t, true)
+	alice := connect(t, w.tools(t, "did:plc:alice", embed.HashingProvider{}))
+	for _, text := range []string{"deploy notes about the first release", "deploy notes about the second release"} {
+		if msg := call(t, alice, "remember", map[string]any{"text": text}, nil); msg != "" {
+			t.Fatal(msg)
+		}
+	}
+	w.deliver(t, "did:plc:alice")
+	hourAgo := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	inAnHour := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	for _, tool := range []string{"recall", "list_memories"} {
+		args := func(window map[string]any) map[string]any {
+			if tool == "recall" {
+				window["query"] = "deploy notes"
+			}
+			return window
+		}
+		for _, c := range []struct {
+			name   string
+			window map[string]any
+			want   int
+		}{
+			{"until before they were written", map[string]any{"until": hourAgo}, 0},
+			{"since before they were written", map[string]any{"since": hourAgo}, 2},
+			{"until after they were written", map[string]any{"until": inAnHour}, 2},
+			{"since after they were written", map[string]any{"since": inAnHour}, 0},
+			{"a window around them", map[string]any{"since": hourAgo, "until": inAnHour}, 2},
+		} {
+			var got MemoriesOut
+			if msg := call(t, alice, tool, args(c.window), &got); msg != "" || len(got.Memories) != c.want {
+				t.Errorf("%s, %s: %q, %d memories, want %d", tool, c.name, msg, len(got.Memories), c.want)
+			}
+		}
+		var got MemoriesOut
+		if msg := call(t, alice, tool, args(map[string]any{"until": "last week"}), &got); msg == "" {
+			t.Errorf("%s accepted until=\"last week\"", tool)
+		}
+	}
+}

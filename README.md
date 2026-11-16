@@ -67,9 +67,9 @@ and `recall` tools.
 | `garden.engram.space` | space type | Declares a memory space. Its collections are `garden.engram.memory` and `garden.engram.config`. |
 | `garden.engram.config` | record (`self`) | The space's embedding model: `model`, `modelDigest`, `dims`, optional `documentPrefix`, `queryPrefix`, and `next` during a model change |
 | `garden.engram.memory` | record | `text`, optional `tags`, optional `source`, `createdAt`, `embedding`, and `nextEmbedding` during a model change |
-| `garden.engram.searchMemories` | query | Search with `vector`, `model`, `modelDigest`, `q`, `limit`, `author`, `tags` and `since`. With `q` and a keyword index (`ENGRAM_KEYWORD_SEARCH`), results rank by meaning and exact words together and explain each `match`; `mode` picks `hybrid`, `vector` or `keyword` (no vector needed). With text search on, `q` alone is enough: the appview embeds it (see `ENGRAM_TEXT_SEARCH`); otherwise `q` alone searches by keyword. The response's `mode` says what ran. |
+| `garden.engram.searchMemories` | query | Search with `vector`, `model`, `modelDigest`, `q`, `limit`, `author`, `tags`, `since` and `until`. With `q` and a keyword index (`ENGRAM_KEYWORD_SEARCH`), results rank by meaning and exact words together and explain each `match`; `mode` picks `hybrid`, `vector` or `keyword` (no vector needed). With text search on, `q` alone is enough: the appview embeds it (see `ENGRAM_TEXT_SEARCH`); otherwise `q` alone searches by keyword. The response's `mode` says what ran. |
 | `garden.engram.getMemory` | query | One memory by URI |
-| `garden.engram.listMemories` | query | Newest first, paged, with `author` and `tags` filters |
+| `garden.engram.listMemories` | query | Newest first, paged, with `author`, `tags`, `since` and `until` filters (`since` is inclusive, `until` exclusive). For everything in a slice: search ranks by a query and leaves out the rest |
 | `garden.engram.getMemoryGraph` | query | The newest memories (up to 500) and links between the ones that mean similar things, for drawing the space as a graph |
 | `garden.engram.getSpaceStatus` | query | The space's model, memory count, authors whose vectors don't match, and whether the appview's access is granted, missing or lapsed |
 | `garden.engram.warmSpace` | procedure | Start loading a space's index ahead of searches |
@@ -236,6 +236,7 @@ these commands for each space.
   echo "a longer memory" | engram remember -t notes
   engram recall "how do we deploy" -n 5
   engram list --mine
+  engram list --since 2026-11-15T00:00:00Z   # everything written today, not just the best matches
   engram forget <uri>
   engram status
   ```
@@ -325,7 +326,7 @@ The tools (`remember`, `recall` and `list_memories` take an optional
 - `remember` embeds and stores a memory (`text`, optional `tags` and `source`) in the default space or `space`. Its `note` says if the appview can't read the space, so the memory won't be searchable.
 - `recall` embeds the query with each space's model and searches every space (or `space`); each result names its space. An empty result from a space the appview can't read says so in its `note`.
 - `get_memory` fetches one memory by URI.
-- `list_memories` lists a space's memories newest first.
+- `list_memories` lists a space's memories newest first, filtered by `author`, `tags`, and `since` and `until` (RFC 3339 times; `until` is exclusive). Use it, not `recall`, for "everything from today" or "everything this agent wrote": `recall` returns only the best matches for a query. `recall` takes `since` and `until` too.
 - `forget` deletes one of the agent's own memories.
 - Skills (see [docs/design/skills.md](docs/design/skills.md)): `list_skills`
   lists the skills in the agent's spaces (instructions for kinds of work,

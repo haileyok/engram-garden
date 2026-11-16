@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -627,5 +628,55 @@ func TestDIDDocument(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&doc)
 	if doc.ID != serviceDID {
 		t.Fatalf("did doc: %+v", doc)
+	}
+}
+
+// since and until, which searches and listings both take, pick a window of
+// creation time; a value that isn't a datetime is a bad request.
+func TestSearchAndListTakeATimeWindow(t *testing.T) {
+	t.Parallel()
+	f := setup(t)
+	ctx := context.Background()
+	day := func(d int) string { return time.Date(2026, 10, d, 12, 0, 0, 0, time.UTC).Format(time.RFC3339) }
+	for i, rkey := range []string{"a1", "a2", "a3"} {
+		rec := memory("deploy notes "+rkey, "infra")
+		rec["createdAt"] = day(i + 1)
+		f.net.Put(f.alice, indexer.Collection, rkey, rec)
+	}
+	if err := f.srv.Indexer.SyncSpace(ctx, f.net.Space); err != nil {
+		t.Fatal(err)
+	}
+	rkeysOf := func(body map[string]any) (out []string) {
+		for _, m := range memories(body) {
+			out = append(out, m["uri"].(string)[strings.LastIndex(m["uri"].(string), "/")+1:])
+		}
+		slices.Sort(out)
+		return out
+	}
+	for _, nsid := range []string{"garden.engram.searchMemories", "garden.engram.listMemories"} {
+		params := func(since, until string) url.Values {
+			p := url.Values{"space": {f.net.Space}}
+			if nsid == "garden.engram.searchMemories" {
+				p = searchParams(f.net.Space, "deploy notes")
+			}
+			if since != "" {
+				p.Set("since", since)
+			}
+			if until != "" {
+				p.Set("until", until)
+			}
+			return p
+		}
+		status, body := f.get(t, f.bob, serviceDID, nsid, params(day(2), day(3)))
+		if got := rkeysOf(body); status != 200 || !slices.Equal(got, []string{"a2"}) {
+			t.Errorf("%s since day 2, until day 3 = %d %v, want just a2", nsid, status, got)
+		}
+		status, body = f.get(t, f.bob, serviceDID, nsid, params("", day(3)))
+		if got := rkeysOf(body); status != 200 || !slices.Equal(got, []string{"a1", "a2"}) {
+			t.Errorf("%s until day 3 = %d %v, want a1 and a2", nsid, status, got)
+		}
+		if status, body := f.get(t, f.bob, serviceDID, nsid, params("", "yesterday")); status != 400 || body["error"] != "InvalidRequest" {
+			t.Errorf("%s until=yesterday = %d %v, want 400 InvalidRequest", nsid, status, body)
+		}
 	}
 }

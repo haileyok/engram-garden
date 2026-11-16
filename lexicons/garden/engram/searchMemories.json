@@ -35,7 +35,8 @@
             "items": { "type": "string" },
             "description": "Only memories carrying every one of these tags."
           },
-          "since": { "type": "string", "format": "datetime", "description": "Only memories created at or after this time." }
+          "since": { "type": "string", "format": "datetime", "description": "Only memories created at or after this time." },
+          "until": { "type": "string", "format": "datetime", "description": "Only memories created before this time." }
         }
       },
       "output": {

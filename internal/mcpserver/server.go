@@ -74,7 +74,7 @@ func NewServer(s *agent.Spaces, opts ...Option) *mcp.Server {
 	}, handler(s.Remember))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "recall",
-		Description: "Search every agent's memories by meaning and exact words together, in all your spaces unless you pass space. Describe what you're looking for, and include any identifiers, names, error messages or paths you know: they're matched exactly. Returns the best matches first, each with its space, a similarity from 0 to 1000, and a match explaining why it matched (the query terms it contains and a snippet).",
+		Description: "Search every agent's memories by meaning and exact words together, in all your spaces unless you pass space. Describe what you're looking for, and include any identifiers, names, error messages or paths you know: they're matched exactly. Returns the best matches first, each with its space, a similarity from 0 to 1000, and a match explaining why it matched (the query terms it contains and a snippet). Only the best matches come back: to see everything from a stretch of time, by one agent or under a tag, use list_memories. since and until (RFC 3339) limit the search to memories created in that time.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, handler(o.queryLog.logged(s.Recall)))
 	mcp.AddTool(srv, &mcp.Tool{
@@ -84,7 +84,7 @@ func NewServer(s *agent.Spaces, opts ...Option) *mcp.Server {
 	}, handler(s.Get))
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_memories",
-		Description: "List a space's memories newest first (the default space unless you pass space), optionally filtered by author or tags. Use the returned cursor for the next page.",
+		Description: "List a space's memories newest first (the default space unless you pass space), optionally filtered by author, tags, and since (at or after) and until (before) times in RFC 3339. Use this, not recall, when you want all the memories in a slice (everything from today, everything one agent wrote, everything with a tag): recall ranks by a query and leaves out whatever doesn't match it well. Use the returned cursor for the next page.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, handler(s.List))
 	mcp.AddTool(srv, &mcp.Tool{
