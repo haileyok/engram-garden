@@ -203,3 +203,16 @@ test("loadConfig rejects settings of the wrong type", async () => {
 		process.env.PI_CODING_AGENT_DIR = prev;
 	}
 });
+
+// The extraction prompt is the capture's behavior: no code checks a claim's
+// polarity, so these rules only exist as text. Losing one is silent, and the
+// store then holds a confident wrong fact until someone reads it.
+test("the capture prompt forbids absence claims and asks for dated state", async () => {
+	const { SYSTEM_PROMPT } = await import("../engram/capture.ts");
+	assert.match(SYSTEM_PROMPT, /missing, absent, empty, deleted, gone or not set up/);
+	assert.match(SYSTEM_PROMPT, /a search that cannot see the thing .* is not a check that it is gone/);
+	assert.match(SYSTEM_PROMPT, /write the observation with its date and how it was checked/);
+	assert.match(SYSTEM_PROMPT, /write it as of the date it was true/);
+	// A path the agent typed into a command is not something the conversation reported.
+	assert.match(SYSTEM_PROMPT, /A name the agent itself typed .* is not something the conversation reported/);
+});
