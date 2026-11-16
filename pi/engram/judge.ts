@@ -87,6 +87,8 @@ export const CONSOLIDATE_PROMPT = `A memory is about to be stored in a long-term
 - "new": it's about something the existing ones don't cover. It's stored as written.
 - "merge": it adds to or updates one to three existing memories about the same thing (a later status, a correction, more detail). Write one memory that replaces them and the new one: keep every fact that is still true and useful from all of them, with its identifiers (paths, PR and issue numbers, commits, versions, URLs) and dates, drop only what the newer information makes wrong (an old "not deployed yet" once it's deployed), and say when things happened. The replaced memories are deleted, so anything you leave out is lost: when in doubt, keep it, or choose "new". Merge only when the new memory adds or corrects a fact; don't touch dates or claims the new memory doesn't change, and never add an identifier, path, commit or date that none of them contains. Merge only memories about the same subject; different deploys, projects or decisions stay separate.
 
+Two facts that disagree are not always a correction. When one says something is missing, gone or not set up and another says it exists, keep both with their dates and say which is newer ("~/src/legacy was checked and not found on 2026-11-16; the repo is at ~/src/current"), rather than deleting the one that looks wrong on the assumption it cannot be right. A negative is the claim most often mistaken, so a merge drops one only when the newer memory shows the positive check that contradicts it.
+
 "ids" names existing memories by their id: for "skip", the ones that already say it (at least one); for "merge", the ones the merged memory replaces; for "new", none.
 
 ${DATA_NOTE}

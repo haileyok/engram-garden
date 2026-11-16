@@ -107,3 +107,12 @@ test("sameMemory treats a case change as a change", async () => {
 	const { sameMemory } = await import("../engram/judge.ts");
 	assert.ok(!sameMemory("Config lives in /srv/app.", "Config lives in /srv/App."));
 });
+
+// A merge deletes the memories it replaces, so telling it to trust the newer
+// side of a disagreement is how a wrong negative gets to erase a right fact.
+test("the consolidate prompt keeps disagreeing facts, dated, instead of dropping the negative", async () => {
+	const { CONSOLIDATE_PROMPT } = await import("../engram/judge.ts");
+	assert.match(CONSOLIDATE_PROMPT, /Two facts that disagree are not always a correction/);
+	assert.match(CONSOLIDATE_PROMPT, /keep both with their dates and say which is newer/);
+	assert.match(CONSOLIDATE_PROMPT, /A negative is the claim most often mistaken/);
+});

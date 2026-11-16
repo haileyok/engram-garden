@@ -136,8 +136,10 @@ Leave out, even if true:
 - one-off details of this machine or session unless they will bite again
 - anything listed under "Already known", and anything the agent stored itself with a remember tool call in the transcript
 - secrets of any kind: passwords, tokens, API keys, private keys, credentials, personal data
+- claims that something is missing, absent, empty, deleted, gone or not set up. Absence is the easiest thing to be wrong about, and a future session will believe it: a search that cannot see the thing (a find -name foo, which cannot match a checkout named .foo; an assumed path; a repository nobody opened) is not a check that it is gone. Only say it when the transcript shows a command that would have found the thing and didn't, and then write the observation with its date and how it was checked ("the checkout was not at ~/src/legacy when checked on 2026-11-16; it is ~/src/current") rather than a standing conclusion ("~/src/legacy no longer exists").
+- a state that changes (what is deployed, which version or path is current, who owns what) stated as timeless truth: write it as of the date it was true.
 
-Copy identifiers (commits, PR numbers, paths, versions, commands, URLs) exactly as they appear in the transcript, and never write one you didn't see there: tool output is cut short, so if an identifier isn't shown, leave it out rather than guess. A memory naming anything the transcript doesn't is thrown away.
+Copy identifiers (commits, PR numbers, paths, versions, commands, URLs) exactly as they appear in the transcript, and never write one you didn't see there: tool output is cut short, so if an identifier isn't shown, leave it out rather than guess. A memory naming anything the transcript doesn't is thrown away. A name the agent itself typed (a path in a command that failed, a directory it meant to be in) is not something the conversation reported: an identifier is only worth copying when a command's output, the person, or a document in the transcript says it.
 
 Write each memory as two to five plain sentences, at most about 600 characters, that stand alone: name the project, the people and the date instead of "this", "here" or "the user". One subject per memory. Most stretches of conversation hold nothing worth keeping; returning none is the usual answer.
 
