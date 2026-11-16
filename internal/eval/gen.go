@@ -26,10 +26,20 @@ const (
 	CatMixed      = "mixed"
 	CatNoAnswer   = "noanswer"
 	CatLogged     = "logged"
+	// CatDeep asks for a detail stated only late in a long memory, which is
+	// what a memory embedded as one vector may bury.
+	CatDeep = "deep"
+)
+
+// GenMaxRunes is how much of a memory the query writer reads, and DeepMin is
+// the length at which a memory also gets a deep query.
+var (
+	GenMaxRunes = 4000
+	DeepMin     = 2000
 )
 
 // Categories lists the generated categories in report order.
-var Categories = []string{CatParaphrase, CatIdentifier, CatPart, CatName, CatWordForm, CatCommon, CatTagSource, CatMixed, CatNoAnswer, CatLogged}
+var Categories = []string{CatParaphrase, CatIdentifier, CatPart, CatName, CatWordForm, CatCommon, CatTagSource, CatMixed, CatDeep, CatNoAnswer, CatLogged}
 
 // Query is one evaluation query.
 type Query struct {
@@ -107,7 +117,7 @@ const genSystem = `You write search queries that an AI agent would type into its
 
 func genPrompt(m Memory, f features) (string, []string) {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Memory:\n<<<\n%s\n>>>\n", truncateRunes(m.Text, 4000))
+	fmt.Fprintf(&b, "Memory:\n<<<\n%s\n>>>\n", truncateRunes(m.Text, GenMaxRunes))
 	if len(m.Tags) > 0 {
 		fmt.Fprintf(&b, "Tags: %s\n", strings.Join(m.Tags, ", "))
 	}
@@ -119,6 +129,10 @@ func genPrompt(m Memory, f features) (string, []string) {
 	fmt.Fprintf(&b, "- %q: a natural question or phrase asking for this memory's information in different words. Don't copy its distinctive words or identifiers.\n", CatParaphrase)
 	fmt.Fprintf(&b, "- %q: a query that uses a different grammatical form of a key word in the memory (\"migrating\" where it says \"migration\"), in otherwise different words.\n", CatWordForm)
 	fmt.Fprintf(&b, "- %q: a vague query made mostly of common words (like \"the thing we fixed before the deploy\") that still points at this memory.\n", CatCommon)
+	if len([]rune(m.Text)) > DeepMin {
+		keys = append(keys, CatDeep)
+		fmt.Fprintf(&b, "- %q: a natural question about one specific detail (a decision, number, command, reason or name) that this memory states only in its last third, nowhere near its start, in different words from the memory. It must not be answerable from the memory's opening.\n", CatDeep)
+	}
 	if len(f.identifiers) > 0 {
 		keys = append(keys, CatIdentifier, CatMixed)
 		fmt.Fprintf(&b, "- %q: a short lookup containing exactly one of these identifiers, copied verbatim: %s\n", CatIdentifier, quoteList(f.identifiers))
@@ -166,7 +180,18 @@ func valid(cat, q string, f features) bool {
 
 // Generate writes known-item queries for a sample of n memories.
 func Generate(ctx context.Context, l *LLM, ix *Index, n int, seed uint64) ([]Query, error) {
-	order := rand.New(rand.NewPCG(seed, 1)).Perm(len(ix.Mems))
+	return GenerateLong(ctx, l, ix, n, seed, 0)
+}
+
+// GenerateLong writes queries for a sample of n memories of at least
+// minRunes runes (any length when 0).
+func GenerateLong(ctx context.Context, l *LLM, ix *Index, n int, seed uint64, minRunes int) ([]Query, error) {
+	var order []int
+	for _, i := range rand.New(rand.NewPCG(seed, 1)).Perm(len(ix.Mems)) {
+		if minRunes == 0 || len([]rune(ix.Mems[i].Text)) >= minRunes {
+			order = append(order, i)
+		}
+	}
 	order = order[:min(n, len(order))]
 	var mu sync.Mutex
 	var out []Query

@@ -54,6 +54,7 @@ commands:
   tune       search keyword weights, BM25 and fusion on the tuning split (tuned.json)
   report     tune fusion on the tuning split and report the held-out split
   run        gen, judge and report
+  chunks     compare embedding memories whole against in windows (chunks-report.md)
   sample     write N model-graded pairs to grade by hand (handgrades.csv)
   agreement  compare hand grades with the model's (Cohen's kappa) and keep them
 `
@@ -73,13 +74,14 @@ func main() {
 }
 
 type opts struct {
-	dir                      string
-	space, in                string
-	model, url, docPfx, qPfx string
-	dims                     int
-	n, noAnswer, depth, conc int
-	log                      string
-	seed                     uint64
+	dir                                  string
+	space, in                            string
+	model, url, docPfx, qPfx             string
+	dims                                 int
+	n, noAnswer, depth, conc             int
+	log                                  string
+	seed                                 uint64
+	minLen, genRunes, judgeRunes, perCat int
 }
 
 func run(ctx context.Context, cmd string, args []string) error {
@@ -99,13 +101,25 @@ func run(ctx context.Context, cmd string, args []string) error {
 	fs.IntVar(&o.depth, "depth", 20, "judge: how deep to pool each system's results")
 	fs.IntVar(&o.conc, "concurrency", 8, "chat model calls at once")
 	fs.Uint64Var(&o.seed, "seed", 1, "sampling seed")
+	fs.IntVar(&o.perCat, "per-category", 0, "chunks: keep only this many queries per category (a sample, to save judging)")
+	fs.IntVar(&o.minLen, "minlen", 0, "gen: only write queries for memories at least this many characters long")
+	fs.IntVar(&o.genRunes, "gen-runes", 0, "gen: characters of a memory the query writer reads (default 4000)")
+	fs.IntVar(&o.judgeRunes, "judge-runes", 0, "judge: characters of a memory the judge reads (default 1500)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if o.dir == "" {
 		return errors.New("-dir is required")
 	}
+	if o.genRunes > 0 {
+		eval.GenMaxRunes = o.genRunes
+	}
+	if o.judgeRunes > 0 {
+		eval.JudgeMaxRunes = o.judgeRunes
+	}
 	switch cmd {
+	case "chunks":
+		return chunks(ctx, o)
 	case "fetch":
 		return fetch(ctx, o)
 	case "import":
@@ -248,7 +262,7 @@ func gen(ctx context.Context, o opts) error {
 	if err != nil {
 		return err
 	}
-	known, err := eval.Generate(ctx, l, ix, o.n, o.seed)
+	known, err := eval.GenerateLong(ctx, l, ix, o.n, o.seed, o.minLen)
 	if err != nil {
 		return err
 	}
@@ -321,6 +335,7 @@ func experiment(ctx context.Context, o opts) (*eval.Experiment, []eval.Judgment,
 	if len(qs) == 0 {
 		return nil, nil, errors.New("no queries: run gen first")
 	}
+	qs = samplePerCategory(qs, o.perCat)
 	qv, err := emb.Queries(ctx, qs)
 	if err != nil {
 		return nil, nil, err
@@ -564,4 +579,26 @@ func agreement(o opts) error {
 	}
 	fmt.Printf("%d hand grades: exact agreement %.0f%%, Cohen's kappa %.2f\n", len(hand), 100*float64(agree)/float64(len(hand)), eval.CohensKappa(hand, model))
 	return eval.WriteJSONL(path(o, "judgments.jsonl"), js)
+}
+
+// samplePerCategory keeps the first n queries of each category, three times
+// as many of the deep ones (queries are stored in the order of their hashed
+// IDs, so that's a random sample). Zero keeps all.
+func samplePerCategory(qs []eval.Query, n int) []eval.Query {
+	if n <= 0 {
+		return qs
+	}
+	count := map[string]int{}
+	var out []eval.Query
+	for _, q := range qs {
+		limit := n
+		if q.Category == eval.CatDeep {
+			limit = 3 * n
+		}
+		if count[q.Category] < limit {
+			count[q.Category]++
+			out = append(out, q)
+		}
+	}
+	return out
 }

@@ -295,3 +295,36 @@ func TestJudgeBatchesAndChecksCounts(t *testing.T) {
 		t.Error("a wrong number of grades was accepted")
 	}
 }
+
+// A judge that answers with the wrong number of grades is asked again, and
+// the bad answer isn't what the next run reads from the cache.
+func TestJudgeRetriesAWrongCount(t *testing.T) {
+	t.Parallel()
+	l, calls := fakeChat(t, func(user string) any {
+		if !strings.Contains(user, "previous answer") {
+			return map[string]any{"grades": []int{}}
+		}
+		return map[string]any{"grades": []int{2, 0}}
+	})
+	mems := []Memory{{ID: "a", Text: "alpha"}, {ID: "b", Text: "beta"}}
+	for range 2 {
+		got, err := Judge(context.Background(), l, "q", mems)
+		if err != nil || len(got) != 2 || got[0] != 2 || got[1] != 0 {
+			t.Fatalf("grades %v, err %v", got, err)
+		}
+	}
+	if calls.Load() != 2 {
+		t.Errorf("%d calls, want 2 (the bad answer and its retry, then both cached)", calls.Load())
+	}
+}
+
+func TestJudgeGivesUpOnAnAlwaysWrongCount(t *testing.T) {
+	t.Parallel()
+	l, calls := fakeChat(t, func(string) any { return map[string]any{"grades": []int{1}} })
+	if _, err := Judge(context.Background(), l, "q", []Memory{{ID: "a", Text: "x"}, {ID: "b", Text: "y"}}); err == nil {
+		t.Fatal("a judge that never grades every memory was accepted")
+	}
+	if calls.Load() != 3 {
+		t.Errorf("%d calls, want 3", calls.Load())
+	}
+}
