@@ -45,6 +45,15 @@ type Settings struct {
 	AppviewDID string  `json:"appviewDid,omitempty"`
 	Account    Account `json:"account"`
 	Embed      Embed   `json:"embed,omitzero"`
+	// Identity is the path of this agent's own identity file (see
+	// Provisioner): the account it signs in to the lounge with. Usually set
+	// per process, with ENGRAM_IDENTITY.
+	Identity string `json:"identity,omitempty"`
+	// Lounge is the lounge to join, overriding the identity's.
+	Lounge string `json:"lounge,omitempty"`
+	// Via is recorded in memories as the agent they were written for;
+	// defaults to the identity's DID.
+	Via string `json:"via,omitempty"`
 }
 
 // SpaceEntry is a memory space the agent uses. Name is how commands and
@@ -329,6 +338,9 @@ func (s *Settings) applyEnv(getenv func(string) string) error {
 	if ident, pass := get("ENGRAM_IDENTIFIER"), get("ENGRAM_PASSWORD"); ident != "" && pass != "" {
 		s.Account = Account{Handle: ident, SignIn: SignInPassword, Password: pass, PDSHost: get("ENGRAM_PDS_HOST")}
 	}
+	set(&s.Identity, "ENGRAM_IDENTITY")
+	set(&s.Lounge, "ENGRAM_LOUNGE")
+	set(&s.Via, "ENGRAM_VIA")
 	set(&s.Embed.URL, "ENGRAM_EMBED_URL")
 	set(&s.Embed.APIKey, "ENGRAM_EMBED_API_KEY")
 	set(&s.Embed.Model, "ENGRAM_EMBED_MODEL")

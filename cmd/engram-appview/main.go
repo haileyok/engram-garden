@@ -33,6 +33,7 @@ import (
 	"github.com/haileyok/engram-garden/internal/config"
 	"github.com/haileyok/engram-garden/internal/control"
 	"github.com/haileyok/engram-garden/internal/indexer"
+	"github.com/haileyok/engram-garden/internal/lounge"
 	"github.com/haileyok/engram-garden/internal/metrics"
 	"github.com/haileyok/engram-garden/internal/routing"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
@@ -352,6 +353,7 @@ func run(log *slog.Logger) error {
 		TextSearch: textSearch,
 		Store:      st,
 		Indexer:    &indexer.Indexer{Store: st, Client: client, Dir: dir, Log: log},
+		Lounge:     &lounge.Service{Reader: &indexer.Reader{Client: client, Dir: dir}, Dir: dir, Log: log},
 		Dir:        dir,
 		Log:        log,
 		ServiceDID: serviceDID,

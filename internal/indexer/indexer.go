@@ -16,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bluesky-social/indigo/atproto/atdata"
 	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 	"github.com/haileyok/cocoon/space"
@@ -361,16 +360,6 @@ func (ix *Indexer) SyncRepo(ctx context.Context, spaceURI, did, spaceRev string)
 // author's current #atproto_kem key.
 var errKemRotated = errors.New("mac did not verify")
 
-// purgeDID drops a cached DID document, so the next read resolves the
-// author's #atproto_kem key again.
-func (ix *Indexer) purgeDID(ctx context.Context, did string) {
-	d, err := syntax.ParseDID(did)
-	if err != nil || ix.Dir == nil {
-		return
-	}
-	_ = ix.Dir.Purge(ctx, d.AtIdentifier())
-}
-
 // errResync marks an incremental sync that can't be trusted or applied; a
 // full export replaces it.
 var errResync = errors.New("resync needed")
@@ -389,103 +378,26 @@ type pathState struct {
 	value json.RawMessage
 }
 
+func (ix *Indexer) reader() *Reader {
+	return &Reader{Client: ix.Client, Dir: ix.Dir, PageSize: ix.PageSize}
+}
+
 func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st spacestore.RepoPosition, spaceRev string, fresh bool) error {
-	host, err := ix.Client.PDSHost(ctx, did)
+	ref, _ := space.ParseRef(spaceURI)
+	want := func(coll, rkey string) bool {
+		isConfig := did == ref.Authority && coll == lex.ConfigCollection && rkey == lex.ConfigRkey
+		return coll == Collection || isConfig
+	}
+	changes, pos, commit, err := ix.reader().ReadOps(ctx, spaceURI, did, Position{Rev: st.Rev, SetHash: st.SetHash}, fresh, want)
 	if err != nil {
-		return err
-	}
-	if fresh {
-		ix.purgeDID(ctx, did)
-	}
-	repo, err := space.RepoCommitFromState(st.SetHash)
-	if err != nil {
-		return fmt.Errorf("%w: stored set hash: %v", errResync, err)
-	}
-	pageSize := ix.PageSize
-	if pageSize <= 0 {
-		pageSize = 500
-	}
-	final := map[string]*pathState{}
-	var order []string
-	var (
-		commit *space.Commit
-		mac    *spaceclient.Mac
-	)
-	cursor := ""
-	for {
-		params := url.Values{"space": {spaceURI}, "repo": {did}, "limit": {fmt.Sprint(pageSize)}}
-		if cursor != "" {
-			params.Set("cursor", cursor)
-		} else if st.Rev != "" {
-			params.Set("since", st.Rev)
-		}
-		var out struct {
-			Ops    []opEntry     `json:"ops"`
-			Cursor string        `json:"cursor"`
-			Commit *space.Commit `json:"commit"`
-		}
-		pageMac, err := ix.Client.QueryMac(ctx, host, spaceURI, did, space.CommitMacProfile, "com.atproto.space.listRepoOps", params, &out)
-		if err != nil {
-			return fmt.Errorf("listRepoOps: %w", err)
-		}
-		for _, op := range out.Ops {
-			rop, err := parseOp(op)
-			if err != nil {
-				return fmt.Errorf("%w: %v", errResync, err)
-			}
-			repo.ApplyOp(rop)
-			path := space.FormatRecordPath(op.Collection, op.Rkey)
-			if _, seen := final[path]; !seen {
-				order = append(order, path)
-			}
-			final[path] = &pathState{cid: rop.Cid, value: op.Value}
-		}
-		// Every page carries the repo's current commit, but only the last
-		// page's, which has no cursor, says what the ops should add up to.
-		if out.Cursor == "" {
-			commit, mac = out.Commit, pageMac
-			break
-		}
-		if out.Cursor == cursor {
-			return fmt.Errorf("%w: oplog cursor did not advance", errResync)
-		}
-		cursor = out.Cursor
-	}
-	if commit == nil {
-		return fmt.Errorf("%w: oplog ended without a commit", errResync)
-	}
-	if err := verifyCommit(spaceURI, did, *commit, repo, mac); err != nil {
 		return err
 	}
 
-	ref, _ := space.ParseRef(spaceURI)
 	var upserts []spacestore.Memory
 	var deletes []string
-	for _, path := range order {
-		ps := final[path]
-		coll, rkey, err := space.ParseRecordPath(path)
-		if err != nil {
-			continue
-		}
-		isConfig := did == ref.Authority && coll == lex.ConfigCollection && rkey == lex.ConfigRkey
-		if coll != Collection && !isConfig {
-			continue
-		}
-		var rec map[string]any
-		if ps.cid != nil {
-			if len(ps.value) == 0 {
-				return fmt.Errorf("%w: no value for the latest version of %s", errResync, path)
-			}
-			if rec, err = atdata.UnmarshalJSON(ps.value); err != nil {
-				return fmt.Errorf("%w: %s: %v", errResync, path, err)
-			}
-			ser, err := space.SerializeRecord(coll, rkey, rec)
-			if err != nil || !ser.Cid.Equals(*ps.cid) {
-				return fmt.Errorf("%w: %s: value does not match its cid", errResync, path)
-			}
-		}
-		if isConfig {
-			resync, err := ix.applyConfig(ctx, spaceURI, rec)
+	for _, c := range changes {
+		if c.Collection == lex.ConfigCollection {
+			resync, err := ix.applyConfig(ctx, spaceURI, c.Record)
 			if err != nil {
 				return err
 			}
@@ -496,18 +408,18 @@ func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st
 			}
 			continue
 		}
-		if ps.cid == nil {
-			deletes = append(deletes, rkey)
+		if c.Cid == nil {
+			deletes = append(deletes, c.Rkey)
 			continue
 		}
-		if m, ok := memoryFromRecord(did, rkey, ps.cid.String(), rec); ok {
+		if m, ok := memoryFromRecord(did, c.Rkey, c.Cid.String(), c.Record); ok {
 			upserts = append(upserts, m)
 		} else {
 			// Not a usable memory: make sure no older version lingers.
-			deletes = append(deletes, rkey)
+			deletes = append(deletes, c.Rkey)
 		}
 	}
-	next := spacestore.RepoPosition{Rev: commit.Rev, SetHash: repo.SetHash.State(), SpaceRev: max(st.SpaceRev, spaceRev)}
+	next := spacestore.RepoPosition{Rev: pos.Rev, SetHash: pos.SetHash, SpaceRev: max(st.SpaceRev, spaceRev)}
 	if err := ix.apply(ctx, spaceURI, did, next, upserts, deletes, false); err != nil {
 		return err
 	}
@@ -595,38 +507,19 @@ func verifyCommit(spaceURI, did string, c space.Commit, repo *space.RepoCommit, 
 }
 
 func (ix *Indexer) syncFull(ctx context.Context, spaceURI, did, spaceRev string, fresh bool) error {
-	host, err := ix.Client.PDSHost(ctx, did)
-	if err != nil {
-		return err
-	}
-	if fresh {
-		ix.purgeDID(ctx, did)
-	}
-	mac, body, err := ix.Client.QueryRawMac(ctx, host, spaceURI, did, space.CommitMacProfile, "com.atproto.space.getRepo", url.Values{"space": {spaceURI}, "repo": {did}})
-	if err != nil {
-		return fmt.Errorf("getRepo: %w", err)
-	}
-	defer body.Close()
-	vr, err := space.VerifyRepoStarFull(body, space.VerifyRepoParams{Space: spaceURI, Repo: did, VerifyMacParams: mac.Params()})
-	if spaceclient.IsError(err, "RepoNotFound") {
+	records, pos, _, err := ix.reader().ReadRepo(ctx, spaceURI, did, fresh)
+	if errors.Is(err, ErrRepoNotFound) {
 		// The member has no repo (any more): nothing of theirs to index.
 		return ix.Store.RemoveRepo(ctx, spaceURI, did)
 	}
 	if err != nil {
-		var (
-			verr *space.RepoVerificationError
-			merr *space.MacError
-		)
-		if (errors.As(err, &verr) || errors.As(err, &merr)) && !fresh {
-			return fmt.Errorf("%w: %v", errKemRotated, err)
-		}
-		return fmt.Errorf("verifying %s's repo: %w", did, err)
+		return err
 	}
 
 	ref, _ := space.ParseRef(spaceURI)
 	if did == ref.Authority {
 		var cfgRec map[string]any
-		for _, r := range vr.Records {
+		for _, r := range records {
 			if r.Collection == lex.ConfigCollection && r.Rkey == lex.ConfigRkey {
 				cfgRec = r.Record
 			}
@@ -635,12 +528,8 @@ func (ix *Indexer) syncFull(ctx context.Context, spaceURI, did, spaceRev string,
 			return err
 		}
 	}
-	var (
-		upserts []spacestore.Memory
-		refs    = make([]space.RecordRef, 0, len(vr.Records))
-	)
-	for _, r := range vr.Records {
-		refs = append(refs, space.RecordRef{Collection: r.Collection, Rkey: r.Rkey, Cid: r.Cid})
+	var upserts []spacestore.Memory
+	for _, r := range records {
 		if r.Collection != Collection {
 			continue
 		}
@@ -648,12 +537,11 @@ func (ix *Indexer) syncFull(ctx context.Context, spaceURI, did, spaceRev string,
 			upserts = append(upserts, m)
 		}
 	}
-	state := space.RepoCommitFromRecords(refs).SetHash.State()
-	next := spacestore.RepoPosition{Rev: vr.Commit.Rev, SetHash: state, SpaceRev: spaceRev}
+	next := spacestore.RepoPosition{Rev: pos.Rev, SetHash: pos.SetHash, SpaceRev: spaceRev}
 	if err := ix.apply(ctx, spaceURI, did, next, upserts, nil, true); err != nil {
 		return err
 	}
-	ix.log().Info("exported repo", "space", spaceURI, "repo", did, "memories", len(upserts), "rev", vr.Commit.Rev)
+	ix.log().Info("exported repo", "space", spaceURI, "repo", did, "memories", len(upserts), "rev", pos.Rev)
 	return nil
 }
 

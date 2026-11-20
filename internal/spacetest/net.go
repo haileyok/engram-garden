@@ -41,6 +41,13 @@ type Account struct {
 	ops      []op
 	rev      string
 	spaceRev string
+	// Handle and AlsoKnownAs are published in its DID document.
+	Handle      string
+	AlsoKnownAs []string
+	password    string
+	// repoRecords are its ordinary (public) repo records, by path.
+	repoRecords map[string]map[string]any
+
 	// listed is whether listWriters includes the account once it has written:
 	// false once its removal has been forgotten.
 	listed bool
@@ -84,6 +91,22 @@ type Net struct {
 	// RefuseConfirmation makes the notify endpoints' confirmRegistration
 	// answers count as failed, as a host that can't reach them would find.
 	RefuseConfirmation bool
+
+	// AutoDeliver delivers each write made through the XRPC API to the
+	// registered endpoints, as a space host does, instead of waiting for
+	// the test to call DeliverWrite.
+	AutoDeliver bool
+
+	// Created records each agent account created (createAgent), in order.
+	Created []CreateAccount
+}
+
+// CreateAccount is an account the network created for an agent.
+type CreateAccount struct {
+	DID         string
+	Handle      string
+	RecoveryKey string
+	AlsoKnownAs []string
 }
 
 // Registration is an endpoint registered through authorizeSpaceSync to be
@@ -103,6 +126,13 @@ func New(t testing.TB) *Net { return NewSpace(t, "authority", "memory") }
 // different space URIs.
 func NewSpace(t testing.TB, authority, skey string) *Net {
 	t.Helper()
+	return NewTyped(t, authority, "garden.engram.space", skey)
+}
+
+// NewTyped is NewSpace for a space of another type, such as a lounge
+// (garden.engram.lounge).
+func NewTyped(t testing.TB, authority, spaceType, skey string) *Net {
+	t.Helper()
 	n := &Net{
 		T:             t,
 		accounts:      map[string]*Account{},
@@ -116,7 +146,7 @@ func NewSpace(t testing.TB, authority, skey string) *Net {
 	n.Server = httptest.NewServer(http.HandlerFunc(n.serve))
 	t.Cleanup(n.Server.Close)
 	n.Authority = n.NewAccount("did:plc:" + authority)
-	n.Space = "at://" + n.Authority.DID + "/space/garden.engram.space/" + skey
+	n.Space = "at://" + n.Authority.DID + "/space/" + spaceType + "/" + skey
 	return n
 }
 
@@ -151,9 +181,17 @@ func (n *Net) publish(a *Account) {
 	if err != nil {
 		n.T.Fatal(err)
 	}
+	handle := syntax.HandleInvalid
+	var aka []string
+	if a.Handle != "" {
+		handle = syntax.Handle(a.Handle)
+		aka = append(aka, "at://"+a.Handle)
+	}
+	aka = append(aka, a.AlsoKnownAs...)
 	n.Dir.Insert(identity.Identity{
-		DID:    syntax.DID(a.DID),
-		Handle: syntax.HandleInvalid,
+		DID:         syntax.DID(a.DID),
+		Handle:      handle,
+		AlsoKnownAs: aka,
 		Keys: map[string]identity.VerificationMethod{
 			"atproto":     {Type: "Multikey", PublicKeyMultibase: pub.Multibase()},
 			"atproto_kem": {Type: "Multikey", PublicKeyMultibase: kemPub.Multibase()},
@@ -310,6 +348,18 @@ func (n *Net) Session(a *Account) *atclient.APIClient {
 
 type testAuth struct{ did string }
 
+// callerDID is who a request is from: a test session's header, or the
+// bearer token createSession hands out.
+func (n *Net) callerDID(r *http.Request) string {
+	if d := r.Header.Get("X-Test-Did"); d != "" {
+		return d
+	}
+	if tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer test:"); ok {
+		return tok
+	}
+	return ""
+}
+
 func (t testAuth) DoWithAuth(c *http.Client, req *http.Request, _ syntax.NSID) (*http.Response, error) {
 	req.Header.Set("X-Test-Did", t.did)
 	return c.Do(req)
@@ -344,6 +394,22 @@ func (n *Net) DeliverWrite(a *Account, prevSpaceRev string) []int {
 		update["prevSpaceRev"] = prevSpaceRev
 	}
 	return n.DeliverUpdate(update)
+}
+
+// autoDeliver is DeliverWrite for AutoDeliver: in the background, and a
+// delivery that fails (an endpoint gone at the end of a test) is dropped, as
+// a host would.
+func (n *Net) autoDeliver(a *Account) {
+	n.mu.Lock()
+	update := map[string]any{"$type": "com.atproto.space.defs#repoWrite", "repo": a.DID, "repoRev": a.rev, "data": testHash, "spaceRev": a.spaceRev}
+	n.mu.Unlock()
+	for _, reg := range n.Registrations() {
+		raw, _ := json.Marshal(map[string]any{"space": n.Space, "token": reg.Token, "update": update})
+		resp, err := http.Post(strings.TrimSuffix(reg.Endpoint, "/")+"/xrpc/com.atproto.space.notifySpaceUpdate", "application/json", bytes.NewReader(raw))
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}
 }
 
 // DeliverUpdate sends a notifySpaceUpdate with the update to every registered
@@ -412,8 +478,92 @@ func (n *Net) serve(w http.ResponseWriter, r *http.Request) {
 func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *xerr) {
 	q := r.URL.Query()
 	switch nsid {
+	case "at.hailey.cocoon.createAgent":
+		// Cocoon's agent creation: the caller is the principal.
+		principal := n.account(n.callerDID(r))
+		if principal == nil {
+			return nil, &xerr{401, "AuthRequired", "no session"}
+		}
+		var body struct {
+			RecoveryKey string `json:"recoveryKey"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		n.mu.Lock()
+		did := "did:plc:" + strings.ToLower(n.clock.Next().String())
+		n.mu.Unlock()
+		a := n.NewAccount(did)
+		handle := "a-" + strings.TrimPrefix(did, "did:plc:") + ".pds.test"
+		aka := []string{"https://ident.link/agent-of/" + principal.DID}
+		password := "pw-" + did
+		n.mu.Lock()
+		a.Handle, a.AlsoKnownAs, a.password = handle, aka, password
+		n.Created = append(n.Created, CreateAccount{DID: did, Handle: handle, RecoveryKey: body.RecoveryKey, AlsoKnownAs: aka})
+		if principal.repoRecords == nil {
+			principal.repoRecords = map[string]map[string]any{}
+		}
+		principal.repoRecords["link.ident.endorsement/"+did] = map[string]any{"$type": "link.ident.endorsement", "agent": did}
+		n.mu.Unlock()
+		n.publish(a)
+		return map[string]any{"did": did, "handle": handle, "password": password, "endorsed": true,
+			"endorsement": "at://" + principal.DID + "/link.ident.endorsement/" + did}, nil
+
+	case "com.atproto.server.createSession":
+		var body struct {
+			Identifier string `json:"identifier"`
+			Password   string `json:"password"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		n.mu.Lock()
+		var found *Account
+		for _, a := range n.accounts {
+			if (a.DID == body.Identifier || a.Handle == body.Identifier) && a.password != "" && a.password == body.Password {
+				found = a
+			}
+		}
+		n.mu.Unlock()
+		if found == nil {
+			return nil, &xerr{401, "AuthenticationRequired", "Invalid identifier or password"}
+		}
+		return map[string]any{"did": found.DID, "handle": found.Handle, "accessJwt": "test:" + found.DID, "refreshJwt": "refresh:" + found.DID, "active": true}, nil
+
+	case "com.atproto.repo.putRecord", "com.atproto.repo.deleteRecord":
+		a := n.account(n.callerDID(r))
+		if a == nil {
+			return nil, &xerr{401, "AuthRequired", "no session"}
+		}
+		var body struct {
+			Repo       string         `json:"repo"`
+			Collection string         `json:"collection"`
+			Rkey       string         `json:"rkey"`
+			Record     map[string]any `json:"record"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Repo != a.DID {
+			return nil, &xerr{400, "InvalidRequest", "can only write your own repo"}
+		}
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		if a.repoRecords == nil {
+			a.repoRecords = map[string]map[string]any{}
+		}
+		path := body.Collection + "/" + body.Rkey
+		if nsid == "com.atproto.repo.deleteRecord" {
+			delete(a.repoRecords, path)
+			return map[string]any{}, nil
+		}
+		a.repoRecords[path] = body.Record
+		return map[string]any{"uri": "at://" + a.DID + "/" + path, "cid": "bafytest"}, nil
+
+	case "com.atproto.repo.getRecord":
+		a := n.account(q.Get("repo"))
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		if a == nil || a.repoRecords[q.Get("collection")+"/"+q.Get("rkey")] == nil {
+			return nil, &xerr{400, "RecordNotFound", "no such record"}
+		}
+		return map[string]any{"uri": "at://" + a.DID + "/" + q.Get("collection") + "/" + q.Get("rkey"), "value": a.repoRecords[q.Get("collection")+"/"+q.Get("rkey")]}, nil
+
 	case "com.atproto.space.getDelegationToken":
-		a := n.account(r.Header.Get("X-Test-Did"))
+		a := n.account(n.callerDID(r))
 		if a == nil {
 			return nil, &xerr{401, "AuthRequired", "no session"}
 		}
@@ -562,7 +712,7 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 			return nil, &xerr{400, "InvalidRequest", "unknown space"}
 		}
 		// The owner reads with its session; anyone else needs a credential.
-		if r.Header.Get("X-Test-Did") != repo {
+		if n.callerDID(r) != repo {
 			if e := n.checkCredential(r, repo); e != nil {
 				return nil, e
 			}
@@ -640,7 +790,7 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		return res, nil
 
 	case "com.atproto.space.createRecord", "com.atproto.space.deleteRecord", "com.atproto.space.putRecord":
-		a := n.account(r.Header.Get("X-Test-Did"))
+		a := n.account(n.callerDID(r))
 		if a == nil {
 			return nil, &xerr{401, "AuthRequired", "no session"}
 		}
@@ -663,6 +813,9 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 			n.mu.Unlock()
 			if ok {
 				n.Delete(a, body.Collection, body.Rkey)
+				if n.AutoDeliver {
+					go n.autoDeliver(a)
+				}
 			}
 			return map[string]any{}, nil
 		}
@@ -674,7 +827,11 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		uri, _ := n.Put(a, body.Collection, body.Rkey, body.Record)
 		n.mu.Lock()
 		c := a.records[space.FormatRecordPath(body.Collection, body.Rkey)].Cid.String()
+		auto := n.AutoDeliver
 		n.mu.Unlock()
+		if auto {
+			go n.autoDeliver(a)
+		}
 		return map[string]any{"uri": uri, "cid": c, "validationStatus": "unknown"}, nil
 
 	case "com.atproto.space.listRepoOps":
@@ -716,7 +873,7 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		_, _ = w.Write(buf.Bytes())
 		return nil, nil
 	case "com.atproto.space.listSpaces":
-		a := n.account(r.Header.Get("X-Test-Did"))
+		a := n.account(n.callerDID(r))
 		if a == nil {
 			return nil, &xerr{401, "AuthRequired", "no session"}
 		}
@@ -745,7 +902,7 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		return map[string]any{"spaces": out}, nil
 
 	case "com.atproto.space.createSpace":
-		a := n.account(r.Header.Get("X-Test-Did"))
+		a := n.account(n.callerDID(r))
 		if a == nil {
 			return nil, &xerr{401, "AuthRequired", "no session"}
 		}
@@ -849,7 +1006,7 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 
 // ownedSpace checks the caller governs a space and returns its members.
 func (n *Net) ownedSpace(r *http.Request, uri string) (map[string]bool, *xerr) {
-	a := n.account(r.Header.Get("X-Test-Did"))
+	a := n.account(n.callerDID(r))
 	if a == nil {
 		return nil, &xerr{401, "AuthRequired", "no session"}
 	}
@@ -951,7 +1108,7 @@ func (n *Net) macParams(r *http.Request, repo, profile string) (*space.CreateMac
 		return nil, &xerr{400, "InvalidSpaceMac", err.Error()}
 	}
 	if req == nil {
-		if r.Header.Get("X-Test-Did") == repo {
+		if n.callerDID(r) == repo {
 			return nil, nil
 		}
 		return nil, &xerr{400, "InvalidSpaceMac", fmt.Sprintf("A MAC must be requested with tag %q", profile)}

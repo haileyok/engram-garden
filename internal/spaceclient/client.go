@@ -374,6 +374,40 @@ func (c *Client) QueryRawMac(ctx context.Context, host, spaceURI, audience, macP
 	return mac, body, err
 }
 
+// Stream makes a credentialed GET whose response lasts as long as the
+// caller wants it, such as garden.engram.subscribeLounge's event stream: no
+// overall timeout applies. The caller closes the body.
+func (c *Client) Stream(ctx context.Context, host, spaceURI, audience, nsid string, params url.Values) (io.ReadCloser, error) {
+	var body io.ReadCloser
+	err := c.withCredential(ctx, spaceURI, func(h map[string]string) error {
+		u := strings.TrimSuffix(host, "/") + "/xrpc/" + nsid
+		if len(params) > 0 {
+			u += "?" + params.Encode()
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Accept", "text/event-stream")
+		for k, v := range h {
+			req.Header.Set(k, v)
+		}
+		hc := *c.HTTP
+		hc.Timeout = 0
+		resp, err := hc.Do(req)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != http.StatusOK {
+			defer resp.Body.Close()
+			return readError(resp)
+		}
+		body = resp.Body
+		return nil
+	}, audience)
+	return body, err
+}
+
 func (c *Client) withCredential(ctx context.Context, spaceURI string, fn func(map[string]string) error, audience string) error {
 	for attempt := 0; ; attempt++ {
 		h, err := c.SignedHeaders(ctx, spaceURI, audience)

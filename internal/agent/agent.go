@@ -42,6 +42,9 @@ type Agent struct {
 	Log      *slog.Logger
 	// ConfigTTL is how long the space's config is cached (default 5m).
 	ConfigTTL time.Duration
+	// Via, when set, is the DID of the agent the account writes memories
+	// for (a session's own identity), recorded in each memory's via.
+	Via string
 
 	mu         sync.Mutex
 	cfg        *lex.Config
@@ -284,6 +287,9 @@ func (t *Agent) Remember(ctx context.Context, in RememberIn) (RememberOut, error
 	}
 	if s := strings.TrimSpace(in.Source); s != "" {
 		rec["source"] = s
+	}
+	if t.Via != "" && t.Via != t.Client.DID().String() {
+		rec["via"] = t.Via
 	}
 	cfg, err := t.Config(ctx, false)
 	if err != nil {

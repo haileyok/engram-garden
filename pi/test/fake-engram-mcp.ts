@@ -4,6 +4,11 @@
 //
 // FAKE_MEMORIES (JSON) seeds the store. FAKE_FAIL_START=1 exits at once.
 // The extra tool debug_hang never answers.
+//
+// With ENGRAM_IDENTITY (as pi-engram passes for an agent identity), the
+// lounge tools are there too: list_agents answers FAKE_AGENTS, set_presence
+// and send_message are recorded (debug_lounge returns them), and
+// lounge_events long-polls events that debug_deliver queues.
 
 import { createInterface } from "node:readline";
 
@@ -41,8 +46,40 @@ function similarity(a: string, b: string): number {
 const inWindow = (m: Mem, args: any) =>
 	(!args.since || m.createdAt >= args.since) && (!args.until || m.createdAt < args.until);
 
+const lounge = !!process.env.ENGRAM_IDENTITY;
+import { readFileSync } from "node:fs";
+const self: string = lounge ? JSON.parse(readFileSync(process.env.ENGRAM_IDENTITY!, "utf8")).did : "";
+const presences: any[] = [];
+const sentMessages: any[] = [];
+const events: any[] = [];
+let seq = 0;
+let wakeEvents: (() => void) | undefined;
+
 function tool(name: string, args: any): unknown {
+	if (!lounge && ["lounge_status", "list_agents", "send_message", "list_messages", "set_presence", "debug_lounge", "debug_deliver"].includes(name))
+		throw new Error(`unknown tool ${name}`);
 	switch (name) {
+		case "lounge_status":
+			return { did: self, lounge: "at://did:plc:p/space/garden.engram.lounge/agents", connection: "connected", identity: process.env.ENGRAM_IDENTITY };
+		case "list_agents":
+			return { self, agents: JSON.parse(process.env.FAKE_AGENTS ?? "[]") };
+		case "set_presence":
+			presences.push(args);
+			return { did: self, online: true, ...args };
+		case "send_message": {
+			const uri = `at://did:plc:p/space/garden.engram.lounge/agents/${self}/garden.engram.message/${sentMessages.length + 1}`;
+			sentMessages.push({ ...args, uri });
+			return { uri, cid: "bafy" };
+		}
+		case "list_messages":
+			return { messages: [] };
+		case "debug_lounge":
+			return { presences, sent: sentMessages, identity: process.env.ENGRAM_IDENTITY };
+		case "debug_deliver": {
+			for (const m of args.messages ?? []) events.push({ seq: ++seq, type: "message", message: m });
+			wakeEvents?.();
+			return { queued: seq };
+		}
 		case "list_spaces":
 			return {
 				spaces: [
@@ -138,6 +175,17 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 	if (slowStart) await new Promise((r) => setTimeout(r, Math.max(0, started + slowStart - Date.now())));
 	const msg = JSON.parse(line);
 	if (msg.id === undefined) return;
+	if (msg.method === "tools/call" && msg.params.name === "lounge_events" && lounge) {
+		const after = msg.params.arguments?.after ?? 0;
+		const pending = () => events.filter((e) => e.seq > after);
+		if (!pending().length)
+			await new Promise<void>((r) => {
+				wakeEvents = r;
+				setTimeout(r, (msg.params.arguments?.wait ?? 0) * 1000);
+			});
+		const out = { events: pending(), next: seq, connection: "connected" };
+		return send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: JSON.stringify(out) }], structuredContent: out } });
+	}
 	switch (msg.method) {
 		case "initialize":
 			return send({
@@ -155,7 +203,10 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 				jsonrpc: "2.0",
 				id: msg.id,
 				result: {
-					tools: ["list_spaces", "remember", "recall", "get_memory", "list_memories", "forget", "debug_hang", "list_skills", "get_skill", "save_skill", "debug_skills", "debug_recalls"].map((name) => ({
+					tools: [
+						"list_spaces", "remember", "recall", "get_memory", "list_memories", "forget", "debug_hang", "list_skills", "get_skill", "save_skill", "debug_skills", "debug_recalls",
+						...(lounge ? ["lounge_status", "list_agents", "send_message", "list_messages", "set_presence", "lounge_events", "debug_lounge", "debug_deliver"] : []),
+					].map((name) => ({
 						name,
 						description: name,
 						inputSchema: { type: "object", properties: {} },

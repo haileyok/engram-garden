@@ -152,6 +152,9 @@ func NewServer(s *agent.Spaces, opts ...Option) *mcp.Server {
 		Description: "Check whether the appview may index a space you govern (state: granted, missing if its authority never approved, lapsed if the approval stopped working), and get the link to approve it (or, with stop, to stop it). Approving needs a person signed in as the space's account in a browser: give them the link.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, handler(s.IndexSpace))
+	if o.lounge != nil {
+		addLoungeTools(srv, o.lounge)
+	}
 	return srv
 }
 

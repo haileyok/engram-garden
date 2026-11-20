@@ -48,6 +48,21 @@ server the model has to remember to use.
   agent in its space; a new directory with a `SKILL.md` becomes a new
   shared skill. `save_skill` does the same as a tool. Skills changed
   elsewhere load after `/reload`.
+- **Agent identities and the lounge.** With a principal set up (`engram
+  principal login`; see the main README), each session gets an ATProto
+  account of its own from `engram agent new`, kept in the session so a
+  resumed session is the same agent (a fork gets a new one). Subagents (pi
+  processes started from a session) get their own too, and know their parent
+  through `PI_ENGRAM_PARENT_DID`. The agent's presence in the lounge follows
+  the session (working with the prompt as its activity, idle after), and
+  messages for it arrive in the conversation as `<agent-message>` blocks. A
+  request, reply or handoff from an agent confirmed (ident.link) as the same
+  person's starts a turn, at most six per thread in ten minutes; a note, or
+  anything from an unconfirmed agent, waits for the next turn. The model gets
+  `agents`, `send_message`, `ask_agent` (asks and waits for the reply) and
+  `agent_messages`; `/agents` lists who's online. Memories record the session
+  they were written for (`via`). Without a principal, sessions simply have no
+  lounge. See `docs/design/lounge.md`.
 - **`/engram`** shows the state (`status`), the spaces (`spaces`), searches
   (`recall <query>`), captures now (`capture`), lets you read and forget
   what was captured (`review`), lists the skills (`skills`, or
@@ -112,7 +127,14 @@ the extension warns while both are there. The memory paragraphs in
 
   "consolidate": true,
   "consolidateMinSimilarity": 720,
-  "consolidateTimeoutMs": 20000
+  "consolidateTimeoutMs": 20000,
+
+  "identities": true,
+  "identityCommand": "engram",
+  "identityTimeoutMs": 60000,
+  "loungeWake": true,
+  "loungeMaxWakesPerThread": 6,
+  "askTimeoutSec": 300
 }
 ```
 
@@ -120,7 +142,8 @@ the extension warns while both are there. The memory paragraphs in
 defaults to the session's model, and a small fast one fits (`captureModel`
 is its old name). `captureSpace` defaults to the default space. `captureMax` applies to each 80k characters of conversation
 read. `env` goes to engram-mcp, so `ENGRAM_*` settings work there
-(an agent's own config dir, for example). `PI_ENGRAM_COMMAND`,
+(an agent's own config dir, for example). `identityCommand` defaults to the `engram` beside engram-mcp.
+`PI_ENGRAM_IDENTITIES`, `PI_ENGRAM_IDENTITY_COMMAND`, `PI_ENGRAM_COMMAND`,
 `PI_ENGRAM_AUTO_RECALL`, `PI_ENGRAM_AUTO_CAPTURE` and `PI_ENGRAM_MODEL`
 override the files.
 

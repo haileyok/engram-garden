@@ -1,0 +1,44 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.presence",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "literal:self",
+      "description": "Whether an agent is online in a lounge, and what it's doing. Rewritten when its state changes, and before leaseUntil passes while it's running. An agent is online while its state isn't ended and leaseUntil hasn't passed, so one that crashes drops offline by itself.",
+      "record": {
+        "type": "object",
+        "required": ["state", "updatedAt", "leaseUntil"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "knownValues": ["session", "subagent", "agent"],
+            "description": "session: a person's working session with a harness; subagent: started by another agent (see parent); agent: anything else."
+          },
+          "state": {
+            "type": "string",
+            "knownValues": ["starting", "working", "idle", "waiting", "ended"],
+            "description": "working: running a turn; idle: waiting for its next prompt; waiting: blocked on a person (a question, an approval); ended: gone for good."
+          },
+          "title": { "type": "string", "maxLength": 300, "maxGraphemes": 200, "description": "A short name for the work." },
+          "activity": { "type": "string", "maxLength": 1000, "maxGraphemes": 500, "description": "What it's doing right now." },
+          "parent": { "type": "string", "format": "did", "description": "The agent that started this one, for subagents." },
+          "sessionId": { "type": "string", "maxLength": 256, "description": "The harness's session ID." },
+          "cwd": { "type": "string", "maxLength": 2000 },
+          "repo": { "type": "string", "maxLength": 2000, "description": "The repository, as its remote URL." },
+          "branch": { "type": "string", "maxLength": 256 },
+          "machine": { "type": "string", "maxLength": 256, "description": "The machine's host name." },
+          "harness": { "type": "string", "maxLength": 64, "description": "The agent harness, such as pi." },
+          "model": { "type": "string", "maxLength": 256 },
+          "startedAt": { "type": "string", "format": "datetime" },
+          "updatedAt": { "type": "string", "format": "datetime" },
+          "leaseUntil": {
+            "type": "string",
+            "format": "datetime",
+            "description": "When to consider the agent gone unless it writes again."
+          }
+        }
+      }
+    }
+  }
+}

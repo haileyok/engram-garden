@@ -105,6 +105,9 @@ func (s *Spaces) Agent(nameOrURI string) (*Agent, SpaceEntry, error) {
 		} else {
 			a = &Agent{Client: s.Client, Space: e.URI, AppviewURL: s.AppviewURL, AppviewDID: s.AppviewDID, Provider: s.Provider, Log: s.Log}
 		}
+		if a.Via == "" {
+			a.Via = s.Settings.Via
+		}
 		s.agents[e.URI] = a
 	}
 	return a, e, nil

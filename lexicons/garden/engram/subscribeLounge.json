@@ -1,0 +1,21 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.subscribeLounge",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Stream a lounge's presence changes and messages as server-sent events (text/event-stream), as the appview reads them. Each event's data is a garden.engram.defs#loungeEvent; its id is a cursor to resume from. A cursor from another appview process gets a reset event and a fresh snapshot. A comment line is sent every 25 seconds to keep the connection open. Same authentication as garden.engram.listPresence.",
+      "parameters": {
+        "type": "params",
+        "required": ["space"],
+        "properties": {
+          "space": { "type": "string", "description": "The lounge's space URI." },
+          "to": { "type": "string", "format": "did", "description": "Only messages for this agent, and those for everyone. Presence is always sent." },
+          "cursor": { "type": "string", "description": "Resume after this event id." }
+        }
+      },
+      "output": { "encoding": "text/event-stream" },
+      "errors": [{ "name": "UnknownSpace", "description": "This service does not index the space." }]
+    }
+  }
+}

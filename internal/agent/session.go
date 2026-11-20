@@ -52,6 +52,18 @@ type Options struct {
 	// the person signed in again, switches to the account's new session.
 	// Nil means the session it opened with is the only one.
 	Current func() (Account, error)
+	// Scopes are what the OAuth client asks for (default Scopes, an agent's).
+	// The principal's sign-in asks for PrincipalScopes. A session must be
+	// resumed with the scopes it signed in with: a loopback client's ID
+	// names them.
+	Scopes []string
+}
+
+func (o Options) scopes() []string {
+	if o.Scopes != nil {
+		return o.Scopes
+	}
+	return Scopes
 }
 
 // hashName names a file after some strings, without revealing them.
@@ -75,7 +87,7 @@ func (o Options) dir() identity.Directory {
 // callback address. Refreshing a session needs the address it signed in
 // with, since the client's ID names it.
 func OAuthApp(callback string, o Options) *oauth.ClientApp {
-	cfg := oauth.NewLocalhostConfig(callback, Scopes)
+	cfg := oauth.NewLocalhostConfig(callback, o.scopes())
 	cfg.UserAgent = "engram-cli"
 	app := oauth.NewClientApp(&cfg, o.Store)
 	app.Dir = o.dir()
@@ -194,7 +206,46 @@ func Open(ctx context.Context, s Settings, o Options) (*Spaces, error) {
 	if err != nil {
 		return nil, err
 	}
+	if s.Via == "" && s.Identity != "" {
+		// Memories record the session they were written for.
+		if id, err := LoadIdentity(s.Identity); err == nil {
+			s.Via = id.DID
+		}
+	}
 	return &Spaces{Client: c, AppviewURL: s.AppviewURL, AppviewDID: s.AppviewDID, Provider: p, Log: o.Log, Settings: s}, nil
+}
+
+// OpenLounge signs in as the agent's own identity (Settings.Identity) and
+// returns its place in the lounge (Settings.Lounge, else the identity's).
+func OpenLounge(ctx context.Context, s Settings, o Options) (*Lounge, Identity, error) {
+	if s.Identity == "" {
+		return nil, Identity{}, errors.New("no agent identity (ENGRAM_IDENTITY)")
+	}
+	id, err := LoadIdentity(s.Identity)
+	if err != nil {
+		return nil, id, err
+	}
+	loungeURI := s.Lounge
+	if loungeURI == "" {
+		loungeURI = id.Lounge
+	}
+	if loungeURI == "" {
+		return nil, id, fmt.Errorf("the identity %s has no lounge (ENGRAM_LOUNGE)", id.DID)
+	}
+	ls := Settings{Account: id.Account()}
+	sess, err := ls.Session(ctx, o)
+	if err != nil {
+		return nil, id, fmt.Errorf("signing in as %s: %w", id.Handle, err)
+	}
+	c, err := spaceclient.New(sess, o.dir(), o.HTTP)
+	if err != nil {
+		return nil, id, err
+	}
+	dir, httpc := o.dir(), o.HTTP
+	verify := func(ctx context.Context, did string) (map[string]bool, error) {
+		return Principals(ctx, dir, httpc, did)
+	}
+	return &Lounge{Client: c, Space: loungeURI, AppviewURL: s.AppviewURL, AppviewDID: s.AppviewDID, Log: o.Log, Principal: id.Principal, Verify: verify}, id, nil
 }
 
 // ErrSignInExpired means the account's server no longer accepts the
@@ -259,7 +310,7 @@ func LoginOAuth(ctx context.Context, handle string, o Options, p Prompt) (Accoun
 		}
 		return Account{}, fmt.Errorf("finishing sign-in: %w", err)
 	}
-	if !grantsMemories(sess.Scopes) {
+	if o.Scopes == nil && !grantsMemories(sess.Scopes) {
 		_ = app.Logout(ctx, sess.AccountDID, sess.SessionID)
 		return Account{}, fmt.Errorf("the account's server didn't grant access to memory spaces (granted: %s)", strings.Join(sess.Scopes, " "))
 	}

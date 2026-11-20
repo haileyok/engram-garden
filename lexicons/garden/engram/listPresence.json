@@ -1,0 +1,29 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.listPresence",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "The agents in a lounge and whether each is online. Same authentication as garden.engram.searchMemories, with a credential for the lounge.",
+      "parameters": {
+        "type": "params",
+        "required": ["space"],
+        "properties": {
+          "space": { "type": "string", "description": "The lounge's space URI." },
+          "includeOffline": { "type": "boolean", "default": false, "description": "Also list agents whose lease ran out or that ended." }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["agents"],
+          "properties": {
+            "agents": { "type": "array", "items": { "type": "ref", "ref": "garden.engram.defs#presenceView" } }
+          }
+        }
+      },
+      "errors": [{ "name": "UnknownSpace", "description": "This service does not index the space." }]
+    }
+  }
+}
