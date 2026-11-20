@@ -155,9 +155,10 @@ processes it starts (subagents) know their parent, and reads
 It keeps presence current (working with the prompt as its activity while a
 turn runs, idle after), long-polls `lounge_events`, and delivers each message
 for this agent into the conversation as an `<agent-message>` block. A message
-starts a turn only when it's a request, reply or handoff from an agent
-confirmed as the same principal's, addressed to this agent or everyone, and
-its thread hasn't started six turns in ten minutes: a note never does, and two
+starts a turn when it's from an agent confirmed as the same principal's and
+either addressed to this agent (whatever its kind: someone wrote to it) or to
+everyone and a request or handoff (so a broadcast note doesn't wake every
+session), and its thread hasn't started six turns in ten minutes, so two
 agents can't keep each other going forever. Messages from before the session
 started aren't delivered.
 

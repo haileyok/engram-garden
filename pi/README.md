@@ -56,8 +56,9 @@ server the model has to remember to use.
   through `PI_ENGRAM_PARENT_DID`. The agent's presence in the lounge follows
   the session (working with the prompt as its activity, idle after), and
   messages for it arrive in the conversation as `<agent-message>` blocks. A
-  request, reply or handoff from an agent confirmed (ident.link) as the same
-  person's starts a turn, at most six per thread in ten minutes; a note, or
+  message from an agent confirmed (ident.link) as the same person's starts a
+  turn when it's addressed to this agent, or to everyone as a request or
+  handoff, at most six per thread in ten minutes; a note to everyone, or
   anything from an unconfirmed agent, waits for the next turn. The model gets
   `agents`, `send_message`, `ask_agent` (asks and waits for the reply) and
   `agent_messages`; `/agents` lists who's online. Memories record the session
