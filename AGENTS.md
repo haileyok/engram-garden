@@ -42,6 +42,17 @@ Guidance for working on Engram Garden.
   was read). It depends on the MCP tools' names and result shapes: when
   they change, change it too. Tests run it against a fake pi and
   `pi/test/fake-engram-mcp.ts`. `make pi-test`.
+- Agent identities and lounges (`docs/design/lounge.md`): `internal/lex/lounge.go`
+  (presence and message records, the ident.link constants), `internal/lounge` (the
+  appview's in-memory view of each lounge and its event stream; it reads through
+  `indexer.Reader`, the verified repo reader the memory indexer uses too),
+  `internal/appview/lounge.go` (listPresence, listMessages, subscribeLounge),
+  `internal/agent/principal.go` (principal.json, `Provisioner`: creating, stocking
+  and claiming identities; `Principals` checks ident.link both ways),
+  `internal/agent/lounge.go` (an agent's presence, messages and stream),
+  `internal/mcpserver/lounge.go`, `cmd/engram/agents.go` and `pi/engram/lounge.ts`.
+  `spacetest` takes `createAccount`, `createSession` and plain repo records for these
+  tests, and `AutoDeliver` sends each write's notification as a host would.
 - `internal/oauthfile`: OAuth sessions as files, for the web app and the CLI.
 - `flake.nix` packages the agent tools. When `go.mod` changes, update
   `vendorHash`: build with a wrong one and use the hash Nix reports.

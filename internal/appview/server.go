@@ -26,6 +26,7 @@ import (
 	"github.com/haileyok/engram-garden/internal/control"
 	"github.com/haileyok/engram-garden/internal/indexer"
 	"github.com/haileyok/engram-garden/internal/lex"
+	"github.com/haileyok/engram-garden/internal/lounge"
 	"github.com/haileyok/engram-garden/internal/metrics"
 	"github.com/haileyok/engram-garden/internal/routing"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
@@ -39,8 +40,11 @@ const ForwardedHeader = "X-Engram-Forwarded-By"
 type Server struct {
 	Store   *spacestore.Node
 	Indexer *indexer.Indexer
-	Dir     identity.Directory
-	Log     *slog.Logger
+	// Lounge keeps the lounges (garden.engram.lounge spaces) this node
+	// owns: who's online and their messages. Nil serves no lounges.
+	Lounge *lounge.Service
+	Dir    identity.Directory
+	Log    *slog.Logger
 
 	// ServiceDID is this service's DID. Readers address their requests to it.
 	ServiceDID string
@@ -172,6 +176,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /xrpc/garden.engram.getSpaceStatus", s.owned(q, s.handleStatus))
 	mux.HandleFunc("GET /xrpc/garden.engram.exportSpace", s.owned(q, s.handleExport))
 	mux.HandleFunc("POST /xrpc/garden.engram.warmSpace", s.ownedBody(s.handleWarm))
+	mux.HandleFunc("GET /xrpc/garden.engram.listPresence", s.owned(q, s.handleListPresence))
+	mux.HandleFunc("GET /xrpc/garden.engram.listMessages", s.owned(q, s.handleListMessages))
+	mux.HandleFunc("GET /xrpc/garden.engram.subscribeLounge", s.owned(q, s.handleSubscribeLounge))
 	mux.HandleFunc("GET /xrpc/garden.engram.describeService", s.handleDescribe)
 	mux.HandleFunc("GET /oauth/grant", s.handleGrant)
 	mux.HandleFunc("GET /oauth/callback", s.handleCallback)
@@ -254,6 +261,13 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, owner routing.N
 	if c == nil {
 		c = &http.Client{Timeout: 5 * time.Minute}
 	}
+	streaming := strings.HasSuffix(r.URL.Path, "/garden.engram.subscribeLounge")
+	if streaming && c.Timeout != 0 {
+		// A stream lasts as long as its caller stays: no overall timeout.
+		cc := *c
+		cc.Timeout = 0
+		c = &cc
+	}
 	resp, err := c.Do(req)
 	if err != nil {
 		s.writeErr(w, errf(http.StatusBadGateway, "OwnerUnavailable", "forwarding to node %s: %v", owner.ID, err))
@@ -266,6 +280,21 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, owner routing.N
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
+	if fl, ok := w.(http.Flusher); ok && streaming {
+		buf := make([]byte, 32<<10)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				if _, werr := w.Write(buf[:n]); werr != nil {
+					return
+				}
+				fl.Flush()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
 	_, _ = io.Copy(w, resp.Body)
 }
 
@@ -335,6 +364,10 @@ func (s *Server) authorizeReader(r *http.Request, spaceURI string, checkDeleted 
 	}
 	if err := s.verifyCredential(r, spaceURI); err != nil {
 		return err
+	}
+	if checkDeleted && lounge.IsLounge(spaceURI) {
+		// Memory reads (the ones that check for deletion) don't apply.
+		return errf(http.StatusBadRequest, "UnknownSpace", "%s is a lounge, not a memory space", spaceURI)
 	}
 	if checkDeleted {
 		if deleted, err := s.Store.SpaceDeleted(r.Context(), spaceURI); err != nil {
@@ -998,6 +1031,18 @@ func (s *Server) handleWrite(w http.ResponseWriter, n indexer.Notification) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	if s.isLounge(n.Space) {
+		s.background(n.Space, "write", func(ctx context.Context) bool {
+			needSync, err := s.Lounge.HandleWrite(ctx, n)
+			notifiedSyncs.WithLabelValues(metrics.Result(err)).Inc()
+			if err != nil {
+				s.log().Warn("notified lounge sync failed", "space", n.Space, "repo", n.Repo, "err", err)
+			}
+			return needSync
+		})
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	// A write is a sign the space is in use: start loading it now.
 	s.Store.Warm(n.Space)
 	// Sync in the background; the periodic space sync catches anything
@@ -1016,6 +1061,15 @@ func (s *Server) handleWrite(w http.ResponseWriter, n indexer.Notification) {
 func (s *Server) handleRemoved(w http.ResponseWriter, n indexer.Removal) {
 	if !s.granted(context.Background(), n.Space) {
 		notifications.WithLabelValues("removed", "not_granted").Inc()
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if s.isLounge(n.Space) {
+		s.background(n.Space, "removed", func(ctx context.Context) bool {
+			err := s.Lounge.HandleRemoved(n)
+			notifiedSyncs.WithLabelValues(metrics.Result(err)).Inc()
+			return err != nil
+		})
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -1046,7 +1100,11 @@ func (s *Server) handleDeleted(w http.ResponseWriter, spaceURI string) {
 		defer s.Jobs.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		deleted, err := s.Indexer.ConfirmDeleted(ctx, spaceURI)
+		confirm := s.Indexer.ConfirmDeleted
+		if s.isLounge(spaceURI) {
+			confirm = s.Lounge.ConfirmDeleted
+		}
+		deleted, err := confirm(ctx, spaceURI)
 		switch {
 		case deleted:
 			s.log().Info("space deleted", "space", spaceURI)
@@ -1115,7 +1173,14 @@ func (s *Server) syncSpaceOnce(ctx context.Context, spaceURI string) {
 		return
 	}
 	defer s.syncing.Delete(spaceURI)
-	if err := s.Indexer.SyncSpace(ctx, spaceURI); err != nil {
+	syncFn := s.Indexer.SyncSpace
+	if lounge.IsLounge(spaceURI) {
+		if s.Lounge == nil {
+			return
+		}
+		syncFn = s.Lounge.SyncSpace
+	}
+	if err := syncFn(ctx, spaceURI); err != nil {
 		s.log().Warn("space sync failed", "space", spaceURI, "err", err)
 	}
 }
@@ -1179,6 +1244,21 @@ func (s *Server) Run(ctx context.Context, poll time.Duration, register bool) {
 		}
 	}
 	tick()
+	if s.Lounge != nil {
+		// Agents whose lease runs out go offline between polls.
+		go func() {
+			lt := time.NewTicker(5 * time.Second)
+			defer lt.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-lt.C:
+					s.Lounge.Tick()
+				}
+			}
+		}()
+	}
 	t := time.NewTicker(poll)
 	defer t.Stop()
 	for {

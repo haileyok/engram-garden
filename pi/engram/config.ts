@@ -76,6 +76,24 @@ export interface Config {
 	consolidateMinSimilarity: number;
 	/** Give up on comparing after this long, and store the memory as it is. */
 	consolidateTimeoutMs: number;
+
+	/**
+	 * Give each session (and subagent) an agent identity of its own, with
+	 * `engram agent new`, and join the principal's lounge with it. Needs the
+	 * principal set up (`engram principal login`); without it, sessions just
+	 * have no lounge.
+	 */
+	identities: boolean;
+	/** The engram CLI that hands out identities (default: beside engram-mcp). */
+	identityCommand?: string;
+	/** How long claiming an identity may take (a new account: a few seconds). */
+	identityTimeoutMs: number;
+	/** Let requests and replies from the same person's agents start a turn. */
+	loungeWake: boolean;
+	/** At most this many turns started by one thread's messages in ten minutes. */
+	loungeMaxWakesPerThread: number;
+	/** How long ask_agent waits for an answer by default, in seconds. */
+	askTimeoutSec: number;
 }
 
 export const defaults: Config = {
@@ -104,6 +122,11 @@ export const defaults: Config = {
 	consolidate: true,
 	consolidateMinSimilarity: 720,
 	consolidateTimeoutMs: 20000,
+	identities: true,
+	identityTimeoutMs: 60_000,
+	loungeWake: true,
+	loungeMaxWakesPerThread: 6,
+	askTimeoutSec: 300,
 };
 
 export function agentDir(): string {
@@ -124,7 +147,7 @@ const bool = (v: string) => v === "1" || v.toLowerCase() === "true";
 /** check makes sure each setting has its default's type. */
 function check(cfg: Record<string, unknown>) {
 	for (const [k, v] of Object.entries(cfg)) {
-		if (k === "model" || k === "captureModel" || k === "captureSpace") {
+		if (k === "model" || k === "captureModel" || k === "captureSpace" || k === "identityCommand") {
 			if (v !== undefined && typeof v !== "string") throw new Error(`${k} must be a string`);
 			continue;
 		}
@@ -148,9 +171,12 @@ export function loadConfig(projectDir?: string, env: NodeJS.ProcessEnv = process
 	if (env.PI_ENGRAM_AUTO_RECALL) cfg.autoRecall = bool(env.PI_ENGRAM_AUTO_RECALL);
 	if (env.PI_ENGRAM_AUTO_CAPTURE) cfg.autoCapture = bool(env.PI_ENGRAM_AUTO_CAPTURE);
 	if (env.PI_ENGRAM_MODEL) cfg.model = env.PI_ENGRAM_MODEL;
+	if (env.PI_ENGRAM_IDENTITIES) cfg.identities = bool(env.PI_ENGRAM_IDENTITIES);
+	if (env.PI_ENGRAM_IDENTITY_COMMAND) cfg.identityCommand = env.PI_ENGRAM_IDENTITY_COMMAND;
 	if (env.PI_ENGRAM_CAPTURE_MODEL) cfg.model = env.PI_ENGRAM_CAPTURE_MODEL;
 	cfg.model ??= cfg.captureModel;
 	cfg.command = resolveCommand(cfg.command, env);
+	if (cfg.identityCommand) cfg.identityCommand = resolveCommand(cfg.identityCommand, env);
 	return cfg;
 }
 

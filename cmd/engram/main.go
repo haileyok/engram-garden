@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bluesky-social/indigo/atproto/atclient"
+	"github.com/bluesky-social/indigo/atproto/identity"
 	"golang.org/x/term"
 
 	"github.com/haileyok/engram-garden/internal/agent"
@@ -37,7 +39,41 @@ func main() {
 	store := &oauthfile.FileStore{Dir: filepath.Join(dir, "oauth")}
 	store.Sweep() // sign-ins nobody finished
 	opts := agent.Options{Store: store, LockDir: store.Dir, HTTP: &http.Client{Timeout: time.Minute}}
+	popts := opts
+	popts.Scopes = agent.PrincipalScopes
+	idDir, err := agent.IdentitiesDir()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "engram:", err)
+		os.Exit(1)
+	}
 	c := &cli{
+		principalPath: filepath.Join(dir, "principal.json"),
+		identitiesDir: idDir,
+		principalSignIn: func(ctx context.Context, handle string, lines <-chan string) (agent.Account, error) {
+			return agent.LoginOAuth(ctx, handle, popts, agent.Prompt{Out: os.Stderr, Lines: lines, Browser: openBrowser})
+		},
+		principalSession: func(ctx context.Context, p agent.Principal) (*atclient.APIClient, error) {
+			return agent.Settings{Account: p.Account}.Session(ctx, popts)
+		},
+		openLounge: func(ctx context.Context, s agent.Settings) (*agent.Lounge, agent.Identity, error) {
+			return agent.OpenLounge(ctx, s, opts)
+		},
+		verifyAgent: func(ctx context.Context, did string) (map[string]bool, error) {
+			return agent.Principals(ctx, identity.DefaultDirectory(), opts.HTTP, did)
+		},
+		provisionHTTP: &http.Client{Timeout: time.Minute},
+		spawnRefill: func() {
+			self, err := os.Executable()
+			if err != nil {
+				return
+			}
+			cmd := exec.Command(self, "agent", "stock")
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+			cmd.SysProcAttr = detached()
+			if err := cmd.Start(); err == nil {
+				_ = cmd.Process.Release()
+			}
+		},
 		in: os.Stdin, out: os.Stdout, err: os.Stderr, getenv: os.Getenv,
 		configPath: filepath.Join(dir, "config.json"),
 		open: func(ctx context.Context, s agent.Settings) (*agent.Spaces, error) {

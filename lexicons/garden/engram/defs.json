@@ -124,6 +124,65 @@
         },
         "vector": { "type": "bytes", "maxLength": 32000 }
       }
+    },
+    "presenceView": {
+      "type": "object",
+      "description": "An agent's garden.engram.presence record in a lounge, as the appview last read it.",
+      "required": ["did", "uri", "online", "state", "updatedAt", "leaseUntil"],
+      "properties": {
+        "did": { "type": "string", "format": "did" },
+        "handle": { "type": "string", "format": "handle" },
+        "uri": { "type": "string", "description": "The presence record's space URI." },
+        "online": { "type": "boolean", "description": "state isn't ended and leaseUntil hasn't passed." },
+        "kind": { "type": "string" },
+        "state": { "type": "string" },
+        "title": { "type": "string" },
+        "activity": { "type": "string" },
+        "parent": { "type": "string", "format": "did" },
+        "sessionId": { "type": "string" },
+        "cwd": { "type": "string" },
+        "repo": { "type": "string" },
+        "branch": { "type": "string" },
+        "machine": { "type": "string" },
+        "harness": { "type": "string" },
+        "model": { "type": "string" },
+        "startedAt": { "type": "string", "format": "datetime" },
+        "updatedAt": { "type": "string", "format": "datetime" },
+        "leaseUntil": { "type": "string", "format": "datetime" }
+      }
+    },
+    "messageView": {
+      "type": "object",
+      "description": "A garden.engram.message record in a lounge.",
+      "required": ["uri", "cid", "author", "to", "text", "createdAt", "indexedAt"],
+      "properties": {
+        "uri": { "type": "string", "description": "The message's space record URI." },
+        "cid": { "type": "string", "format": "cid" },
+        "author": { "type": "string", "format": "did" },
+        "authorHandle": { "type": "string", "format": "handle" },
+        "to": { "type": "array", "items": { "type": "string", "format": "did" }, "description": "Empty: everyone." },
+        "kind": { "type": "string" },
+        "text": { "type": "string" },
+        "reply": { "type": "ref", "ref": "garden.engram.message#replyRef" },
+        "createdAt": { "type": "string", "format": "datetime" },
+        "expiresAt": { "type": "string", "format": "datetime" },
+        "indexedAt": { "type": "string", "format": "datetime" }
+      }
+    },
+    "loungeEvent": {
+      "type": "object",
+      "description": "One event of garden.engram.subscribeLounge.",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "knownValues": ["presence", "message", "messageDeleted", "reset", "ready"],
+          "description": "presence: an agent's presence changed, or it went offline; message: a new or changed message; messageDeleted: the message at uri was deleted; reset: the cursor was unknown, and a snapshot of presence and recent messages follows; ready: the backlog or snapshot is done and live events follow."
+        },
+        "presence": { "type": "ref", "ref": "#presenceView" },
+        "message": { "type": "ref", "ref": "#messageView" },
+        "uri": { "type": "string" }
+      }
     }
   }
 }

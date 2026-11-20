@@ -8,10 +8,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/bluesky-social/indigo/atproto/atclient"
 
 	"github.com/haileyok/engram-garden/internal/agent"
 	"github.com/haileyok/engram-garden/internal/embed"
@@ -42,6 +45,24 @@ type cli struct {
 	browser func(string) error
 	// wait is how often engram index checks the appview (default 2s).
 	wait time.Duration
+
+	// principalPath is principal.json, and identitiesDir the agents'
+	// identity files.
+	principalPath string
+	identitiesDir string
+	// principalSignIn signs in as the principal (OAuth, PrincipalScopes),
+	// and principalSession resumes that sign-in.
+	principalSignIn  func(ctx context.Context, handle string, lines <-chan string) (agent.Account, error)
+	principalSession func(ctx context.Context, p agent.Principal) (*atclient.APIClient, error)
+	// openLounge signs in as the agent identity the settings name.
+	openLounge func(ctx context.Context, s agent.Settings) (*agent.Lounge, agent.Identity, error)
+	// verifyAgent returns the principals an agent declares and whether each
+	// endorses it.
+	verifyAgent func(ctx context.Context, did string) (map[string]bool, error)
+	// provisionHTTP calls the PDS and appview when making identities.
+	provisionHTTP *http.Client
+	// spawnRefill tops up the identity stock in the background; nil doesn't.
+	spawnRefill func()
 
 	json bool
 	buf  *bufio.Reader
@@ -138,6 +159,7 @@ Skills (instructions every agent in a space shares; --space picks one):
   engram skill put <dir|SKILL.md>... [--note n]   add or update skills from Agent Skills directories
   engram skill rm <name>                     delete your own version of a skill
 
+%s
 Add --json to any command for machine-readable output. MCP clients can run
 engram-mcp, which uses the same settings.
 
@@ -169,7 +191,7 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		}
 	}
 	if len(rest) == 0 || rest[0] == "help" || rest[0] == "-h" || rest[0] == "--help" {
-		fmt.Fprintf(c.out, usage, c.configPath)
+		fmt.Fprintf(c.out, usage, agentUsage, c.configPath)
 		return 0
 	}
 	cmds := map[string]func(context.Context, []string) error{
@@ -178,6 +200,7 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		"spaces": c.cmdSpaces, "use": c.cmdUse,
 		"create": c.cmdCreate, "members": c.cmdMembers, "model": c.cmdModel, "index": c.cmdIndex,
 		"skill": c.cmdSkill, "skills": c.cmdSkill,
+		"principal": c.cmdPrincipal, "lounge": c.cmdLounge, "agent": c.cmdAgent,
 	}
 	cmd, ok := cmds[rest[0]]
 	if !ok {

@@ -66,6 +66,7 @@ import {
 	sameMemory,
 	ungrounded,
 } from "./judge.ts";
+import { LOUNGE_TOOLS, lounge } from "./lounge.ts";
 import { errorText, McpServer } from "./mcp.ts";
 import {
 	cachedSkills,
@@ -84,7 +85,7 @@ import {
 const run = promisify(execFile);
 
 /** Tools this extension wraps itself; engram-mcp's others pass through. */
-const WRAPPED = new Set(["remember", "recall", "get_memory", "list_memories", "forget", "save_skill"]);
+const WRAPPED = new Set(["remember", "recall", "get_memory", "list_memories", "forget", "save_skill", ...LOUNGE_TOOLS]);
 const CHUNK_CHARS = 80_000;
 
 interface RecallDetails {
@@ -162,6 +163,19 @@ export default function engram(pi: ExtensionAPI) {
 		return server;
 	};
 
+	// Agent identities and the lounge (lounge.ts).
+	const room = lounge(pi, { server: () => server, config: () => cfg, project: () => project });
+	/** newServer makes the session's engram-mcp, signed in to the lounge as the session's own identity. */
+	function newServer(ctx: ExtensionContext, reason: string): McpServer {
+		let env: Promise<Record<string, string>> | undefined;
+		return new McpServer({
+			command: cfg!.command,
+			args: cfg!.args,
+			env: cfg!.env,
+			prepare: () => (env ??= room.identityEnv(ctx, reason)),
+		});
+	}
+
 	// ---- status line ----------------------------------------------------
 
 	let activity = "";
@@ -199,8 +213,9 @@ export default function engram(pi: ExtensionAPI) {
 	// ---- engram-mcp's other tools (spaces, members, models) for codemode --
 
 	const passedThrough = new Set<string>();
-	async function registerOtherTools() {
+	async function registerOtherTools(ctx?: ExtensionContext) {
 		const tools = await need().listTools();
+		if (ctx) void room.onStarted(ctx, tools);
 		for (const t of tools) {
 			if (WRAPPED.has(t.name) || passedThrough.has(t.name)) continue;
 			passedThrough.add(t.name);
@@ -351,7 +366,7 @@ export default function engram(pi: ExtensionAPI) {
 
 	// ---- lifecycle --------------------------------------------------------
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		session++;
 		const id = session;
 		spaces = undefined;
@@ -364,7 +379,7 @@ export default function engram(pi: ExtensionAPI) {
 			if (ctx.hasUI) ctx.ui.notify(`engram: bad settings, ${errorText(err)}`, "error");
 			return;
 		}
-		server = new McpServer({ command: cfg.command, args: cfg.args, env: cfg.env });
+		server = newServer(ctx, (event as { reason?: string }).reason ?? "startup");
 		status(ctx);
 		projectReady = detectProject(ctx.cwd).then((p) => {
 			if (id === session) project = p;
@@ -384,7 +399,7 @@ export default function engram(pi: ExtensionAPI) {
 			});
 		void server
 			.start()
-			.then(() => Promise.all([refreshSpaces(ctx), registerOtherTools()]))
+			.then(() => Promise.all([refreshSpaces(ctx), projectReady.then(() => registerOtherTools(ctx))]))
 			.catch((err) => {
 				if (id !== session) return;
 				status(ctx);
@@ -409,6 +424,7 @@ export default function engram(pi: ExtensionAPI) {
 		}
 		captureAbort.abort();
 		session++;
+		room.stop();
 		s?.close();
 		if (server === s) server = undefined;
 	});
@@ -442,6 +458,7 @@ export default function engram(pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (!cfg || !server) return;
+		room.beforeAgentStart(event, ctx);
 		event.systemPromptOptions.sections.memory = memorySection();
 
 		if (!warnedDuplicate && pi.getAllTools().some((t) => t.name.startsWith("mcp__engram__"))) {
@@ -1272,6 +1289,12 @@ export default function engram(pi: ExtensionAPI) {
 							: `engram-mcp not running${server?.lastError ? `: ${server.lastError}` : ""}`,
 					];
 					if (spaces) lines.push(spacesSummary(spaces.spaces));
+					const me = room.identity();
+					lines.push(
+						me
+							? `agent identity: ${me.handle} (${me.did}), ${me.kind}${me.parent ? ` of ${me.parent}` : ""}${room.active() ? ", in the lounge" : ""}`
+							: `agent identity: none${room.whyNot() ? ` (${room.whyNot()})` : cfg?.identities ? "" : " (identities off)"}`,
+					);
 					lines.push(
 						`auto-recall: ${cfg?.autoRecall ? `on (≥${cfg.recallMinSimilarity}, up to ${cfg.recallLimit})` : "off"}`,
 						`auto-capture: ${cfg?.autoCapture ? (captureAllowed(ctx) ? `on (${cfg.model ?? "session model"})` : "off for this session (not saved, or print mode)") : "off"}${capturing ? ", capturing now" : ""}`,
@@ -1369,13 +1392,15 @@ export default function engram(pi: ExtensionAPI) {
 				}
 				case "restart": {
 					if (!cfg) return;
+					room.stop();
 					server?.close();
-					server = new McpServer({ command: cfg.command, args: cfg.args, env: cfg.env });
+					// The same identity: the session's entry names it.
+					server = newServer(ctx, "restart");
 					spaces = undefined;
 					status(ctx);
 					try {
 						await server.start();
-						await Promise.all([refreshSpaces(ctx), registerOtherTools()]);
+						await Promise.all([refreshSpaces(ctx), registerOtherTools(ctx)]);
 						ctx.ui.notify(`engram: engram-mcp ${server.serverVersion} running`, "info");
 					} catch (err) {
 						status(ctx);

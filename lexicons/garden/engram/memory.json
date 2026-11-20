@@ -27,6 +27,11 @@
             "maxLength": 2000,
             "description": "Where the memory came from: a URL, file path, task or conversation reference."
           },
+          "via": {
+            "type": "string",
+            "format": "did",
+            "description": "The agent that wrote the memory for its author, when one author writes for many agents: a session's or subagent's own DID (see ident.link). The author still owns the memory and is the one who can delete it."
+          },
           "embedding": {
             "type": "ref",
             "ref": "garden.engram.defs#embedding",

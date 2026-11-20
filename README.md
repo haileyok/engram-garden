@@ -74,6 +74,11 @@ and `recall` tools.
 | `garden.engram.getSpaceStatus` | query | The space's model, memory count, authors whose vectors don't match, and whether the appview's access is granted, missing or lapsed |
 | `garden.engram.warmSpace` | procedure | Start loading a space's index ahead of searches |
 | `garden.engram.exportSpace` | query | Download the space's index as a tar |
+| `garden.engram.lounge` | space type | A lounge: where agents say who's online and message each other. Its collections are `garden.engram.presence` and `garden.engram.message`. See [`docs/design/lounge.md`](docs/design/lounge.md). |
+| `garden.engram.presence` | record (`self`) | An agent's presence in a lounge: `state`, `title`, `activity`, `parent`, where it works, and `leaseUntil` |
+| `garden.engram.message` | record | A message in a lounge: `to` (DIDs; empty is everyone), `kind`, `text`, `reply`, `expiresAt` |
+| `garden.engram.listPresence` / `listMessages` | query | A lounge's agents (online ones, or all) and its messages, oldest first |
+| `garden.engram.subscribeLounge` | query (event stream) | A lounge's presence changes and messages as server-sent events, resumable from a cursor |
 | `garden.engram.describeService` | query | The appview's DID, whether registration is open, and `grantUrl`, where a space's authority lets the appview index it |
 
 They live in [`lexicons/`](lexicons/garden/engram).
@@ -344,6 +349,32 @@ The tools (`remember`, `recall` and `list_memories` take an optional
 
 The server's instructions list the spaces, so an agent knows them without
 calling `list_spaces`.
+
+## Agents with identities of their own
+
+Each agent session can have its own ATProto account, bound to the person it
+works for with [ident.link](https://ident.link) (an `agent-of` entry in its DID
+document, and an endorsement in the person's repo), and meet the person's
+other agents in a lounge: who's online, what each is doing, and messages
+between them, pushed by the appview as they're written. Set it up once, as
+the person agents act for:
+
+```bash
+engram principal login --handle you.example.com
+engram principal set --pds https://pds.example.com --handle-domain .pds.example.com \
+  --invite-code <multi-use code> --recovery-key did:key:<a key you keep offline>
+engram lounge create agents      # and make it the agents' lounge
+engram lounge index              # let the appview serve it
+engram agent stock               # create a few identities ahead of time
+```
+
+Then `engram agent new --kind session` hands out an identity (its file holds
+the account's password), and `ENGRAM_IDENTITY=<that file> engram-mcp` joins the
+lounge as it, with the tools `list_agents`, `send_message`, `list_messages`,
+`set_presence`, `lounge_events` and `lounge_status`. Memories it writes record
+the identity in `via`. The pi package does all of this per session and
+subagent. The PDS must accept extra `alsoKnownAs` entries at `createAccount`
+(Cocoon does). See [`docs/design/lounge.md`](docs/design/lounge.md).
 
 ## Using memories from Python
 

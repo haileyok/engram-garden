@@ -31,6 +31,11 @@ export interface ServerOptions {
 	requestTimeoutMs?: number;
 	/** The longest answer accepted, in characters (default 64 MiB). */
 	maxLine?: number;
+	/**
+	 * prepare runs before each launch and returns more environment for the
+	 * server, such as the agent identity it signs in to the lounge with.
+	 */
+	prepare?: () => Promise<Record<string, string>>;
 }
 
 interface Pending {
@@ -97,9 +102,11 @@ export class McpServer {
 	}
 
 	private async launch(): Promise<void> {
+		const extra = this.opts.prepare ? await this.opts.prepare() : {};
+		if (this.closed) throw new Error("engram-mcp was stopped");
 		const proc = spawn(this.opts.command, this.opts.args ?? [], {
 			stdio: ["pipe", "pipe", "pipe"],
-			env: { ...process.env, ...this.opts.env },
+			env: { ...process.env, ...this.opts.env, ...extra },
 		});
 		this.proc = proc;
 		this.handshook = false;

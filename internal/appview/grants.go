@@ -24,8 +24,9 @@ import (
 // docs/design/indexing-access.md.
 
 // GrantScopes are the OAuth scopes a grant asks for: read the memory spaces
-// the person governs. With no authority, a space: scope covers only those.
-var GrantScopes = []string{"atproto", "space:" + lex.SpaceType + "?action=read"}
+// and lounges the person governs. With no authority, a space: scope covers
+// only those.
+var GrantScopes = []string{"atproto", "space:" + lex.SpaceType + "?action=read", "space:" + lex.LoungeType + "?action=read"}
 
 // StopScopes are asked for when stopping indexing, only to prove who the
 // person is.

@@ -7,6 +7,12 @@
 // or $ENGRAM_CONFIG_DIR), and ENGRAM_* environment variables override them:
 // ENGRAM_SPACES, ENGRAM_SPACE, ENGRAM_IDENTIFIER / ENGRAM_PASSWORD, ENGRAM_APPVIEW_URL,
 // ENGRAM_APPVIEW_DID, ENGRAM_PDS_HOST and ENGRAM_EMBED_*.
+//
+// With ENGRAM_IDENTITY (an agent identity file from `engram agent new`), it
+// also joins that identity's lounge as the agent: its presence, messages,
+// and the lounge's live stream (list_agents, send_message, list_messages,
+// set_presence, lounge_events, lounge_status). Memories then record the
+// identity as the agent they were written for (via).
 package main
 
 import (
@@ -112,6 +118,30 @@ func run(log *slog.Logger) error {
 	def, _ := settings.Default()
 	log.Info("engram-mcp ready", "account", a.Client.DID(), "spaces", names, "default", def.Name, "appview", settings.AppviewURL)
 	var opts []mcpserver.Option
+	loungeDone := make(chan struct{})
+	close(loungeDone)
+	if settings.Identity != "" {
+		l, id, err := agent.OpenLounge(ctx, settings, agent.Options{HTTP: &http.Client{Timeout: time.Minute}, Log: log})
+		if err != nil {
+			log.Warn("can't join the lounge; the lounge tools are off", "identity", settings.Identity, "err", err)
+		} else {
+			opts = append(opts, mcpserver.WithLounge(l))
+			loungeDone = make(chan struct{})
+			go func() {
+				defer close(loungeDone)
+				l.Run(ctx)
+			}()
+			log.Info("joined the lounge", "agent", id.DID, "handle", id.Handle, "lounge", l.Space)
+		}
+	}
+	// The lounge marks the agent ended on the way out.
+	defer func() {
+		stop()
+		select {
+		case <-loungeDone:
+		case <-time.After(8 * time.Second):
+		}
+	}()
 	if p := os.Getenv("ENGRAM_QUERY_LOG"); p != "" {
 		// Opt-in: recall queries and results, kept on this machine for
 		// evaluating search (engram-eval gen -log).
