@@ -692,6 +692,7 @@ type MessageView struct {
 	Kind         string        `json:"kind,omitempty"`
 	Text         string        `json:"text"`
 	Reply        *lex.ReplyRef `json:"reply,omitempty"`
+	Machine      string        `json:"machine,omitempty"`
 	CreatedAt    string        `json:"createdAt"`
 	ExpiresAt    string        `json:"expiresAt,omitempty"`
 	IndexedAt    string        `json:"indexedAt"`
@@ -711,7 +712,7 @@ func messageView(uri string, e *messageEntry) *MessageView {
 	}
 	return &MessageView{
 		URI: uri, CID: e.cid, Author: e.author, AuthorHandle: e.handle, To: to, Kind: e.m.Kind, Text: e.m.Text,
-		Reply: e.m.Reply, CreatedAt: e.created.Format(timeFormat), ExpiresAt: e.m.ExpiresAt, IndexedAt: e.indexedAt.Format(timeFormat),
+		Reply: e.m.Reply, Machine: e.m.Machine, CreatedAt: e.created.Format(timeFormat), ExpiresAt: e.m.ExpiresAt, IndexedAt: e.indexedAt.Format(timeFormat),
 	}
 }
 

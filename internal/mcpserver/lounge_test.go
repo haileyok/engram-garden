@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -198,7 +199,9 @@ func TestAgentsMeetInTheLounge(t *testing.T) {
 
 	// Bob gets it pushed, and replies; the reply goes back to alice.
 	req, _ := waitFor(t, bob, 0, func(e agent.LoungeEvent) bool { return e.Message != nil && e.Message.URI == sent.URI })
-	if req.Message.Author != aliceID.DID || req.Message.Kind != lex.KindRequest || req.Message.SamePrincipal == nil || !*req.Message.SamePrincipal {
+	host, _ := os.Hostname()
+	if req.Message.Author != aliceID.DID || req.Message.Kind != lex.KindRequest || req.Message.SamePrincipal == nil || !*req.Message.SamePrincipal ||
+		req.Message.Machine == "" || req.Message.Machine != host {
 		t.Fatalf("bob got: %+v", req.Message)
 	}
 	reply, err := bob.Send(ctx, agent.SendIn{Text: "all clear", ReplyTo: sent.URI})

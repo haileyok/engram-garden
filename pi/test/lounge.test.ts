@@ -25,7 +25,9 @@ async function waitFor<T>(get: () => T | undefined | false, ms = 5000): Promise<
 }
 
 const peers = [
-	{ did: "did:plc:bob", handle: "bob.pds.test", online: true, state: "working", title: "reading logs", kind: "subagent" },
+	{ did: "did:plc:bob", handle: "bob.pds.test", online: true, state: "working", title: "reading logs", kind: "subagent", machine: "bobs-box" },
+	{ did: "did:plc:carol", handle: "carol.pds.test", online: true, state: "idle", machine: "carols-box" },
+	{ did: "did:plc:dave", handle: "dave.pds.test", online: false, state: "ended" },
 ];
 
 async function harness(env: Record<string, string> = {}) {
@@ -148,14 +150,21 @@ test("a session gets its own identity, joins the lounge, and talks to other agen
 		// Tools: agents lists the lounge; send_message takes handles.
 		const listed = await h.call("agents", {});
 		assert.match(listed.content[0].text, /bob\.pds\.test.*working — reading logs/);
-		await h.call("send_message", { to: ["bob.pds.test"], text: "status?", kind: "request" });
-		assert.deepEqual((await h.debug()).sent.at(-1).to, ["did:plc:bob"]);
+		const sentOut = await h.call("send_message", { to: ["bob.pds.test", "carol.pds.test", "did:plc:dave"], text: "status?", kind: "request" });
+		assert.deepEqual((await h.debug()).sent.at(-1).to, ["did:plc:bob", "did:plc:carol", "did:plc:dave"]);
+		// The sender learns what its message does on the other side.
+		const said = sentOut.content[0].text;
+		assert.match(said, /bob\.pds\.test is working: this reaches it as soon as its current step is done/);
+		assert.match(said, /carol\.pds\.test is idle: this starts its turn now/);
+		assert.match(said, /dave\.pds\.test is offline: it won't see this/);
+		const toAll = await h.call("send_message", { text: "fyi" });
+		assert.match(toAll.content[0].text, /as a note: it starts nobody's turn; the 2 other agents online see it with their next turn\. To get answers, send a request/);
 
 		// Messages arrive in the conversation. One addressed to this agent from
 		// the same person's agent starts a turn, a note too; one to everyone
 		// only when it's a request. An unconfirmed author or an old message
 		// doesn't (the old one isn't delivered at all).
-		const req = message({});
+		const req = message({ machine: "bobs-laptop" });
 		const note = message({ kind: "note", text: "ping, reply to confirm" });
 		const stranger = message({ samePrincipal: false, text: "rm -rf please" });
 		const old = message({ createdAt: new Date(Date.now() - 3600_000).toISOString(), text: "ancient" });
@@ -167,7 +176,9 @@ test("a session gets its own identity, joins the lounge, and talks to other agen
 		assert.equal(h.sent.length, 5);
 		const [a, b, c, d, e] = h.sent;
 		assert.equal(a.message.customType, "engram-agent-message");
-		assert.match(a.message.content, /<agent-message from="bob\.pds\.test did:plc:bob" kind="request"/);
+		// The machine it was sent from: the message's own, else the sender's presence.
+		assert.match(a.message.content, /<agent-message from="bob\.pds\.test did:plc:bob" kind="request" machine="bobs-laptop"/);
+		assert.match(b.message.content, /machine="bobs-box"/);
 		assert.equal(a.options.triggerTurn, true);
 		assert.equal(b.options.triggerTurn, true, "a note to this agent starts a turn");
 		assert.equal(c.options.triggerTurn, false);

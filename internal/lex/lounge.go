@@ -173,12 +173,14 @@ type ReplyRef struct {
 
 // Message is a garden.engram.message record.
 type Message struct {
-	To        []string  `json:"to,omitempty"`
-	Kind      string    `json:"kind,omitempty"`
-	Text      string    `json:"text"`
-	Reply     *ReplyRef `json:"reply,omitempty"`
-	CreatedAt string    `json:"createdAt"`
-	ExpiresAt string    `json:"expiresAt,omitempty"`
+	To    []string  `json:"to,omitempty"`
+	Kind  string    `json:"kind,omitempty"`
+	Text  string    `json:"text"`
+	Reply *ReplyRef `json:"reply,omitempty"`
+	// Machine is the host name of the machine the sender ran on.
+	Machine   string `json:"machine,omitempty"`
+	CreatedAt string `json:"createdAt"`
+	ExpiresAt string `json:"expiresAt,omitempty"`
 }
 
 // ForAgent reports whether the message is for did: addressed to it, or to
@@ -209,6 +211,7 @@ func (m *Message) Validate() error {
 	if strings.TrimSpace(m.Text) == "" {
 		return errors.New("a message needs text")
 	}
+	m.Machine = clip(m.Machine, 256, 0)
 	if len(m.Text) > MaxMessageChars || utf8.RuneCountInString(m.Text) > 10000 {
 		return fmt.Errorf("a message is at most %d bytes and 10000 characters", MaxMessageChars)
 	}
@@ -268,6 +271,9 @@ func (m Message) Record() map[string]any {
 	if m.ExpiresAt != "" {
 		rec["expiresAt"] = m.ExpiresAt
 	}
+	if m.Machine != "" {
+		rec["machine"] = m.Machine
+	}
 	return rec
 }
 
@@ -283,6 +289,8 @@ func ParseMessage(rec map[string]any) (Message, error) {
 	m.Text = clip(m.Text, MaxMessageChars, 10000)
 	m.Kind, _ = rec["kind"].(string)
 	m.Kind = clip(m.Kind, 64, 0)
+	m.Machine, _ = rec["machine"].(string)
+	m.Machine = clip(m.Machine, 256, 0)
 	m.CreatedAt, _ = rec["createdAt"].(string)
 	m.ExpiresAt, _ = rec["expiresAt"].(string)
 	if to, ok := rec["to"].([]any); ok {

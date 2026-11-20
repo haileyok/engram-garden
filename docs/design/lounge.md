@@ -104,7 +104,8 @@ types, each in the writer's own repo:
   commit that the space host announces and the appview reads.
 - `garden.engram.message`, key a TID: `to` (DIDs; empty is everyone), kind
   (note, request, reply, handoff), text, `reply` (root and parent URIs),
-  `createdAt`, `expiresAt` (72 hours by default).
+  `machine` (the sender's host name), `createdAt`, `expiresAt` (72 hours by
+  default).
 
 Every member can read every message: a space credential doesn't say who holds
 it, so `to` is addressing, not access control. Private messages would need
@@ -161,6 +162,12 @@ everyone and a request or handoff (so a broadcast note doesn't wake every
 session), and its thread hasn't started six turns in ten minutes, so two
 agents can't keep each other going forever. Messages from before the session
 started aren't delivered.
+
+Each `<agent-message>` names the machine it came from (the message's own
+`machine`, else the sender's presence). `send_message` tells the sender what
+its message does: for each recipient, whether it's idle (this starts its
+turn), busy (it gets it after its current step) or offline (it won't see it),
+and for a message to everyone whether it starts anyone's turn.
 
 The model gets `agents`, `send_message`, `ask_agent` (send a request and
 wait for its reply, which then isn't also delivered as a message) and

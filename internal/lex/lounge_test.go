@@ -43,7 +43,7 @@ func TestPresence(t *testing.T) {
 
 func TestMessage(t *testing.T) {
 	t.Parallel()
-	m := Message{To: []string{"did:plc:a", "did:plc:a", "did:plc:b"}, Text: "hi", CreatedAt: "2026-11-20T12:00:00.000Z"}
+	m := Message{To: []string{"did:plc:a", "did:plc:a", "did:plc:b"}, Text: "hi", Machine: "cpu2", CreatedAt: "2026-11-20T12:00:00.000Z"}
 	if err := m.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestMessage(t *testing.T) {
 		t.Fatal("ForAgent")
 	}
 	got, err := ParseMessage(m.Record())
-	if err != nil || got.Text != "hi" || len(got.To) != 2 {
+	if err != nil || got.Text != "hi" || len(got.To) != 2 || got.Machine != "cpu2" {
 		t.Fatalf("round trip: %+v %v", got, err)
 	}
 	for name, bad := range map[string]Message{

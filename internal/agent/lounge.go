@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +38,9 @@ type Lounge struct {
 	Lease time.Duration
 	// Now is the clock (default time.Now).
 	Now func() time.Time
+	// Machine is this machine's host name, sent with every message (default
+	// os.Hostname).
+	Machine string
 	// Principal is the DID of the person this agent acts for, and Verify
 	// returns the principals another agent declares and whether each
 	// confirms it (Principals). With both, received messages say whether
@@ -89,6 +93,7 @@ type LoungeMessage struct {
 	Kind         string        `json:"kind,omitempty"`
 	Text         string        `json:"text"`
 	Reply        *lex.ReplyRef `json:"reply,omitempty"`
+	Machine      string        `json:"machine,omitempty"`
 	CreatedAt    string        `json:"createdAt"`
 	ExpiresAt    string        `json:"expiresAt,omitempty"`
 	// SamePrincipal says whether the author is confirmed (ident.link) as
@@ -160,6 +165,21 @@ func (l *Lounge) lease() time.Duration {
 		return l.Lease
 	}
 	return 5 * time.Minute
+}
+
+// machine is the host name messages say they come from.
+func (l *Lounge) machine() string {
+	if l.Machine != "" {
+		return l.Machine
+	}
+	l.mu.Lock()
+	m := l.presence.Machine
+	l.mu.Unlock()
+	if m != "" {
+		return m
+	}
+	h, _ := os.Hostname()
+	return h
 }
 
 // DID is the agent's own DID.
@@ -284,7 +304,7 @@ type SendOut struct {
 // Send writes a message to the lounge from the agent's own repo.
 func (l *Lounge) Send(ctx context.Context, in SendIn) (SendOut, error) {
 	now := l.now()
-	m := lex.Message{To: append([]string(nil), in.To...), Kind: in.Kind, Text: strings.TrimSpace(in.Text), CreatedAt: fmtTime(now)}
+	m := lex.Message{To: append([]string(nil), in.To...), Kind: in.Kind, Text: strings.TrimSpace(in.Text), Machine: l.machine(), CreatedAt: fmtTime(now)}
 	ttl := 72 * time.Hour
 	if in.TTL != "" {
 		d, err := time.ParseDuration(in.TTL)
