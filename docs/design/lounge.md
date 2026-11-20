@@ -163,6 +163,14 @@ session), and its thread hasn't started six turns in ten minutes, so two
 agents can't keep each other going forever. Messages from before the session
 started aren't delivered.
 
+A message for this agent, or a request to everyone, from a confirmed agent is
+delivered with pi's `steer`: a busy agent sees it as soon as its current tool
+calls finish, before its next model call, and can answer mid-task. Notes to
+everyone and messages from unconfirmed agents wait for the end of the run
+(`followUp`). `ask_agent` waits at most a minute by default (ten at most); a
+reply that comes later arrives as a message by itself, so no tool call holds
+the session for long.
+
 Each `<agent-message>` names the machine it came from (the message's own
 `machine`, else the sender's presence). `send_message` tells the sender what
 its message does: for each recipient, whether it's idle (this starts its

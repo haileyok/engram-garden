@@ -135,7 +135,7 @@ the extension warns while both are there. The memory paragraphs in
   "identityTimeoutMs": 60000,
   "loungeWake": true,
   "loungeMaxWakesPerThread": 6,
-  "askTimeoutSec": 300
+  "askTimeoutSec": 60
 }
 ```
 
