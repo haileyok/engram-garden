@@ -35,12 +35,21 @@ const run = promisify(execFile);
 
 export const IDENTITY_ENTRY = "engram-identity";
 export const AGENT_MESSAGE = "engram-agent-message";
+/** Records each message delivered into the session, so a reload doesn't deliver it again. */
+export const DELIVERED_ENTRY = "engram-lounge-delivered";
 
 /** engram-mcp's lounge tools, which this module wraps. */
 export const LOUNGE_TOOLS = ["lounge_status", "list_agents", "send_message", "list_messages", "set_presence", "lounge_events"];
 
-/** The parent this process was started by, read before it's replaced with our own DID. */
-const inheritedParent = process.env.PI_ENGRAM_PARENT_DID || undefined;
+/**
+ * The parent this process was started by. pi evaluates extensions again on
+ * reload and session switches, after this module has put its own DID in
+ * PI_ENGRAM_PARENT_DID for its subagents, so the value the process started
+ * with is kept process-wide on first load.
+ */
+const g = globalThis as { __piEngramParent?: string | null };
+if (g.__piEngramParent === undefined) g.__piEngramParent = process.env.PI_ENGRAM_PARENT_DID || null;
+const inheritedParent = g.__piEngramParent || undefined;
 
 export interface Identity {
 	did: string;
@@ -95,6 +104,8 @@ interface EventsOut {
 	events: LoungeEvent[];
 	next: number;
 	connection: string;
+	/** Names the engram-mcp process: seqs from another one mean nothing. */
+	epoch?: string;
 }
 
 export interface LoungeHost {
@@ -194,9 +205,19 @@ export function lounge(pi: ExtensionAPI, host: LoungeHost) {
 	let connection = "";
 	let busy = false;
 	let lastPresence = "";
+	/** The presence this agent should have: every field set so far, merged. */
+	let wanted: Record<string, string> = {};
+	let presenceChain: Promise<void> = Promise.resolve();
 	let ctxRef: ExtensionContext | undefined;
-	/** Requests waiting for their reply (ask_agent), by URI. */
-	const awaited = new Map<string, (m: LoungeMessage) => void>();
+	/** Messages already delivered into this session. */
+	let delivered = new Set<string>();
+	/** Settles once the lounge is joined, or known not to be. */
+	let ready: Promise<void> = Promise.resolve();
+	let markReady: () => void = () => {};
+	/** ask_agent calls sending their request, not yet waiting for the reply. */
+	let asking = 0;
+	/** Requests waiting for their reply (ask_agent), by URI: who should answer, and the waiter. */
+	const awaited = new Map<string, { from: string; done: (m?: LoungeMessage) => void }>();
 	/** When turns were started automatically, per thread. */
 	const wakes = new Map<string, number[]>();
 
@@ -225,7 +246,10 @@ export function lounge(pi: ExtensionAPI, host: LoungeHost) {
 	 */
 	async function identityEnv(ctx: ExtensionContext, reason: string): Promise<Record<string, string>> {
 		const cfg = host.config();
-		if (!cfg?.identities) return {};
+		if (!cfg?.identities) {
+			markReady();
+			return {};
+		}
 		try {
 			let found: Identity | undefined;
 			for (const e of (ctx.sessionManager.getEntries?.() ?? []) as any[]) {
@@ -248,6 +272,7 @@ export function lounge(pi: ExtensionAPI, host: LoungeHost) {
 			return { ENGRAM_IDENTITY: identity.path };
 		} catch (err) {
 			identity = undefined;
+			markReady();
 			whyNot = errorText(err);
 			// Without a principal set up, identities are simply off.
 			if (ctx.hasUI && !/no principal is set up/.test(whyNot))
@@ -270,19 +295,28 @@ export function lounge(pi: ExtensionAPI, host: LoungeHost) {
 		return process.env.PI_ENGRAM_TASK || ctx.sessionManager.getSessionName?.() || "";
 	}
 
-	/** setPresence writes a change, skipping one that changes nothing. */
-	async function setPresence(fields: Record<string, string | undefined>) {
-		if (!active) return;
-		const args = Object.fromEntries(Object.entries(fields).filter(([, v]) => v));
-		const key = JSON.stringify(args);
-		if (key === lastPresence) return;
-		lastPresence = key;
-		try {
-			await srv().call("set_presence", args);
-		} catch (err) {
-			lastPresence = "";
-			ctxRef?.hasUI && ctxRef.ui.notify(`engram: presence not updated: ${errorText(err)}`, "warning");
-		}
+	/**
+	 * setPresence merges a change into the presence this agent should have
+	 * and writes it. Writes go one at a time, each sending the newest merged
+	 * presence, so a slow write can't land after a newer one; one that
+	 * changes nothing is skipped.
+	 */
+	function setPresence(fields: Record<string, string | undefined>): Promise<void> {
+		for (const [k, v] of Object.entries(fields)) if (v) wanted[k] = v;
+		const gen = generation;
+		presenceChain = presenceChain.then(async () => {
+			if (!active || gen !== generation) return;
+			const args = { ...wanted };
+			const key = JSON.stringify(args);
+			if (key === lastPresence) return;
+			try {
+				await srv().call("set_presence", args);
+				lastPresence = key;
+			} catch (err) {
+				ctxRef?.hasUI && ctxRef.ui.notify(`engram: presence not updated: ${errorText(err)}`, "warning");
+			}
+		});
+		return presenceChain;
 	}
 
 	// ---- receiving --------------------------------------------------------------
@@ -297,20 +331,36 @@ export function lounge(pi: ExtensionAPI, host: LoungeHost) {
 		return true;
 	}
 
-	function receive(m: LoungeMessage) {
+	function receive(m: LoungeMessage, deferred = false) {
 		const ctx = ctxRef;
-		if (!identity || m.author === identity.did) return;
-		// What was said before this session started is history, not news.
-		if (Date.parse(m.createdAt) < startedAt - 2 * 60_000) return;
-		if (m.reply && awaited.has(m.reply.parent)) {
-			awaited.get(m.reply.parent)!(m);
+		if (!identity || m.author === identity.did || delivered.has(m.uri)) return;
+		const created = Date.parse(m.createdAt);
+		// What was said well before this session started is history, not news.
+		if (created < startedAt - 2 * 60_000) return;
+		const waiter = m.reply ? awaited.get(m.reply.parent) : undefined;
+		if (waiter && waiter.from === m.author) {
+			waiter.done(m);
+			return;
+		}
+		// A reply to one of our requests may beat ask_agent to waiting for it:
+		// look again in a moment before delivering it as a message.
+		if (!deferred && asking > 0 && m.reply?.parent.includes(`/${identity.did}/`)) {
+			setTimeout(() => receive(m, true), 1000).unref?.();
 			return;
 		}
 		const cfg = host.config();
 		const kind = m.kind ?? "note";
 		const root = m.reply?.root ?? m.uri;
+		// Only what was said since this runtime started can start a turn.
 		const wake =
-			!!cfg?.loungeWake && kind !== "note" && m.samePrincipal === true && (m.to.includes(identity.did) || m.to.length === 0) && wakeAllowed(root);
+			!!cfg?.loungeWake &&
+			kind !== "note" &&
+			m.samePrincipal === true &&
+			created >= startedAt - 5_000 &&
+			(m.to.includes(identity.did) || m.to.length === 0) &&
+			wakeAllowed(root);
+		delivered.add(m.uri);
+		pi.appendEntry<{ uri: string }>(DELIVERED_ENTRY, { uri: m.uri });
 		pi.sendMessage(
 			{ customType: AGENT_MESSAGE, content: messageBlock(m), display: true, details: m },
 			{ deliverAs: "followUp", triggerTurn: wake },
@@ -321,6 +371,7 @@ export function lounge(pi: ExtensionAPI, host: LoungeHost) {
 
 	async function poll(gen: number) {
 		let after = 0;
+		let epoch = "";
 		while (gen === generation) {
 			const s = host.server();
 			if (!s) return;
@@ -333,6 +384,17 @@ export function lounge(pi: ExtensionAPI, host: LoungeHost) {
 				continue;
 			}
 			if (gen !== generation) return;
+			if (out.epoch && epoch && out.epoch !== epoch) {
+				// engram-mcp restarted: its seqs start over, and it has no
+				// presence to renew. Read again from the start (delivered
+				// messages are skipped) and write the whole presence again.
+				epoch = out.epoch;
+				after = 0;
+				lastPresence = "";
+				void setPresence({});
+				continue;
+			}
+			if (out.epoch) epoch = out.epoch;
 			after = out.next;
 			const was = connection;
 			connection = out.connection;
@@ -353,6 +415,14 @@ export function lounge(pi: ExtensionAPI, host: LoungeHost) {
 	/** onStarted runs once engram-mcp is up: joins the lounge if it has the tools. */
 	async function onStarted(ctx: ExtensionContext, tools: { name: string }[]) {
 		ctxRef = ctx;
+		try {
+			await join(ctx, tools);
+		} finally {
+			markReady();
+		}
+	}
+
+	async function join(ctx: ExtensionContext, tools: { name: string }[]) {
 		const s = host.server();
 		if (!identity || !s || !tools.some((t) => t.name === "lounge_events")) return;
 		active = true;
@@ -382,21 +452,41 @@ export function lounge(pi: ExtensionAPI, host: LoungeHost) {
 		void poll(gen);
 	}
 
+	/** begin readies for a session starting: what it already received, and a fresh readiness. */
+	function begin(ctx: ExtensionContext) {
+		ctxRef = ctx;
+		delivered = new Set();
+		for (const e of (ctx.sessionManager.getEntries?.() ?? []) as any[]) {
+			if (e.type === "custom" && e.customType === DELIVERED_ENTRY && e.data?.uri) delivered.add(e.data.uri);
+		}
+		ready = new Promise((r) => {
+			markReady = r;
+		});
+	}
+
 	function stop() {
 		generation++;
 		active = false;
 		agents = new Map();
 		connection = "";
 		lastPresence = "";
-		for (const resolve of awaited.values()) resolve({ uri: "", author: "", to: [], text: "", createdAt: "" });
+		wanted = {};
+		markReady();
+		for (const w of awaited.values()) w.done();
 		awaited.clear();
 		status();
 	}
 
-	/** beforeAgentStart adds the lounge to the system prompt and marks the agent working (index.ts calls it). */
-	function beforeAgentStart(event: any, ctx: ExtensionContext) {
+	/**
+	 * beforeAgentStart adds the lounge to the system prompt and marks the
+	 * agent working (index.ts calls it). The first prompt may come before the
+	 * lounge is joined: it waits a little for that.
+	 */
+	async function beforeAgentStart(event: any, ctx: ExtensionContext) {
 		ctxRef = ctx;
 		busy = true;
+		const wait = host.config()?.recallStartTimeoutMs ?? 5000;
+		await Promise.race([ready, new Promise((r) => setTimeout(r, wait).unref())]);
 		if (!active || !identity) return;
 		event.systemPromptOptions.sections.lounge = section();
 		const prompt = event.messageType === "user" ? String(event.prompt ?? "") : "";
@@ -477,19 +567,26 @@ export function lounge(pi: ExtensionAPI, host: LoungeHost) {
 			async execute(_id, params, signal): Promise<any> {
 				const did = resolveAgent(params.to);
 				const s = srv();
-				const sent = await s.call<{ uri: string }>("send_message", { to: [did], text: params.text, kind: "request" }, signal);
+				let sent: { uri: string };
+				asking++;
+				try {
+					sent = await s.call<{ uri: string }>("send_message", { to: [did], text: params.text, kind: "request" }, signal);
+				} finally {
+					asking--;
+				}
 				const timeout = (params.timeoutSec ?? host.config()?.askTimeoutSec ?? 300) * 1000;
 				const reply = await new Promise<LoungeMessage | undefined>((resolve) => {
 					const done = (m?: LoungeMessage) => {
 						awaited.delete(sent.uri);
 						clearTimeout(t);
 						signal?.removeEventListener("abort", onAbort);
-						resolve(m?.uri ? m : undefined);
+						resolve(m);
 					};
 					const onAbort = () => done();
 					const t = setTimeout(() => done(), timeout);
+					awaited.set(sent.uri, { from: did, done });
 					signal?.addEventListener("abort", onAbort, { once: true });
-					awaited.set(sent.uri, done);
+					if (signal?.aborted) done();
 				});
 				if (!reply)
 					return {
@@ -545,6 +642,7 @@ export function lounge(pi: ExtensionAPI, host: LoungeHost) {
 	});
 
 	return {
+		begin,
 		beforeAgentStart,
 		identityEnv,
 		onStarted,

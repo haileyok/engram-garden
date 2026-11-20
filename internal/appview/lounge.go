@@ -30,7 +30,13 @@ func (s *Server) authorizeLounge(r *http.Request, spaceURI string) error {
 	if s.Lounge == nil {
 		return errf(http.StatusBadRequest, "UnknownSpace", "this service serves no lounges")
 	}
-	return s.authorizeReader(r, spaceURI, false)
+	if err := s.authorizeReader(r, spaceURI, false); err != nil {
+		return err
+	}
+	if s.Lounge.Deleted(spaceURI) {
+		return errf(http.StatusBadRequest, "UnknownSpace", "lounge %s was deleted", spaceURI)
+	}
+	return nil
 }
 
 func optionalDID(r *http.Request, name string) (string, error) {

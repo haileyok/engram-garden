@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +46,9 @@ type Lounge struct {
 
 	trustMu sync.Mutex
 	trust   map[string]trustEntry
+	// writeMu serializes presence writes, so they land in the order they
+	// were merged.
+	writeMu sync.Mutex
 
 	mu       sync.Mutex
 	presence lex.Presence
@@ -184,6 +188,8 @@ type PresenceIn struct {
 // SetPresence merges a change into the agent's presence and writes it, with
 // a fresh lease.
 func (l *Lounge) SetPresence(ctx context.Context, in PresenceIn) (AgentPresence, error) {
+	l.writeMu.Lock()
+	defer l.writeMu.Unlock()
 	l.mu.Lock()
 	p := l.presence
 	for _, f := range []struct {
@@ -445,7 +451,14 @@ func (l *Lounge) Run(ctx context.Context) {
 		return
 	}
 	l.started = true
+	written := l.presence.State != ""
 	l.mu.Unlock()
+	if !written {
+		// Online from the start, even for a client that never sets presence.
+		if _, err := l.SetPresence(ctx, PresenceIn{State: lex.StateIdle}); err != nil {
+			l.log().Warn("writing presence failed", "err", err)
+		}
+	}
 	go func() {
 		t := time.NewTicker(15 * time.Second)
 		defer t.Stop()
@@ -601,7 +614,13 @@ type EventsOut struct {
 	Events     []LoungeEvent `json:"events"`
 	Next       int64         `json:"next"`
 	Connection string        `json:"connection"`
+	// Epoch names this process: seqs from another epoch mean nothing here
+	// (the server restarted), so a caller starts again from 0.
+	Epoch string `json:"epoch"`
 }
+
+// processEpoch is Epoch for this process.
+var processEpoch = strconv.FormatInt(time.Now().UnixNano(), 36)
 
 // Events returns the events received after in.After, waiting up to in.Wait
 // seconds for one when there are none.
@@ -633,7 +652,7 @@ func (l *Lounge) Events(ctx context.Context, in EventsIn) EventsOut {
 					out[i].Message = &m
 				}
 			}
-			return EventsOut{Events: out, Next: next, Connection: conn}
+			return EventsOut{Events: out, Next: next, Connection: conn, Epoch: processEpoch}
 		}
 		if l.notify == nil {
 			l.notify = make(chan struct{})

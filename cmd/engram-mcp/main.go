@@ -121,7 +121,10 @@ func run(log *slog.Logger) error {
 	loungeDone := make(chan struct{})
 	close(loungeDone)
 	if settings.Identity != "" {
-		l, id, err := agent.OpenLounge(ctx, settings, agent.Options{HTTP: &http.Client{Timeout: time.Minute}, Log: log})
+		// Signing in as the identity mustn't hold up memory for long.
+		octx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		l, id, err := agent.OpenLounge(octx, settings, agent.Options{HTTP: &http.Client{Timeout: time.Minute}, Log: log})
+		cancel()
 		if err != nil {
 			log.Warn("can't join the lounge; the lounge tools are off", "identity", settings.Identity, "err", err)
 		} else {

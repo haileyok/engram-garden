@@ -279,7 +279,10 @@ func ParseMessage(rec map[string]any) (Message, error) {
 	if strings.TrimSpace(m.Text) == "" {
 		return Message{}, errors.New("message has no text")
 	}
+	// A reader keeps at most what a writer may write.
+	m.Text = clip(m.Text, MaxMessageChars, 10000)
 	m.Kind, _ = rec["kind"].(string)
+	m.Kind = clip(m.Kind, 64, 0)
 	m.CreatedAt, _ = rec["createdAt"].(string)
 	m.ExpiresAt, _ = rec["expiresAt"].(string)
 	if to, ok := rec["to"].([]any); ok {

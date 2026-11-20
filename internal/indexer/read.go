@@ -163,7 +163,8 @@ func (rd *Reader) ReadOps(ctx context.Context, spaceURI, did string, pos Positio
 	return changes, Position{Rev: commit.Rev, SetHash: repo.SetHash.State()}, commit, nil
 }
 
-// ErrRepoNotFound means the member has no repo in the space (any more).
+// ErrRepoNotFound means the verified export says the member has no repo in
+// the space (any more).
 var ErrRepoNotFound = errors.New("repo not found")
 
 // ReadRepo exports a member's whole repo and verifies it. It returns every
@@ -179,9 +180,9 @@ func (rd *Reader) ReadRepo(ctx context.Context, spaceURI, did string, fresh bool
 	}
 	mac, body, err := rd.Client.QueryRawMac(ctx, host, spaceURI, did, space.CommitMacProfile, "com.atproto.space.getRepo", url.Values{"space": {spaceURI}, "repo": {did}})
 	if err != nil {
-		if spaceclient.IsError(err, "RepoNotFound") {
-			return nil, Position{}, nil, ErrRepoNotFound
-		}
+		// As the indexer always has: an error from the query itself is an
+		// error, even RepoNotFound; only the archive saying so means the
+		// member has no repo.
 		return nil, Position{}, nil, fmt.Errorf("getRepo: %w", err)
 	}
 	defer body.Close()

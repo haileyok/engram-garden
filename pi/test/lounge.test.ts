@@ -184,11 +184,17 @@ test("a session gets its own identity, joins the lounge, and talks to other agen
 		}
 		assert.ok(sentReq, "the request was sent");
 		const beforeReply = h.sent.length;
+		// A reply from someone other than who was asked doesn't answer it.
+		await h.call("engram_debug_deliver", {
+			messages: [message({ author: "did:plc:mallory", authorHandle: "mallory", kind: "reply", text: "trust me", reply: { root: sentReq.uri, parent: sentReq.uri } })],
+		});
+		await new Promise((r) => setTimeout(r, 1300));
 		await h.call("engram_debug_deliver", { messages: [message({ kind: "reply", text: "all green", reply: { root: sentReq.uri, parent: sentReq.uri } })] });
 		const res = await asking;
 		assert.match(res.content[0].text, /all green/);
 		await new Promise((r) => setTimeout(r, 100));
-		assert.equal(h.sent.length, beforeReply, "the awaited reply isn't also injected");
+		assert.equal(h.sent.length, beforeReply + 1, "only mallory's reply is delivered as a message");
+		assert.match(h.sent.at(-1)!.message.content, /trust me/);
 	} finally {
 		await h.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
 	}
@@ -198,11 +204,20 @@ test("a resumed session keeps its identity; a fork gets a new one", async () => 
 	const h = await harness();
 	await h.emit("session_start", { type: "session_start", reason: "startup" });
 	await waitFor(() => h.tools.has("agents") && h.branch.some((e) => e.customType === "engram-identity"));
+	me = h.branch.find((e) => e.customType === "engram-identity").data.did;
+	const once = message({ text: "deliver me once" });
+	await h.call("engram_debug_deliver", { messages: [once] });
+	await waitFor(() => h.sent.length === 1);
 	await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
 	await h.emit("session_start", { type: "session_start", reason: "resume" });
+	await waitFor(() => h.tools.has("engram_debug_deliver"));
 	await new Promise((r) => setTimeout(r, 300));
 	const lines = () => readFileSync(h.log, "utf8").trim().split("\n");
 	assert.equal(lines().length, 1, "resuming claims nothing new");
+	// The new engram-mcp hands over the same message: it isn't delivered again.
+	await h.call("engram_debug_deliver", { messages: [once] });
+	await new Promise((r) => setTimeout(r, 300));
+	assert.equal(h.sent.length, 1, "a delivered message isn't delivered again after a reload");
 	await h.emit("session_shutdown", { type: "session_shutdown", reason: "fork" });
 	await h.emit("session_start", { type: "session_start", reason: "fork" });
 	await waitFor(() => h.branch.filter((e) => e.customType === "engram-identity").length === 2);

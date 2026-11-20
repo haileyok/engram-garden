@@ -58,7 +58,10 @@ type Service struct {
 	epoch  string
 	mu     sync.Mutex
 	spaces map[string]*spaceState
-	locks  sync.Map // space+did -> *sync.Mutex
+	// deleted are lounges their host confirmed deleted: reads of them are
+	// refused, rather than answered as an empty lounge.
+	deleted map[string]bool
+	locks   sync.Map // space+did -> *sync.Mutex
 }
 
 type presenceEntry struct {
@@ -100,6 +103,7 @@ func (s *Service) init() {
 	s.once.Do(func() {
 		s.epoch = strconv.FormatInt(time.Now().UnixNano(), 36)
 		s.spaces = map[string]*spaceState{}
+		s.deleted = map[string]bool{}
 	})
 }
 
@@ -129,6 +133,14 @@ func (s *Service) maxMessages() int {
 		return s.MaxMessages
 	}
 	return DefaultMaxMessages
+}
+
+// Deleted reports whether the lounge's host confirmed it deleted.
+func (s *Service) Deleted(spaceURI string) bool {
+	s.init()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deleted[spaceURI]
 }
 
 // IsLounge reports whether a space URI names a lounge.
@@ -212,6 +224,7 @@ func (s *Service) SyncSpace(ctx context.Context, spaceURI string) error {
 	if len(errs) == 0 {
 		s.mu.Lock()
 		s.state(spaceURI).synced = true
+		delete(s.deleted, spaceURI) // listed again: it exists
 		s.mu.Unlock()
 	}
 	return errors.Join(errs...)
@@ -289,8 +302,10 @@ func (s *Service) SyncRepo(ctx context.Context, spaceURI, did, spaceRev string) 
 	if errors.Is(err, indexer.ErrKemRotated) {
 		records, next, _, err = s.Reader.ReadRepo(ctx, spaceURI, did, true)
 	}
-	if errors.Is(err, indexer.ErrRepoNotFound) {
-		s.removeRepo(spaceURI, did)
+	if errors.Is(err, indexer.ErrRepoNotFound) || spaceclient.IsError(err, "RepoNotFound") {
+		// No repo (any more): nothing of theirs to keep. The repo's lock is
+		// already held.
+		s.removeRepoLocked(spaceURI, did)
 		return nil
 	}
 	if err != nil {
@@ -409,7 +424,10 @@ func (s *Service) applyChanges(spaceURI, did string, pos indexer.Position, chang
 			// Old or expired messages aren't kept, and aren't announced: a
 			// full export of a long-lived agent reads them all again.
 			if m.Expired(now) || now.Sub(created) > s.ttl() {
-				delete(st.messages, uri)
+				if _, ok := st.messages[uri]; ok {
+					delete(st.messages, uri)
+					s.emit(spaceURI, st, Event{Type: EventMessageDeleted, URI: uri})
+				}
 				continue
 			}
 			cidStr := ""
@@ -421,15 +439,15 @@ func (s *Service) applyChanges(spaceURI, did string, pos indexer.Position, chang
 			}
 			e := &messageEntry{author: did, rkey: c.Rkey, cid: cidStr, handle: handle, m: m, created: created, indexedAt: now}
 			st.messages[uri] = e
-			s.emit(spaceURI, st, Event{Type: EventMessage, Message: messageView(uri, e), to: m.To})
+			s.emit(spaceURI, st, Event{Type: EventMessage, Message: messageView(uri, e), to: m.To, author: did})
 		}
 	}
-	s.trimMessages(st)
+	s.trimMessages(spaceURI, st)
 }
 
 // trimMessages keeps a space's messages within MaxMessages, dropping the
 // oldest. Call with s.mu held.
-func (s *Service) trimMessages(st *spaceState) {
+func (s *Service) trimMessages(spaceURI string, st *spaceState) {
 	over := len(st.messages) - s.maxMessages()
 	if over <= 0 {
 		return
@@ -443,12 +461,18 @@ func (s *Service) trimMessages(st *spaceState) {
 	sort.Slice(all, func(i, j int) bool { return all[i].created.Before(all[j].created) })
 	for _, e := range all[:over] {
 		delete(st.messages, uris[e])
+		s.emit(spaceURI, st, Event{Type: EventMessageDeleted, URI: uris[e]})
 	}
 }
 
 func (s *Service) removeRepo(spaceURI, did string) {
 	unlock := s.lock(spaceURI, did)
 	defer unlock()
+	s.removeRepoLocked(spaceURI, did)
+}
+
+// removeRepoLocked drops what a repo wrote; the caller holds its lock.
+func (s *Service) removeRepoLocked(spaceURI, did string) {
 	s.mu.Lock()
 	st := s.state(spaceURI)
 	var dels []indexer.Change
@@ -471,6 +495,7 @@ func (s *Service) removeRepo(spaceURI, did string) {
 func (s *Service) dropSpace(spaceURI string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.deleted[spaceURI] = true
 	st := s.spaces[spaceURI]
 	if st == nil {
 		return
@@ -498,6 +523,7 @@ func (s *Service) Tick() {
 		for uri, e := range st.messages {
 			if e.m.Expired(now) || now.Sub(e.created) > s.ttl() {
 				delete(st.messages, uri)
+				s.emit(spaceURI, st, Event{Type: EventMessageDeleted, URI: uri})
 			}
 		}
 	}
@@ -523,10 +549,11 @@ type Event struct {
 	URI      string        `json:"uri,omitempty"`
 	seq      int64
 	to       []string
+	author   string
 }
 
 func (e Event) visibleTo(did string) bool {
-	if did == "" || e.Type != EventMessage || len(e.to) == 0 {
+	if did == "" || e.Type != EventMessage || len(e.to) == 0 || e.author == did {
 		return true
 	}
 	for _, t := range e.to {
@@ -621,16 +648,17 @@ func (s *Service) Subscribe(spaceURI, to, cursor string) *Subscription {
 	return out
 }
 
-// snapshot is every presence and the kept messages for `to`, as events
-// carrying the current cursor. Call with s.mu held.
+// snapshot is every presence and the kept messages for `to`, as events.
+// They carry no id: the ready event after them does, so a client cut off
+// halfway through a snapshot has no cursor from it and gets a fresh one.
+// Call with s.mu held.
 func (s *Service) snapshot(spaceURI string, st *spaceState, to string) []Event {
-	id := s.epoch + "-" + strconv.FormatInt(st.seq, 10)
 	var out []Event
 	for _, pv := range s.presenceViews(spaceURI, st, true) {
-		out = append(out, Event{ID: id, Type: EventPresence, Presence: &pv, seq: st.seq})
+		out = append(out, Event{Type: EventPresence, Presence: &pv, seq: st.seq})
 	}
 	for _, mv := range s.messageViews(st, to, time.Time{}) {
-		out = append(out, Event{ID: id, Type: EventMessage, Message: &mv, seq: st.seq})
+		out = append(out, Event{Type: EventMessage, Message: &mv, seq: st.seq})
 	}
 	return out
 }
@@ -752,8 +780,9 @@ func (s *Service) ListPresence(spaceURI string, includeOffline bool) []PresenceV
 
 // ListMessages lists a lounge's messages for `to` (empty: all, and an
 // agent's own messages count as its), created at or after since, oldest
-// first, a page at a time. The cursor is the index of the next message in
-// that order, with the URI it should be, so a changed list is noticed.
+// first, a page at a time. The cursor is the last message returned, as its
+// time and URI: the next page starts after it in that order, even when that
+// message has since gone.
 func (s *Service) ListMessages(spaceURI, to string, since time.Time, limit int, cursor string) ([]MessageView, string, error) {
 	s.init()
 	s.mu.Lock()
@@ -761,23 +790,22 @@ func (s *Service) ListMessages(spaceURI, to string, since time.Time, limit int, 
 	s.mu.Unlock()
 	start := 0
 	if cursor != "" {
-		// The cursor is the last URI returned: continue after it.
-		start = -1
-		for i, m := range all {
-			if m.URI == cursor {
-				start = i + 1
-				break
-			}
-		}
-		if start < 0 {
+		at, uri, ok := strings.Cut(cursor, "|")
+		t, err := time.Parse(timeFormat, at)
+		if !ok || err != nil {
 			return nil, "", errors.New("bad cursor")
 		}
+		start = sort.Search(len(all), func(i int) bool {
+			c, _ := time.Parse(timeFormat, all[i].CreatedAt)
+			return c.After(t) || c.Equal(t) && all[i].URI > uri
+		})
 	}
 	end := min(len(all), start+limit)
 	page := all[start:end]
 	next := ""
 	if end < len(all) && len(page) > 0 {
-		next = page[len(page)-1].URI
+		last := page[len(page)-1]
+		next = last.CreatedAt + "|" + last.URI
 	}
 	return page, next, nil
 }

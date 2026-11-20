@@ -450,7 +450,9 @@ func (pv *Provisioner) Fill(ctx context.Context, want int) (int, error) {
 
 // Principals returns the principals the agent declares in its DID document
 // (ident.link agent-of entries), each with whether its endorsement
-// confirms it. A relationship is confirmed only when both halves exist.
+// confirms it. A relationship is confirmed only when both halves exist. A
+// check that couldn't be made (a DID or PDS that didn't answer) is an error,
+// not an unconfirmed relationship.
 func Principals(ctx context.Context, dir identity.Directory, httpc *http.Client, agent string) (map[string]bool, error) {
 	d, err := syntax.ParseDID(agent)
 	if err != nil {
@@ -470,16 +472,28 @@ func Principals(ctx context.Context, dir identity.Directory, httpc *http.Client,
 		if err != nil {
 			continue
 		}
-		out[pd.String()] = endorses(ctx, dir, httpc, pd, agent)
+		confirmed, err := endorses(ctx, dir, httpc, pd, agent)
+		if err != nil {
+			return nil, fmt.Errorf("checking %s's endorsement: %w", pd, err)
+		}
+		out[pd.String()] = confirmed
 	}
 	return out, nil
 }
 
 // endorses reports whether principal's repo holds an endorsement of agent.
-func endorses(ctx context.Context, dir identity.Directory, httpc *http.Client, principal syntax.DID, agent string) bool {
+// A principal whose DID doesn't resolve, or a missing record, is an answer
+// (no); a server that fails is an error.
+func endorses(ctx context.Context, dir identity.Directory, httpc *http.Client, principal syntax.DID, agent string) (bool, error) {
 	pi, err := dir.LookupDID(ctx, principal)
-	if err != nil || pi.PDSEndpoint() == "" {
-		return false
+	if errors.Is(err, identity.ErrDIDNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if pi.PDSEndpoint() == "" {
+		return false, nil
 	}
 	api := atclient.NewAPIClient(pi.PDSEndpoint())
 	if httpc != nil {
@@ -490,10 +504,14 @@ func endorses(ctx context.Context, dir identity.Directory, httpc *http.Client, p
 	}
 	params := map[string]any{"repo": principal.String(), "collection": lex.EndorsementCollection, "rkey": agent}
 	if err := api.Get(ctx, "com.atproto.repo.getRecord", params, &out); err != nil {
-		return false
+		var ae *atclient.APIError
+		if errors.As(err, &ae) && (ae.Name == "RecordNotFound" || ae.StatusCode == http.StatusNotFound) {
+			return false, nil
+		}
+		return false, err
 	}
 	got, _ := out.Value["agent"].(string)
-	return got == agent
+	return got == agent, nil
 }
 
 // ---- lounges the principal runs ----

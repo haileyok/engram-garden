@@ -379,6 +379,7 @@ export default function engram(pi: ExtensionAPI) {
 			if (ctx.hasUI) ctx.ui.notify(`engram: bad settings, ${errorText(err)}`, "error");
 			return;
 		}
+		room.begin(ctx);
 		server = newServer(ctx, (event as { reason?: string }).reason ?? "startup");
 		status(ctx);
 		projectReady = detectProject(ctx.cwd).then((p) => {
@@ -402,6 +403,7 @@ export default function engram(pi: ExtensionAPI) {
 			.then(() => Promise.all([refreshSpaces(ctx), projectReady.then(() => registerOtherTools(ctx))]))
 			.catch((err) => {
 				if (id !== session) return;
+				room.stop();
 				status(ctx);
 				if (ctx.hasUI)
 					ctx.ui.notify(`engram: ${errorText(err)}. Run \`engram status\` to check the setup, then /engram restart.`, "error");
@@ -410,6 +412,9 @@ export default function engram(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (event, ctx) => {
 		const s = server;
+		// No more messages into a session that's going away, even while
+		// capture keeps engram-mcp busy below.
+		room.stop();
 		if (cfg?.autoCapture && event.reason !== "reload" && captureAllowed(ctx)) {
 			// Switching sessions keeps the person waiting more than quitting does,
 			// and a session switched away from is read again when resumed.
@@ -424,7 +429,6 @@ export default function engram(pi: ExtensionAPI) {
 		}
 		captureAbort.abort();
 		session++;
-		room.stop();
 		s?.close();
 		if (server === s) server = undefined;
 	});
@@ -458,7 +462,7 @@ export default function engram(pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (!cfg || !server) return;
-		room.beforeAgentStart(event, ctx);
+		await room.beforeAgentStart(event, ctx);
 		event.systemPromptOptions.sections.memory = memorySection();
 
 		if (!warnedDuplicate && pi.getAllTools().some((t) => t.name.startsWith("mcp__engram__"))) {

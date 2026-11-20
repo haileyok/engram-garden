@@ -49,23 +49,36 @@ func TestStoreKeepsWhatItShould(t *testing.T) {
 	}
 	cursor := sub.Cursor
 	s.applyChanges(testSpace, "did:plc:a", indexer.Position{}, []indexer.Change{msg("m5", now, "did:plc:b"), msg("m6", now, "did:plc:c")})
-	select {
-	case e := <-sub.Events:
-		if e.Message == nil || e.Message.Text != "m5" {
-			t.Fatalf("live: %+v", e)
-		}
-	default:
-		t.Fatal("no live event")
+	// Live: m5 for b, and the oldest messages trimmed to stay within the
+	// limit; never m6, which is c's.
+	var live []Event
+	for len(sub.Events) > 0 {
+		live = append(live, <-sub.Events)
 	}
-	select {
-	case e := <-sub.Events:
-		t.Fatalf("got another's message: %+v", e)
-	default:
+	gotM5 := false
+	for _, e := range live {
+		switch {
+		case e.Type == EventMessage && e.Message.Text == "m5":
+			gotM5 = true
+		case e.Type == EventMessage:
+			t.Fatalf("got another's message: %+v", e)
+		case e.Type != EventMessageDeleted:
+			t.Fatalf("unexpected event: %+v", e)
+		}
+	}
+	if !gotM5 {
+		t.Fatalf("no live m5: %+v", live)
 	}
 	resumed := s.Subscribe(testSpace, "did:plc:b", cursor)
 	defer resumed.Close()
-	if resumed.Reset || len(resumed.Backlog) != 1 || resumed.Backlog[0].Message.Text != "m5" {
+	if resumed.Reset || len(resumed.Backlog) != len(live) {
 		t.Fatalf("resumed: %+v", resumed.Backlog)
+	}
+	// A snapshot's events carry no cursor; only ready does.
+	for _, e := range sub2(s).Backlog {
+		if e.ID != "" {
+			t.Fatalf("snapshot event with a cursor: %+v", e)
+		}
 	}
 	stale := s.Subscribe(testSpace, "", "x-1")
 	defer stale.Close()
@@ -78,6 +91,40 @@ func TestStoreKeepsWhatItShould(t *testing.T) {
 	s.Tick()
 	if left, _, _ := s.ListMessages(testSpace, "", time.Time{}, 10, ""); len(left) != 0 {
 		t.Fatalf("expired messages kept: %+v", left)
+	}
+}
+
+func sub2(s *Service) *Subscription {
+	sub := s.Subscribe(testSpace, "", "")
+	sub.Close()
+	return sub
+}
+
+// A page cursor survives its message going away, and a deleted lounge isn't
+// served as an empty one.
+func TestCursorsAndDeletion(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	s := &Service{Now: func() time.Time { return now }}
+	s.init()
+	s.applyChanges(testSpace, "did:plc:a", indexer.Position{}, []indexer.Change{
+		msg("m1", now.Add(-3*time.Minute)), msg("m2", now.Add(-2*time.Minute)), msg("m3", now.Add(-time.Minute)),
+	})
+	page, cursor, err := s.ListMessages(testSpace, "", time.Time{}, 2, "")
+	if err != nil || len(page) != 2 || cursor == "" {
+		t.Fatalf("page 1: %v %q %v", page, cursor, err)
+	}
+	s.applyChanges(testSpace, "did:plc:a", indexer.Position{}, []indexer.Change{{Collection: lex.MessageCollection, Rkey: "m2"}})
+	page, cursor, err = s.ListMessages(testSpace, "", time.Time{}, 2, cursor)
+	if err != nil || len(page) != 1 || page[0].Text != "m3" || cursor != "" {
+		t.Fatalf("page 2 after its cursor's message went: %v %q %v", page, cursor, err)
+	}
+	if _, _, err := s.ListMessages(testSpace, "", time.Time{}, 2, "garbage"); err == nil {
+		t.Fatal("a bad cursor was accepted")
+	}
+	s.dropSpace(testSpace)
+	if !s.Deleted(testSpace) {
+		t.Fatal("a dropped lounge isn't marked deleted")
 	}
 }
 

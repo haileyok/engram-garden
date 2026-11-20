@@ -296,3 +296,29 @@ func newHTTPServer(t *testing.T, h http.Handler) string {
 	t.Cleanup(hs.Close)
 	return hs.URL
 }
+
+// A notification about a member with no repo (one that left while it was in
+// flight) drops what it had, and doesn't wedge its lock.
+func TestLoungeMemberWithoutRepo(t *testing.T) {
+	t.Parallel()
+	f := setupLounge(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := f.srv.Lounge.HandleWrite(ctx, indexer.Notification{Space: f.net.Space, Repo: f.alice.DID})
+			done <- err
+		}()
+	}
+	for range 2 {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("handle write: %v", err)
+			}
+		case <-ctx.Done():
+			t.Fatal("a write for a member without a repo hung")
+		}
+	}
+}
