@@ -116,10 +116,15 @@ export interface LoungeHost {
 	project(): { name?: string; remote?: string };
 }
 
-/** The identity command (engram) beside engram-mcp. */
-export function identityCommand(cfg: Config): string {
+/**
+ * The identity command: as configured, else the engram beside engram-mcp.
+ * With some other server command (a test's fake, say) and none configured
+ * there's none: identities are never made by an engram the settings didn't
+ * point at.
+ */
+export function identityCommand(cfg: Config): string | undefined {
 	if (cfg.identityCommand) return cfg.identityCommand;
-	return cfg.command.endsWith("engram-mcp") ? cfg.command.slice(0, -"-mcp".length) : "engram";
+	return cfg.command.endsWith("engram-mcp") ? cfg.command.slice(0, -"-mcp".length) : undefined;
 }
 
 /** claimIdentity runs `engram agent new` and returns the identity it hands out. */
@@ -288,9 +293,14 @@ export function lounge(pi: ExtensionAPI, host: LoungeHost) {
 			if (found && reason !== "fork" && existsSync(found.path)) {
 				identity = found;
 			} else {
+				const cmd = identityCommand(cfg);
+				if (!cmd) {
+					markReady();
+					return {};
+				}
 				const kind = inheritedParent ? "subagent" : "session";
 				identity = await claimIdentity(
-					identityCommand(cfg),
+					cmd,
 					{ kind, session: ctx.sessionManager.getSessionId?.(), parent: inheritedParent },
 					cfg.identityTimeoutMs,
 				);
