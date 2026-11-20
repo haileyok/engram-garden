@@ -97,13 +97,11 @@ type Net struct {
 	// the test to call DeliverWrite.
 	AutoDeliver bool
 
-	// InviteCode, when set, is the code createAccount requires.
-	InviteCode string
-	// Created records each createAccount request, in order.
+	// Created records each agent account created (createAgent), in order.
 	Created []CreateAccount
 }
 
-// CreateAccount is a createAccount request the network took.
+// CreateAccount is an account the network created for an agent.
 type CreateAccount struct {
 	DID         string
 	Handle      string
@@ -480,30 +478,34 @@ func (n *Net) serve(w http.ResponseWriter, r *http.Request) {
 func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *xerr) {
 	q := r.URL.Query()
 	switch nsid {
-	case "com.atproto.server.createAccount":
+	case "at.hailey.cocoon.createAgent":
+		// Cocoon's agent creation: the caller is the principal.
+		principal := n.account(n.callerDID(r))
+		if principal == nil {
+			return nil, &xerr{401, "AuthRequired", "no session"}
+		}
 		var body struct {
-			Handle      string   `json:"handle"`
-			Password    string   `json:"password"`
-			InviteCode  string   `json:"inviteCode"`
-			RecoveryKey string   `json:"recoveryKey"`
-			AlsoKnownAs []string `json:"alsoKnownAs"`
+			RecoveryKey string `json:"recoveryKey"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Handle == "" || body.Password == "" {
-			return nil, &xerr{400, "InvalidRequest", "handle and password are required"}
-		}
-		if n.InviteCode != "" && body.InviteCode != n.InviteCode {
-			return nil, &xerr{400, "InvalidInviteCode", "bad invite code"}
-		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
 		n.mu.Lock()
 		did := "did:plc:" + strings.ToLower(n.clock.Next().String())
 		n.mu.Unlock()
 		a := n.NewAccount(did)
+		handle := "a-" + strings.TrimPrefix(did, "did:plc:") + ".pds.test"
+		aka := []string{"https://ident.link/agent-of/" + principal.DID}
+		password := "pw-" + did
 		n.mu.Lock()
-		a.Handle, a.AlsoKnownAs, a.password = body.Handle, body.AlsoKnownAs, body.Password
-		n.Created = append(n.Created, CreateAccount{DID: did, Handle: body.Handle, RecoveryKey: body.RecoveryKey, AlsoKnownAs: body.AlsoKnownAs})
+		a.Handle, a.AlsoKnownAs, a.password = handle, aka, password
+		n.Created = append(n.Created, CreateAccount{DID: did, Handle: handle, RecoveryKey: body.RecoveryKey, AlsoKnownAs: aka})
+		if principal.repoRecords == nil {
+			principal.repoRecords = map[string]map[string]any{}
+		}
+		principal.repoRecords["link.ident.endorsement/"+did] = map[string]any{"$type": "link.ident.endorsement", "agent": did}
 		n.mu.Unlock()
 		n.publish(a)
-		return map[string]any{"did": did, "handle": body.Handle, "accessJwt": "test:" + did, "refreshJwt": "refresh:" + did}, nil
+		return map[string]any{"did": did, "handle": handle, "password": password, "endorsed": true,
+			"endorsement": "at://" + principal.DID + "/link.ident.endorsement/" + did}, nil
 
 	case "com.atproto.server.createSession":
 		var body struct {

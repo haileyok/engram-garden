@@ -30,7 +30,6 @@ func TestAgentIdentityCommands(t *testing.T) {
 	t.Parallel()
 	n := spacetest.NewTyped(t, "principal", lex.LoungeType, "agents")
 	n.AutoDeliver = true
-	n.InviteCode = "invite"
 	avAcct := n.NewAccount("did:plc:appview")
 	n.AddMember(avAcct.DID)
 	ac, err := spaceclient.New(n.Session(avAcct), n.Dir, nil)
@@ -63,8 +62,9 @@ func TestAgentIdentityCommands(t *testing.T) {
 			configPath:    filepath.Join(dir, "config.json"),
 			principalPath: filepath.Join(dir, "principal.json"),
 			identitiesDir: filepath.Join(dir, "agents"),
-			principalSignIn: func(_ context.Context, handle string, _ <-chan string) (agent.Account, error) {
-				return agent.Account{Handle: handle, DID: n.Authority.DID, SignIn: agent.SignInOAuth, SessionID: "p1", SignedInAt: time.Now()}, nil
+			principalSignIn: func(_ context.Context, handle string, _ <-chan string) (agent.Account, []string, error) {
+				return agent.Account{Handle: handle, DID: n.Authority.DID, SignIn: agent.SignInOAuth, SessionID: "p1", SignedInAt: time.Now()},
+					agent.PrincipalScopes("did:web:pds.test"), nil
 			},
 			principalSession: func(context.Context, agent.Principal) (*atclient.APIClient, error) {
 				return n.Session(n.Authority), nil
@@ -94,10 +94,9 @@ func TestAgentIdentityCommands(t *testing.T) {
 		t.Fatalf("agent new without a principal: %d %s%s", code, out, errOut)
 	}
 	must("principal", "login", "--handle", "principal.test")
-	must("principal", "set", "--pds", n.Server.URL, "--handle-domain", ".pds.test", "--invite-code", "invite",
-		"--recovery-key", "did:key:zQ3shZc2QzApp2oymGvQbzP8eKheVshBHbU4ZYjeXqwSKEn6N", "--lounge", n.Space, "--stock", "1")
-	if out := must("principal"); !strings.Contains(out, "(set)") || strings.Contains(out, "invite\n") {
-		t.Fatalf("principal shows the invite code: %s", out)
+	must("principal", "set", "--recovery-key", "did:key:zQ3shZc2QzApp2oymGvQbzP8eKheVshBHbU4ZYjeXqwSKEn6N", "--lounge", n.Space, "--stock", "1")
+	if out := must("principal"); !strings.Contains(out, n.Authority.DID) || !strings.Contains(out, n.Space) {
+		t.Fatalf("principal: %s", out)
 	}
 	if out := must("agent", "stock"); !strings.Contains(out, "Made 1; 1 ready.") {
 		t.Fatalf("stock: %s", out)

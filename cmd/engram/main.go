@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/bluesky-social/indigo/atproto/atclient"
 	"github.com/bluesky-social/indigo/atproto/identity"
+	"github.com/bluesky-social/indigo/atproto/syntax"
 	"golang.org/x/term"
 
 	"github.com/haileyok/engram-garden/internal/agent"
@@ -39,8 +41,6 @@ func main() {
 	store := &oauthfile.FileStore{Dir: filepath.Join(dir, "oauth")}
 	store.Sweep() // sign-ins nobody finished
 	opts := agent.Options{Store: store, LockDir: store.Dir, HTTP: &http.Client{Timeout: time.Minute}}
-	popts := opts
-	popts.Scopes = agent.PrincipalScopes
 	idDir, err := agent.IdentitiesDir()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "engram:", err)
@@ -49,10 +49,31 @@ func main() {
 	c := &cli{
 		principalPath: filepath.Join(dir, "principal.json"),
 		identitiesDir: idDir,
-		principalSignIn: func(ctx context.Context, handle string, lines <-chan string) (agent.Account, error) {
-			return agent.LoginOAuth(ctx, handle, popts, agent.Prompt{Out: os.Stderr, Lines: lines, Browser: openBrowser})
+		principalSignIn: func(ctx context.Context, handle string, lines <-chan string) (agent.Account, []string, error) {
+			// The scopes name the principal's PDS, which creates the agents.
+			id, err := syntax.ParseAtIdentifier(handle)
+			if err != nil {
+				return agent.Account{}, nil, err
+			}
+			who, err := identity.DefaultDirectory().Lookup(ctx, id)
+			if err != nil {
+				return agent.Account{}, nil, fmt.Errorf("resolving %s: %w", handle, err)
+			}
+			pdsDID, err := agent.PDSDID(ctx, who.PDSEndpoint(), opts.HTTP)
+			if err != nil {
+				return agent.Account{}, nil, err
+			}
+			popts := opts
+			popts.Scopes = agent.PrincipalScopes(pdsDID)
+			acct, err := agent.LoginOAuth(ctx, handle, popts, agent.Prompt{Out: os.Stderr, Lines: lines, Browser: openBrowser})
+			return acct, popts.Scopes, err
 		},
 		principalSession: func(ctx context.Context, p agent.Principal) (*atclient.APIClient, error) {
+			if len(p.Scopes) == 0 {
+				return nil, errors.New("the principal's sign-in predates agent creation: run `engram principal login` again")
+			}
+			popts := opts
+			popts.Scopes = p.Scopes
 			return agent.Settings{Account: p.Account}.Session(ctx, popts)
 		},
 		openLounge: func(ctx context.Context, s agent.Settings) (*agent.Lounge, agent.Identity, error) {

@@ -50,16 +50,17 @@ type cli struct {
 	// identity files.
 	principalPath string
 	identitiesDir string
-	// principalSignIn signs in as the principal (OAuth, PrincipalScopes),
-	// and principalSession resumes that sign-in.
-	principalSignIn  func(ctx context.Context, handle string, lines <-chan string) (agent.Account, error)
+	// principalSignIn signs in as the principal (OAuth, PrincipalScopes for
+	// their PDS), returning the scopes it asked for; principalSession
+	// resumes that sign-in.
+	principalSignIn  func(ctx context.Context, handle string, lines <-chan string) (agent.Account, []string, error)
 	principalSession func(ctx context.Context, p agent.Principal) (*atclient.APIClient, error)
 	// openLounge signs in as the agent identity the settings name.
 	openLounge func(ctx context.Context, s agent.Settings) (*agent.Lounge, agent.Identity, error)
 	// verifyAgent returns the principals an agent declares and whether each
 	// endorses it.
 	verifyAgent func(ctx context.Context, did string) (map[string]bool, error)
-	// provisionHTTP calls the PDS and appview when making identities.
+	// provisionHTTP calls the appview for grant links.
 	provisionHTTP *http.Client
 	// spawnRefill tops up the identity stock in the background; nil doesn't.
 	spawnRefill func()

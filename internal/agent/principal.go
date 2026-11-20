@@ -2,9 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base32"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,33 +22,54 @@ import (
 )
 
 // A principal is the person agents act for (https://ident.link). Engram can
-// give every agent session its own ATProto account: created on the
-// principal's PDS with an ident.link agent-of declaration in its first PLC
-// operation, endorsed by a link.ident.endorsement record in the principal's
-// repo, and added to the principal's lounge. The principal's settings live in
-// principal.json beside config.json; the agents' identities in agents/.
+// give every agent session its own ATProto account: the principal's own PDS
+// creates it with createAgentNSID, called with the principal's session, which
+// puts the ident.link agent-of declaration in the account's first PLC
+// operation and the principal's endorsement in their repo, in one request.
+// Engram then adds the agent to the principal's lounge. The principal's
+// settings live in principal.json beside config.json; the agents' identities
+// in agents/. See docs/design/lounge.md.
 
-// PrincipalScopes are what the principal's sign-in asks for: endorse agents
-// (link.ident.endorsement records in their own repo), and create lounges and
-// manage who's in them.
-var PrincipalScopes = []string{
-	"atproto",
-	"repo:" + lex.EndorsementCollection,
-	"space:" + lex.LoungeType + "?collection=" + lex.PresenceCollection + "&action=read&manage=create&manage=update",
+// CreateAgentNSID is the PDS method that creates an agent account for the
+// caller (Cocoon's at.hailey.cocoon.createAgent).
+const CreateAgentNSID = "at.hailey.cocoon.createAgent"
+
+// PrincipalScopes are what the principal's sign-in asks for: create agents
+// at their PDS (whose DID is pdsDID), endorse them (link.ident.endorsement
+// records in their own repo), and create lounges and manage who's in them.
+func PrincipalScopes(pdsDID string) []string {
+	return []string{
+		"atproto",
+		"rpc:" + CreateAgentNSID + "?aud=" + pdsDID,
+		"repo:" + lex.EndorsementCollection,
+		"space:" + lex.LoungeType + "?collection=" + lex.PresenceCollection + "&action=read&manage=create&manage=update",
+	}
+}
+
+// PDSDID asks a PDS for its DID (describeServer).
+func PDSDID(ctx context.Context, host string, httpc *http.Client) (string, error) {
+	api := atclient.NewAPIClient(strings.TrimSuffix(host, "/"))
+	if httpc != nil {
+		api.Client = httpc
+	}
+	var out struct {
+		DID string `json:"did"`
+	}
+	if err := api.Get(ctx, "com.atproto.server.describeServer", nil, &out); err != nil {
+		return "", fmt.Errorf("asking %s for its DID: %w", host, err)
+	}
+	if _, err := syntax.ParseDID(out.DID); err != nil {
+		return "", fmt.Errorf("%s gave a bad DID %q", host, out.DID)
+	}
+	return out.DID, nil
 }
 
 // Principal configures creating agent identities.
 type Principal struct {
-	// Account is the principal's own sign-in (OAuth, PrincipalScopes).
-	Account Account `json:"account"`
-	// PDS is where agents' accounts are created, e.g. https://cocoon.hailey.at.
-	PDS string `json:"pds"`
-	// HandleDomain is the suffix of agents' handles, one of the PDS's user
-	// domains, e.g. .cocoon.hailey.at.
-	HandleDomain string `json:"handleDomain"`
-	// InviteCode is a code the PDS accepts for each new account (a code
-	// with many uses).
-	InviteCode string `json:"inviteCode,omitempty"`
+	// Account is the principal's own sign-in (OAuth), and Scopes what it
+	// was granted with: resuming it needs the same ones.
+	Account Account  `json:"account"`
+	Scopes  []string `json:"scopes,omitempty"`
 	// RecoveryKey is a did:key the principal holds offline. It goes first in
 	// every agent's rotation keys, so the principal can undo any change to an
 	// agent's identity. Only its public half is here.
@@ -107,21 +125,8 @@ func (p Principal) Save(path string) error {
 
 // Check reports what's missing before agents can be created.
 func (p Principal) Check() error {
-	var missing []string
 	if p.Account.DID == "" {
-		missing = append(missing, "the principal's sign-in (engram principal login)")
-	}
-	if p.PDS == "" {
-		missing = append(missing, "pds")
-	}
-	if p.HandleDomain == "" {
-		missing = append(missing, "handleDomain")
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("principal.json needs %s", strings.Join(missing, ", "))
-	}
-	if !strings.HasPrefix(p.PDS, "https://") && !strings.HasPrefix(p.PDS, "http://") {
-		return fmt.Errorf("pds must be a URL, not %q", p.PDS)
+		return errors.New("no principal is signed in: run `engram principal login`")
 	}
 	if p.Lounge != "" {
 		ref, err := space.ParseRef(p.Lounge)
@@ -210,13 +215,11 @@ func IdentitiesDir() (string, error) {
 // Provisioner creates and hands out agent identities for a principal.
 type Provisioner struct {
 	Principal Principal
-	// Session is the principal's own session, which endorses agents and adds
-	// them to the lounge.
+	// Session is the principal's own session at their PDS, which creates
+	// agents and adds them to the lounge.
 	Session *atclient.APIClient
 	// Dir is the identities directory (IdentitiesDir).
 	Dir string
-	// HTTP calls the PDS's createAccount (default: a 30s client).
-	HTTP *http.Client
 	// Now is the clock (default time.Now).
 	Now func() time.Time
 }
@@ -228,70 +231,44 @@ func (pv *Provisioner) now() time.Time {
 	return time.Now()
 }
 
-func (pv *Provisioner) http() *http.Client {
-	if pv.HTTP != nil {
-		return pv.HTTP
-	}
-	return &http.Client{Timeout: 30 * time.Second}
-}
-
-func randomToken(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
-	}
-	return b32.EncodeToString(b)
-}
-
-var b32 = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
-
-// Create makes a new agent account and finishes its setup: the account (with
-// the agent-of declaration and the principal's recovery key), the
-// principal's endorsement, and lounge membership. The identity file is
-// written to the stock as soon as the account exists, so a later step's
-// failure loses nothing; Claim retries what's left.
+// Create makes a new agent account and finishes its setup. The principal's
+// PDS creates the account, declared as the principal's agent, with the
+// principal's recovery key, and endorses it, in one call; then the agent is
+// added to the lounge. The identity file is written to the stock as soon as
+// the account exists, so a later step's failure loses nothing; Claim
+// finishes what's left.
 func (pv *Provisioner) Create(ctx context.Context) (Identity, string, error) {
 	p := pv.Principal
 	if err := p.Check(); err != nil {
 		return Identity{}, "", err
 	}
-	domain := p.HandleDomain
-	if !strings.HasPrefix(domain, ".") {
-		domain = "." + domain
+	if pv.Session == nil || pv.Session.AccountDID == nil {
+		return Identity{}, "", errors.New("no principal session")
 	}
-	handle := "a-" + randomToken(6) + domain
-	pwd := make([]byte, 24)
-	if _, err := rand.Read(pwd); err != nil {
-		return Identity{}, "", err
-	}
-	password := base64.RawURLEncoding.EncodeToString(pwd)
-	body := map[string]any{
-		"handle":      handle,
-		"email":       strings.SplitN(handle, ".", 2)[0] + "@agents.invalid",
-		"password":    password,
-		"alsoKnownAs": []string{lex.IdentLinkAgentOf + p.Account.DID},
-	}
-	if p.InviteCode != "" {
-		body["inviteCode"] = p.InviteCode
-	}
+	body := map[string]any{}
 	if p.RecoveryKey != "" {
 		body["recoveryKey"] = p.RecoveryKey
 	}
-	api := atclient.NewAPIClient(strings.TrimSuffix(p.PDS, "/"))
-	api.Client = pv.http()
 	var out struct {
-		DID    string `json:"did"`
-		Handle string `json:"handle"`
+		DID         string `json:"did"`
+		Handle      string `json:"handle"`
+		Password    string `json:"password"`
+		Endorsement string `json:"endorsement"`
+		Endorsed    bool   `json:"endorsed"`
 	}
-	if err := api.Post(ctx, "com.atproto.server.createAccount", body, &out); err != nil {
-		return Identity{}, "", fmt.Errorf("creating the agent's account at %s: %w", p.PDS, err)
+	if err := pv.Session.Post(ctx, CreateAgentNSID, body, &out); err != nil {
+		var ae *atclient.APIError
+		if errors.As(err, &ae) && (ae.StatusCode == http.StatusNotFound || ae.Name == "MethodNotImplemented") {
+			return Identity{}, "", fmt.Errorf("the principal's PDS (%s) can't create agents (%s); it needs Cocoon with agent support", pv.Session.Host, CreateAgentNSID)
+		}
+		return Identity{}, "", fmt.Errorf("creating an agent account: %w", err)
 	}
-	if _, err := syntax.ParseDID(out.DID); err != nil {
-		return Identity{}, "", fmt.Errorf("the PDS returned a bad DID %q", out.DID)
+	if _, err := syntax.ParseDID(out.DID); err != nil || out.Password == "" {
+		return Identity{}, "", fmt.Errorf("the PDS returned no usable agent (%q)", out.DID)
 	}
 	id := Identity{
-		DID: out.DID, Handle: out.Handle, Password: password, PDSHost: strings.TrimSuffix(p.PDS, "/"),
-		Principal: p.Account.DID, Lounge: p.Lounge, CreatedAt: pv.now().UTC(),
+		DID: out.DID, Handle: out.Handle, Password: out.Password, PDSHost: strings.TrimSuffix(pv.Session.Host, "/"),
+		Principal: p.Account.DID, Lounge: p.Lounge, Endorsed: out.Endorsed, CreatedAt: pv.now().UTC(),
 	}
 	stock := filepath.Join(pv.Dir, "stock")
 	if err := os.MkdirAll(stock, 0o700); err != nil {

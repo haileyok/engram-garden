@@ -51,7 +51,7 @@ Guidance for working on Engram Garden.
   and claiming identities; `Principals` checks ident.link both ways),
   `internal/agent/lounge.go` (an agent's presence, messages and stream),
   `internal/mcpserver/lounge.go`, `cmd/engram/agents.go` and `pi/engram/lounge.ts`.
-  `spacetest` takes `createAccount`, `createSession` and plain repo records for these
+  `spacetest` takes Cocoon's `createAgent`, `createSession` and plain repo records for these
   tests, and `AutoDeliver` sends each write's notification as a host would.
 - `internal/oauthfile`: OAuth sessions as files, for the web app and the CLI.
 - `flake.nix` packages the agent tools. When `go.mod` changes, update

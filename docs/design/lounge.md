@@ -22,16 +22,23 @@ a fresh `did:plc`, never reused. The person it works for (the principal) is
 bound to it with [ident.link](https://ident.link):
 
 - **The agent's declaration.** The account's DID document lists
-  `https://ident.link/agent-of/<principal DID>` in `alsoKnownAs`. It's in the
-  genesis PLC operation: the PDS takes extra `alsoKnownAs` entries at
-  `createAccount` (Cocoon does, as of haileyok/cocoon#231), so there's one PLC
-  operation per agent and nothing to sign afterwards.
+  `https://ident.link/agent-of/<principal DID>` in `alsoKnownAs`, from its
+  genesis PLC operation.
 - **The principal's endorsement.** A `link.ident.endorsement` record in the
   principal's repo, keyed by the agent's DID.
-- **The operator's recovery key.** `createAccount`'s `recoveryKey` puts a key
-  the principal keeps offline first in the agent's rotation keys, so they can
-  undo any change to the agent's identity within PLC's recovery window. Only
-  its public half is ever on the machine.
+- **The operator's recovery key.** A key the principal keeps offline goes
+  first in the agent's rotation keys, so they can undo any change to the
+  agent's identity within PLC's recovery window. Only its public half is ever
+  on the machine.
+
+Both halves are made by the principal's own PDS in one request:
+`at.hailey.cocoon.createAgent` (haileyok/cocoon#231), called with the
+principal's session. The declaration always names the caller, so nobody can
+make an account claiming to be someone else's agent, and there's no invite
+code to keep. Cocoon only lets allowed principals call it, rate-limits it,
+and refuses `com.atproto.identity.*` to agent accounts however they sign in,
+so an agent can't change its own declaration: the spec's "protecting from
+alterations".
 
 Only the pair confirms the relationship. Engram checks it (`agent.Principals`)
 when it says whether a message's author acts for the same person, and caches
@@ -45,9 +52,10 @@ policy (below).
 ### Making them: `engram agent new`
 
 The principal's settings live in `principal.json` beside `config.json`: their
-OAuth sign-in (`engram principal login`, scopes `repo:link.ident.endorsement`
-and lounge management), the PDS to create accounts on, the handle domain, a
-multi-use invite code, the recovery key's public half, and the lounge.
+OAuth sign-in (`engram principal login`) and the scopes it was granted, the
+recovery key's public half, and the lounge. The sign-in asks for
+`rpc:at.hailey.cocoon.createAgent?aud=<their PDS's DID>`,
+`repo:link.ident.endorsement` and lounge management.
 
 `engram agent new --kind session|subagent --session <id> --parent <did>`
 hands out an identity:
@@ -55,18 +63,16 @@ hands out an identity:
 1. it takes one from the stock (`agents/stock/`), moving the file into
    `agents/claimed/`: the rename is the claim, so two processes never get the
    same one; or, with the stock empty, creates one;
-2. creating is `createAccount` (handle `a-<random><domain>`, a random
-   password, the agent-of entry, the recovery key), then the endorsement,
-   then `putMembers` into the lounge. The identity file is written as soon as
-   the account exists, with how far setup got, so a failure part way loses
-   nothing and the next claim finishes it;
+2. creating is one `createAgent` call (account, declaration, recovery key,
+   endorsement), then `putMembers` into the lounge. The identity file is
+   written as soon as the account exists, with how far setup got, so a
+   failure part way loses nothing and the next claim finishes it (writing the
+   endorsement itself if the PDS couldn't);
 3. it starts `engram agent stock` in the background to top the stock up
    (default four), so the next session doesn't wait.
 
-An identity file holds the account's password, readable only by its owner.
-Agents sign in with it (password sessions: Cocoon has no app passwords).
-A password session can't change the agent's DID document without an email
-token that goes to an address nobody receives (`@agents.invalid`).
+An identity file holds the account's password (returned once by
+`createAgent`), readable only by its owner. Agents sign in with it.
 
 Everything runs as one Unix user, so an agent with a shell can read every
 identity file and the principal's OAuth session. That's acceptable for

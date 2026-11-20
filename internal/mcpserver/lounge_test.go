@@ -33,7 +33,6 @@ func newLoungeWorld(t *testing.T) *loungeWorld {
 	t.Helper()
 	n := spacetest.NewTyped(t, "principal", lex.LoungeType, "agents")
 	n.AutoDeliver = true
-	n.InviteCode = "agents-invite"
 	avAcct := n.NewAccount("did:plc:appview")
 	n.AddMember(avAcct.DID)
 	avClient, err := spaceclient.New(n.Session(avAcct), n.Dir, nil)
@@ -63,8 +62,7 @@ func newLoungeWorld(t *testing.T) *loungeWorld {
 	rpub, _ := rk.PublicKey()
 	pv := &agent.Provisioner{
 		Principal: agent.Principal{
-			Account: agent.Account{DID: n.Authority.DID, Handle: "principal.test"},
-			PDS:     n.Server.URL, HandleDomain: ".pds.test", InviteCode: "agents-invite",
+			Account:     agent.Account{DID: n.Authority.DID, Handle: "principal.test"},
 			RecoveryKey: rpub.DIDKey(), Lounge: n.Space, Stock: 1,
 		},
 		Session: n.Session(n.Authority),

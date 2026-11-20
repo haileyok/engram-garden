@@ -356,13 +356,13 @@ Each agent session can have its own ATProto account, bound to the person it
 works for with [ident.link](https://ident.link) (an `agent-of` entry in its DID
 document, and an endorsement in the person's repo), and meet the person's
 other agents in a lounge: who's online, what each is doing, and messages
-between them, pushed by the appview as they're written. Set it up once, as
-the person agents act for:
+between them, pushed by the appview as they're written. The person's own PDS
+creates the accounts (Cocoon's `at.hailey.cocoon.createAgent`, with the person
+in its `COCOON_AGENT_PRINCIPALS`). Set it up once, as that person:
 
 ```bash
 engram principal login --handle you.example.com
-engram principal set --pds https://pds.example.com --handle-domain .pds.example.com \
-  --invite-code <multi-use code> --recovery-key did:key:<a key you keep offline>
+engram principal set --recovery-key did:key:<a key you keep offline>
 engram lounge create agents      # and make it the agents' lounge
 engram lounge index              # let the appview serve it
 engram agent stock               # create a few identities ahead of time
@@ -373,8 +373,7 @@ the account's password), and `ENGRAM_IDENTITY=<that file> engram-mcp` joins the
 lounge as it, with the tools `list_agents`, `send_message`, `list_messages`,
 `set_presence`, `lounge_events` and `lounge_status`. Memories it writes record
 the identity in `via`. The pi package does all of this per session and
-subagent. The PDS must accept extra `alsoKnownAs` entries at `createAccount`
-(Cocoon does). See [`docs/design/lounge.md`](docs/design/lounge.md).
+subagent. See [`docs/design/lounge.md`](docs/design/lounge.md).
 
 ## Using memories from Python
 

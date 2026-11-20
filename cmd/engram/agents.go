@@ -19,8 +19,8 @@ import (
 // they act for, the lounge they meet in, and the identities themselves.
 
 const agentUsage = `Agent identities (each agent session gets an ATProto account of its own):
-  engram principal login [--handle h]       sign in as the person agents act for (endorses agents, runs the lounge)
-  engram principal [set --pds url --handle-domain d --invite-code c --recovery-key did:key --lounge uri --stock n]
+  engram principal login [--handle h]       sign in as the person agents act for (their PDS creates and endorses agents)
+  engram principal [set --recovery-key did:key --lounge uri --stock n]
                                             show or change how agent accounts are made
   engram lounge create <name>               make a lounge (who's online, messages) and make it the agents' lounge
   engram lounge index [--stop]              let the appview serve the lounge (approve in the browser)
@@ -66,15 +66,8 @@ func (c *cli) cmdPrincipal(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	shown := p
-	if shown.InviteCode != "" {
-		shown.InviteCode = "(set)"
-	}
-	c.print(shown, func(w io.Writer) {
+	c.print(p, func(w io.Writer) {
 		fmt.Fprintf(w, "principal:      %s %s\n", p.Account.Handle, p.Account.DID)
-		fmt.Fprintf(w, "pds:            %s\n", p.PDS)
-		fmt.Fprintf(w, "handle domain:  %s\n", p.HandleDomain)
-		fmt.Fprintf(w, "invite code:    %s\n", shown.InviteCode)
 		fmt.Fprintf(w, "recovery key:   %s\n", p.RecoveryKey)
 		fmt.Fprintf(w, "lounge:         %s\n", p.Lounge)
 		fmt.Fprintf(w, "stock:          %d\n", max(p.Stock, 4))
@@ -104,12 +97,12 @@ func (c *cli) principalLogin(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	acct, err := c.principalSignIn(ctx, strings.TrimPrefix(strings.TrimSpace(h), "@"), c.lineInput())
+	acct, granted, err := c.principalSignIn(ctx, strings.TrimPrefix(strings.TrimSpace(h), "@"), c.lineInput())
 	if err != nil {
 		return err
 	}
 	old := p.Account
-	p.Account = acct
+	p.Account, p.Scopes = acct, granted
 	if err := p.Save(c.principalPath); err != nil {
 		return err
 	}
@@ -127,9 +120,6 @@ func (c *cli) principalLogin(ctx context.Context, args []string) error {
 
 func (c *cli) principalSet(args []string) error {
 	fs := flag.NewFlagSet("principal set", flag.ContinueOnError)
-	pds := fs.String("pds", "", "where agent accounts are created")
-	domain := fs.String("handle-domain", "", "the suffix of agent handles")
-	invite := fs.String("invite-code", "", "an invite code the PDS accepts for each new account")
 	recovery := fs.String("recovery-key", "", "a did:key you hold offline, first in every agent's rotation keys")
 	lounge := fs.String("lounge", "", "the lounge agents join")
 	stock := fs.Int("stock", 0, "identities to keep ready")
@@ -143,7 +133,7 @@ func (c *cli) principalSet(args []string) error {
 	for _, f := range []struct {
 		dst *string
 		v   string
-	}{{&p.PDS, *pds}, {&p.HandleDomain, *domain}, {&p.InviteCode, *invite}, {&p.RecoveryKey, *recovery}, {&p.Lounge, *lounge}} {
+	}{{&p.RecoveryKey, *recovery}, {&p.Lounge, *lounge}} {
 		if f.v != "" {
 			*f.dst = strings.TrimSpace(f.v)
 		}
@@ -172,7 +162,7 @@ func (c *cli) provisioner(ctx context.Context) (*agent.Provisioner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("signing in as the principal: %w", err)
 	}
-	return &agent.Provisioner{Principal: p, Session: sess, Dir: c.identitiesDir, HTTP: c.provisionHTTP}, nil
+	return &agent.Provisioner{Principal: p, Session: sess, Dir: c.identitiesDir}, nil
 }
 
 // ---- lounges ----
