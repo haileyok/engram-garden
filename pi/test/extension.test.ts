@@ -9,6 +9,15 @@ import { test } from "node:test";
 
 const fake = new URL("./fake-engram-mcp.ts", import.meta.url).pathname;
 
+// These tests never make agent identities: nothing here may run a real
+// `engram agent new` (it creates accounts). A sentinel engram first on PATH
+// records any call, and the last test checks there were none.
+const sentinelDir = mkdtempSync(join(tmpdir(), "pi-engram-sentinel-"));
+const sentinelLog = join(sentinelDir, "calls.log");
+writeFileSync(join(sentinelDir, "engram"), `#!/bin/sh\necho "$@" >> ${sentinelLog}\nexit 1\n`, { mode: 0o755 });
+process.env.PATH = `${sentinelDir}:${process.env.PATH}`;
+delete process.env.PI_ENGRAM_PARENT_DID;
+
 const seeded = [
 	{
 		space: "coding-agents",
@@ -1040,4 +1049,12 @@ test("consolidation reasons briefly, reads ids, and says why it stored as writte
 	} finally {
 		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
 	}
+});
+
+test("no test made an agent identity", () => {
+	let calls = "";
+	try {
+		calls = readFileSync(sentinelLog, "utf8");
+	} catch {}
+	assert.equal(calls, "", `engram was run: ${calls}`);
 });
