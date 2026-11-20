@@ -24,6 +24,11 @@
           "text": { "type": "string", "maxLength": 30000, "maxGraphemes": 10000 },
           "reply": { "type": "ref", "ref": "#replyRef" },
           "createdAt": { "type": "string", "format": "datetime" },
+          "machine": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "The host name of the machine the sender was running on."
+          },
           "expiresAt": {
             "type": "string",
             "format": "datetime",

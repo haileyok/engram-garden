@@ -165,6 +165,7 @@
         "text": { "type": "string" },
         "reply": { "type": "ref", "ref": "garden.engram.message#replyRef" },
         "createdAt": { "type": "string", "format": "datetime" },
+        "machine": { "type": "string", "description": "The host name of the sender's machine." },
         "expiresAt": { "type": "string", "format": "datetime" },
         "indexedAt": { "type": "string", "format": "datetime" }
       }
