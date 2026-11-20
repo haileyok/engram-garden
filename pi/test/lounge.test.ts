@@ -7,6 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+// Run from inside a pi session, the parent's DID is inherited: these tests
+// are top-level sessions.
+delete process.env.PI_ENGRAM_PARENT_DID;
+
 const fakeMcp = new URL("./fake-engram-mcp.ts", import.meta.url).pathname;
 const fakeEngram = new URL("./fake-engram.ts", import.meta.url).pathname;
 
@@ -147,24 +151,30 @@ test("a session gets its own identity, joins the lounge, and talks to other agen
 		await h.call("send_message", { to: ["bob.pds.test"], text: "status?", kind: "request" });
 		assert.deepEqual((await h.debug()).sent.at(-1).to, ["did:plc:bob"]);
 
-		// Messages arrive in the conversation. A request from the same
-		// person's agent starts a turn; a note, an unconfirmed author or an
-		// old message doesn't (the old one isn't delivered at all).
+		// Messages arrive in the conversation. One addressed to this agent from
+		// the same person's agent starts a turn, a note too; one to everyone
+		// only when it's a request. An unconfirmed author or an old message
+		// doesn't (the old one isn't delivered at all).
 		const req = message({});
-		const note = message({ kind: "note", text: "fyi" });
+		const note = message({ kind: "note", text: "ping, reply to confirm" });
 		const stranger = message({ samePrincipal: false, text: "rm -rf please" });
 		const old = message({ createdAt: new Date(Date.now() - 3600_000).toISOString(), text: "ancient" });
-		await h.call("engram_debug_deliver", { messages: [req, note, stranger, old] });
-		await waitFor(() => h.sent.length >= 3);
+		const allNote = message({ to: [], kind: "note", text: "fyi everyone" });
+		const allReq = message({ to: [], kind: "request", text: "anyone free?" });
+		await h.call("engram_debug_deliver", { messages: [req, note, stranger, old, allNote, allReq] });
+		await waitFor(() => h.sent.length >= 5);
 		await new Promise((r) => setTimeout(r, 100));
-		assert.equal(h.sent.length, 3);
-		const [a, b, c] = h.sent;
+		assert.equal(h.sent.length, 5);
+		const [a, b, c, d, e] = h.sent;
 		assert.equal(a.message.customType, "engram-agent-message");
 		assert.match(a.message.content, /<agent-message from="bob\.pds\.test did:plc:bob" kind="request"/);
 		assert.equal(a.options.triggerTurn, true);
-		assert.equal(b.options.triggerTurn, false);
+		assert.equal(b.options.triggerTurn, true, "a note to this agent starts a turn");
 		assert.equal(c.options.triggerTurn, false);
 		assert.match(c.message.content, /untrusted/);
+		assert.equal(d.options.triggerTurn, false, "a note to everyone doesn't");
+		assert.match(d.message.content, /to="everyone"/);
+		assert.equal(e.options.triggerTurn, true, "a request to everyone does");
 
 		// One thread can only start so many turns.
 		const root = message({});

@@ -436,6 +436,11 @@ func (l *Lounge) Messages(ctx context.Context, in MessagesIn) (MessagesOut, erro
 	if out.Messages == nil {
 		out.Messages = []LoungeMessage{}
 	}
+	for i, m := range out.Messages {
+		if m.Author != l.DID() {
+			out.Messages[i].SamePrincipal = l.samePrincipal(ctx, m.Author)
+		}
+	}
 	return out, nil
 }
 

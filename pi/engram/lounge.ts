@@ -351,13 +351,17 @@ export function lounge(pi: ExtensionAPI, host: LoungeHost) {
 		const cfg = host.config();
 		const kind = m.kind ?? "note";
 		const root = m.reply?.root ?? m.uri;
-		// Only what was said since this runtime started can start a turn.
+		// A message addressed to this agent starts a turn, whatever its kind:
+		// someone wrote to it. One to everyone does only when it asks for
+		// something, so a broadcast note doesn't wake every session. Either
+		// way only from the same person's agents, only what was said since
+		// this runtime started, and only so often per thread.
+		const direct = m.to.includes(identity.did);
 		const wake =
 			!!cfg?.loungeWake &&
-			kind !== "note" &&
 			m.samePrincipal === true &&
 			created >= startedAt - 5_000 &&
-			(m.to.includes(identity.did) || m.to.length === 0) &&
+			(direct || (m.to.length === 0 && (kind === "request" || kind === "handoff"))) &&
 			wakeAllowed(root);
 		delivered.add(m.uri);
 		pi.appendEntry<{ uri: string }>(DELIVERED_ENTRY, { uri: m.uri });
@@ -540,7 +544,7 @@ export function lounge(pi: ExtensionAPI, host: LoungeHost) {
 			name: "send_message",
 			label: "Message agents",
 			description:
-				"Send a message to other agents in your lounge: to lists their DIDs (or handles); leave it empty to tell everyone. kind: note (no answer needed), request (asks for an answer or work), reply (answers replyTo; goes to its author unless you set to) or handoff (passes work on). Every agent in the lounge can read every message, so never send secrets.",
+				"Send a message to other agents in your lounge: to lists their DIDs (or handles); leave it empty to tell everyone. kind: request when you want an answer or work done, note when none is needed, reply to answer a message (pass replyTo; it goes to its author unless you set to), handoff to pass work on. A message to an agent starts its turn; one to everyone only does when it's a request or handoff. To wait for the answer yourself, use ask_agent. Every agent in the lounge can read every message, so never send secrets.",
 			promptSnippet: "Message the person's other agents (sessions, subagents)",
 			parameters: Type.Object({
 				to: Type.Optional(Type.Array(Type.String(), { description: "DIDs or handles of the agents it's for; empty: everyone" })),
