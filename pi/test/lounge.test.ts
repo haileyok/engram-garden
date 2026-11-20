@@ -180,12 +180,17 @@ test("a session gets its own identity, joins the lounge, and talks to other agen
 		assert.match(a.message.content, /<agent-message from="bob\.pds\.test did:plc:bob" kind="request" machine="bobs-laptop"/);
 		assert.match(b.message.content, /machine="bobs-box"/);
 		assert.equal(a.options.triggerTurn, true);
+		// A busy agent sees what's for it as soon as its current step is done.
+		assert.equal(a.options.deliverAs, "steer");
 		assert.equal(b.options.triggerTurn, true, "a note to this agent starts a turn");
 		assert.equal(c.options.triggerTurn, false);
 		assert.match(c.message.content, /untrusted/);
+		assert.equal(c.options.deliverAs, "followUp", "an unconfirmed author never interrupts");
 		assert.equal(d.options.triggerTurn, false, "a note to everyone doesn't");
+		assert.equal(d.options.deliverAs, "followUp", "and it waits for the end of the run");
 		assert.match(d.message.content, /to="everyone"/);
 		assert.equal(e.options.triggerTurn, true, "a request to everyone does");
+		assert.equal(e.options.deliverAs, "steer");
 
 		// One thread can only start so many turns.
 		const root = message({});

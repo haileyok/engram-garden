@@ -126,7 +126,7 @@ export const defaults: Config = {
 	identityTimeoutMs: 60_000,
 	loungeWake: true,
 	loungeMaxWakesPerThread: 6,
-	askTimeoutSec: 300,
+	askTimeoutSec: 60,
 };
 
 export function agentDir(): string {
