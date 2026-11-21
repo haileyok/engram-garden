@@ -1147,6 +1147,25 @@ test("a subagent's in-memory session is pushed too, and marked ended", async () 
 	}
 });
 
+test("a subagent that ends before engram-mcp's tools are known still pushes its session", async () => {
+	const out = join(mkdtempSync(join(tmpdir(), "pi-sub-")), "sessions.json");
+	const h = await harness({ autoCapture: false, autoRecall: false, env: { FAKE_ARCHIVE: "1", FAKE_SESSIONS_OUT: out, FAKE_SLOW_TOOLS: "400" } });
+	h.ctx.mode = "print";
+	h.ctx.hasUI = false;
+	h.ctx.sessionManager.getSessionFile = () => undefined;
+	h.ctx.sessionManager.getSessionId = () => "quick-sub";
+	h.ctx.sessionManager.getHeader = () => ({ type: "session", version: 3, id: "quick-sub", timestamp: "2026-11-21T00:00:00.000Z", cwd: "/tmp" });
+	await h.emit("session_start", { type: "session_start" });
+	h.addMessage("user", "one quick question");
+	h.addMessage("assistant", "one quick answer");
+	await h.emit("agent_settled", { type: "agent_settled", aborted: false });
+	await h.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+	const stored = JSON.parse(readFileSync(out, "utf8")).find((x: any) => x.session.sessionId === "quick-sub");
+	assert.ok(stored, "the session was pushed");
+	assert.equal(stored.session.status, "ended");
+	assert.match(stored.data, /one quick answer/);
+});
+
 test("without an archive, the session isn't pushed", async () => {
 	const h = await harness({ autoCapture: false });
 	try {

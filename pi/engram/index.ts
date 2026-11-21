@@ -192,6 +192,7 @@ export default function engram(pi: ExtensionAPI) {
 	let lastPushAt = 0;
 	// Whether engram-mcp keeps sessions: only with an identity in an archive.
 	let archived = false;
+	let toolsListed: Promise<void> = Promise.resolve();
 	let sessionToolsRegistered = false;
 
 	const need = (): McpServer => {
@@ -439,9 +440,11 @@ export default function engram(pi: ExtensionAPI) {
 			.finally(() => {
 				if (id === session) syncing = false;
 			});
-		void server
-			.start()
-			.then(() => Promise.all([refreshSpaces(ctx), projectReady.then(() => registerOtherTools(ctx))]))
+		// Whether engram-mcp keeps sessions is known once its tools are: a
+		// push waits for that (a short subagent can end before it's known).
+		const listed = server.start().then(() => projectReady.then(() => registerOtherTools(ctx)));
+		toolsListed = listed.catch(() => {});
+		void Promise.all([server.start().then(() => refreshSpaces(ctx)), listed])
 			.catch((err) => {
 				if (id !== session) return;
 				room.stop();
@@ -535,7 +538,9 @@ export default function engram(pi: ExtensionAPI) {
 
 	/** syncSession stores what the session's transcript grew by, and where the work stands. */
 	async function syncSession(ctx: ExtensionContext, opts: { final?: boolean } = {}): Promise<void> {
-		if (!cfg?.autoSessionSync || !server || !archived || !syncAllowed(ctx)) return;
+		if (!cfg?.autoSessionSync || !server || !syncAllowed(ctx)) return;
+		if (!archived) await toolsListed;
+		if (!archived || !server) return;
 		const id = ctx.sessionManager.getSessionId();
 		const file = transcriptOf(ctx);
 		if (!file || !id) return;

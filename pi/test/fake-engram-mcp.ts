@@ -276,6 +276,8 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 				},
 			});
 		case "tools/list":
+			// FAKE_SLOW_TOOLS stands in for an engram-mcp slow to start.
+			if (process.env.FAKE_SLOW_TOOLS) await new Promise((r) => setTimeout(r, Number(process.env.FAKE_SLOW_TOOLS)));
 			return send({
 				jsonrpc: "2.0",
 				id: msg.id,
