@@ -1,0 +1,13 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.archive",
+  "defs": {
+    "main": {
+      "type": "space",
+      "description": "A space where agent sessions keep their transcripts. Each member is one session's own identity, writing a garden.engram.session record that says where the work stands and names the transcript's bytes (blobs). The authority declares the embedding model in a garden.engram.config record; an Engram Garden appview indexes the transcripts so agents can search what earlier sessions did.",
+      "key": "any",
+      "title": "Engram Garden session archive",
+      "collections": ["garden.engram.session", "garden.engram.config"]
+    }
+  }
+}

@@ -1,106 +1,164 @@
 # Sessions
 
-Where an agent's working session stands, and its transcript, kept in a space
-so the session can be picked up later — on another machine, or by another
-agent. Two records types, one idea: the record is the index and the handoff,
-the bytes are the transcript.
+Status: in progress. Every agent session, and every subagent, keeps its
+transcript in an archive space, written by the session's own identity. The
+appview indexes the transcripts so agents can search what earlier sessions
+did, and a session can be resumed on another machine.
 
-## The manifest record
+## What it's for
 
-`garden.engram.session`, keyed by the harness's session ID (a UUID for pi).
-It is rewritten as the session goes on, and it holds two kinds of thing:
+Memories hold what capture decided was worth keeping. Transcripts hold
+everything else, and agents keep needing it:
 
-- **Where the work stands**: `title`, `summary` (markdown; the harness's own
-  compaction summary when it has one), `status`, `repo`, `branch`, `cwd`,
-  `machine`, `harness`, `model`, `gitHead`, `gitDirty`, `startedAt`. This is
-  what another person or agent reads to pick the work up, and it is small
-  enough to list every session in a space cheaply.
-- **Where the transcript is**: `head` (`entryId`, `entries`, `bytes`) says
-  how far it is stored; `chunks` names the bytes in order, each with its size,
-  entry range and SHA-256; `mode` says where they are.
+- "Have we seen this error before, and what fixed it?"
+- "Which session touched this file, or ran this command?"
+- "Why did we decide X?" — the reasoning around a decision, not only the
+  decision a memory kept.
+- Where a memory came from, so "verify before trusting" is one hop.
+- What an agent actually did, signed by that agent: agents have shells, and
+  they read each other's messages.
+- Picking a session up on another machine.
 
-It is not searched as a memory. Like skills, session records are read
-directly from members' PDSes with the space credential, so the appview's
-index never carries them and `recall` never returns them.
+## The archive
 
-## The bytes: blobs, not records
+Transcripts live in their own space type, `garden.engram.archive`, separate
+from memory spaces and lounges:
 
-Transcripts are megabytes and grow by appending, so chunks go in the member's
-**blobstore**, not in the repo:
+- **Its members are session identities.** Each identity (see
+  `lounge.md`) writes its own session record into its own repo, so the
+  record is signed by the agent whose work it is, and ident.link ties that
+  agent to its principal. A memory space couldn't take thousands of one-off
+  authors (merging, skill precedence and member removal all depend on a
+  stable author); an archive is built for them.
+- **The principal governs it.** The principal is the authority, so they read
+  everything and grant the appview access. `engram archive create` makes
+  one; new identities join it as they join the lounge (`Provisioner.finish`
+  records `Archived` beside `Joined`).
+- **Every member reads every member's records.** A space credential doesn't
+  say who holds it. That is what lets agents search each other's sessions,
+  and it's also why other people's agents, which a lounge may let in, never
+  join an archive.
+- **Not in memory spaces.** Transcripts would drown memories in recall, and
+  the archive's membership, retention and access differ.
 
-- Uploading is ordinary `com.atproto.repo.uploadBlob`. A blob becomes the
-  space's data when a space record references it, which is also what keeps it
-  alive: the PDS garbage-collects a blob once no record names it. Deleting the
-  manifest therefore deletes the transcript.
-- A blob referenced **only** by space records is excluded from public sync and
-  served only to space readers through `com.atproto.space.getBlob`, so a
-  transcript is as private as the space.
-- Chunks are split on **complete transcript lines**, at most 3 MiB each
-  (`internal/agent/sessions.go`, `MaxChunkBytes`), and named by content, so
-  appending a session uploads only the new chunk.
+The archive's authority writes a `garden.engram.config` record declaring the
+embedding model, as in memory spaces; the appview embeds passages with it.
 
-This is the whole reason not to use records for the bytes: every space record
-rides the member's repo, so `space/listRepoOps` and `space/getRepo` would
-carry every transcript the indexer never reads, and any full re-export would
-pull the lot. A year of one heavy user's sessions is a few GB; as blobs it
-costs the repo nothing.
+## The session record
 
-## Modes
+`garden.engram.session`, keyed by the harness's session ID, in the
+identity's repo. It is rewritten as the session goes on:
 
-`mode` says how the current transcript is stored. A push tries them in order
-and stops at the first the sign-in allows:
+- **Where the work stands:** `title`, `summary` (the harness's newest
+  compaction summary), `status` (`active`, `ended`), `kind` (`session`,
+  `subagent`), `parent` (the DID of the agent that started a subagent),
+  `repo`, `branch`, `gitHead`, `gitDirty`, `cwd`, `machine`, `harness`,
+  `model`, `startedAt`, `updatedAt`.
+- **Where the transcript is:** `head` (`entryId`, `entries`, `bytes`) says
+  how far it is stored; `chunks` name the bytes in order, each a blob with
+  its size and entry range.
 
-| mode | where the bytes are | when |
-|---|---|---|
-| `blob` | `chunks[].blob`, the member's blobstore | the default |
-| `record` | `chunks[].rkey`, `garden.engram.sessionChunk` records | the sign-in can't upload blobs yet |
-| `metadata` | nowhere: the record alone | the sign-in can't write transcripts at all |
+`kind` and `parent` come from the identity file, not from the caller.
 
-`record` exists for a sign-in that predates the `blob:*` scope:
-`uploadBlob` needs `blob:<mime>` and `atproto` doesn't imply it, so an agent
-that signed in before this feature must run `engram login` again. Until it
-does, chunk records keep the transcript (at 400 KiB a record, inside the 1 MiB
-a space record holds). `metadata` is the honest last resort: the handoff still
-lands, and the answer's `note` says what to do. A push's result carries the
-mode and the note, so a harness can tell the person once.
+## The bytes: blobs
+
+Transcripts are megabytes and grow by appending, so chunks go in the
+identity's **blobstore**, not its repo:
+
+- A blob becomes the space's data when a space record references it, and the
+  PDS drops it once no record does: deleting the session record deletes the
+  transcript. A blob referenced only by space records is served only to
+  space readers (`com.atproto.space.getBlob`).
+- Every space record rides the member's repo, so `space/listRepoOps` and
+  `space/getRepo` would carry every transcript if the bytes were records.
+- Chunks are complete transcript lines, at most 3 MiB
+  (`agent.MaxChunkBytes`). **The last chunk grows**: a push merges new lines
+  into it, uploads the merged blob and names it in place of the old one, until
+  it reaches 3 MiB and a new chunk starts. So a session has about one chunk
+  per 3 MiB however often it pushes, and the record stays small (a 500 MB
+  session has ~170 chunks). The replaced blob is garbage once no record names
+  it.
+- **A blob is checked against its CID** whenever it's read, by agents and by
+  the appview. The CID is the digest; the signed record names the CID. That
+  is how the appview indexes only what the author's commit covers.
+
+The transcript is uploaded as written. Secrets in it are readable by every
+member of the archive; redaction happens when the appview builds the index
+(below), so search results and passages never carry them.
 
 ## Pushing
 
-`push_session` takes the manifest fields, `fromBytes` (how much the caller
-believes is stored) and `data` (the transcript from there):
+`push_session` takes the record's fields, `fromBytes` (how much the caller
+believes is stored), `replace` and `data`:
 
 - A trailing line without its newline is held back, so `bytes` is always a
-  whole-line boundary the caller can resume from.
-- If `fromBytes` isn't what the manifest says, the answer is `resync: true`
-  with the stored size and nothing is written: the caller sends the whole file
-  with `replace: true`, which discards the old chunks (and, in `record` mode,
-  deletes the chunk records that are no longer named).
-- Every chunk is checked against its SHA-256 on the way back, so a damaged
-  blob is reported rather than silently appended.
+  whole-line boundary.
+- If `fromBytes` isn't what the record says, the answer is `resync` with the
+  stored size and nothing is written. The caller then sends the whole file:
+  `replace` with the first piece, then appends.
+- One push carries at most 8 MiB (`MaxPushBytes`); a harness sends more in
+  pieces, so a resync of any size works.
+- Pushes for one session are serialized in the agent (one writer per
+  identity; the space has no compare-and-swap for records).
 
-`pull_session` returns the manifest and the transcript, ready to be written as
-a session file. `list_sessions` returns manifests only, so listing costs no
-blob traffic.
+pi pushes after a turn when enough has built up (`sessionSyncSeconds`,
+`sessionSyncMinBytes`), before compaction, and at the end of the session
+with `status: ended`. It reads only the file's new tail.
 
-## Picking a session up
+## The index
 
-A harness writes the pulled transcript where its own session files live. For
-pi that is `~/.pi/agent/sessions/--<encoded cwd>--/<timestamp>_<id>.jsonl`,
-which `/resume` (its All scope) and `--session` both find; pi prompts to
-continue in the current directory when the recorded `cwd` doesn't exist on
-this machine, and the `gitHead` in the record says which commit the work was
-at.
+The appview builds it; nobody writes passage records. That keeps vectors out
+of repos and makes the index a projection: changing how transcripts are cut,
+or what's redacted, means rebuilding it, not rewriting anyone's repo.
+`transcript.Version` is bumped when the output for the same input changes.
 
-One session belongs to one machine at a time: two machines appending to the
-same session would each push a different suffix. The manifest's `machine`,
-`head` and `updatedAt` are what a client needs to notice that, and pulling
-refuses to overwrite an existing file.
+The appview syncs archives like memory spaces (verified repo reads), reads
+each session record, fetches the chunks it hasn't indexed, checks them
+against their CIDs, and cuts them into **passages**:
 
-## CLIs
+| passage | text | why |
+|---|---|---|
+| `turn` | the user's prompt and the final reply | "how did we do X" |
+| `step` | assistant text between tool calls, with one line per tool call after it (`bash: …`, `edit path`) | decisions, and what was run |
+| `error` | a failed tool call: the call, the start and end of its output, and the assistant text after it (the fix) | "have we seen this error" |
+| `summary` | compaction summaries, and the record's title and summary | the condensed story |
 
-- `engram sessions list`, `pull <id> [--to file]`, `push <file> [--id id]`,
-  `rm <id>`, each with `--space`.
-- MCP: `list_sessions`, `pull_session`, `push_session`, `delete_session`; the
-  pi extension wraps them as `engram_<name>` for codemode and pushes
-  automatically (`autoSessionSync`, at most once every `sessionSyncSeconds`,
-  and once more when the session ends).
+Left out: thinking (10× the assistant text; revisit with `engram-eval`),
+successful tool output (mostly file contents git already has, and the riskiest
+for secrets and prompt injection), `custom_message` entries (injected
+memories and lounge messages: indexing them would echo memories back),
+images, and Engram's own tool calls.
+
+Each passage carries facets: the session's DID, parent, kind, repo, branch,
+cwd, machine, model, time, and the files and commands it touched.
+
+**Redaction** runs on passage text before embedding: known token formats
+(GitHub, Slack, AWS, OpenAI-style keys, JWTs, PEM blocks, URLs with
+credentials, `KEY=value` assignments of secret-looking names) and long
+high-entropy strings become `[redacted:<kind>]`.
+
+## Tools
+
+- `search_sessions`: passages matching a query, hybrid (keyword and vector),
+  filtered by repo, DID, kind, time. Each hit names its session
+  (`at://<did>/…/garden.engram.session/<id>`) and entry.
+- `read_session`: a window of a session's transcript around an entry,
+  rendered as text, so an agent reads context without pulling the file.
+- `list_sessions`, `pull_session`: the records, and a whole transcript to
+  resume.
+
+Hits are quoted transcript, not instructions: tools mark them as such.
+Passages are not part of the automatic recall before each prompt.
+
+## Subagents
+
+A subagent (`pi -p --no-session`) has no session file. pi-engram in the
+subagent builds the transcript from its events in memory, in pi's session
+format, and pushes it under the subagent's own identity, with `kind:
+subagent` and its parent's DID.
+
+## Not done
+
+- No backfill of sessions from before identities.
+- Kept until deleted by hand. Deleting a record needs the identity's
+  password, so claimed identity files are kept.

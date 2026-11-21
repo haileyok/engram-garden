@@ -1063,11 +1063,14 @@ test("consolidation reasons briefly, reads ids, and says why it stored as writte
 });
 
 test("the session's transcript is stored, listed, and pulled back", async () => {
-	const h = await harness({ autoCapture: false });
+	const h = await harness({ autoCapture: false, env: { FAKE_ARCHIVE: "1" } });
 	const dir = process.env.PI_CODING_AGENT_DIR!;
 	const file = join(dir, "session.jsonl");
 	try {
 		await start(h);
+		await waitFor(() => h.tools.has("engram_list_sessions"));
+		// The harness's own session tools never reach the model.
+		assert.ok(!h.tools.has("engram_push_session") && !h.tools.has("engram_delete_session"));
 		h.addMessage("user", "audit the template handlers for cross-tenant reads");
 		// The transcript grows the way pi's file does.
 		writeFileSync(
@@ -1078,7 +1081,6 @@ test("the session's transcript is stored, listed, and pulled back", async () => 
 		await h.emit("agent_settled", { type: "agent_settled", aborted: false });
 		await waitFor(() => h.branch.some((e) => e.customType === "engram-session-sync"));
 		const sync = h.branch.find((e) => e.customType === "engram-session-sync");
-		assert.equal(sync.data.mode, "blob");
 		assert.ok(sync.data.bytes >= readFileSync(file).length - 1, "stored as much as the file holds");
 
 		// The session is in the space, with what's worth knowing about it.
@@ -1100,20 +1102,20 @@ test("the session's transcript is stored, listed, and pulled back", async () => 
 	}
 });
 
-test("a session grant without blobs still says why the transcript isn't stored that way", async () => {
-	const h = await harness({ autoCapture: false, env: { NO_BLOBS: "1" } });
+test("without an archive, the session isn't pushed", async () => {
+	const h = await harness({ autoCapture: false });
 	try {
 		await start(h);
+		// engram-mcp's tools are known by now.
+		await waitFor(() => h.tools.has("engram_debug_sessions"));
 		writeFileSync(
 			join(process.env.PI_CODING_AGENT_DIR!, "session.jsonl"),
 			`${readFileSync(join(process.env.PI_CODING_AGENT_DIR!, "session.jsonl"), "utf8")}{"type":"message","id":"m2","timestamp":"2026-10-23T00:00:02.000Z","message":{"role":"user","content":[{"type":"text","text":"second"}]}}\n`,
 			{ flag: "a" },
 		);
 		await h.emit("agent_settled", { type: "agent_settled", aborted: false });
-		await waitFor(() => h.branch.some((e) => e.customType === "engram-session-sync"));
-		const sync = h.branch.find((e) => e.customType === "engram-session-sync");
-		assert.equal(sync.data.mode, "record");
-		assert.match(h.notes.join("\n"), /sessions aren't fully stored/);
+		await new Promise((r) => setTimeout(r, 200));
+		assert.ok(!h.branch.some((e) => e.customType === "engram-session-sync"), "pushed without an archive");
 	} finally {
 		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
 	}

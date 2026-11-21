@@ -10,16 +10,94 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/haileyok/engram-garden/internal/agent"
-	"github.com/haileyok/engram-garden/internal/lex"
 )
 
-const sessionUsage = "engram sessions list | pull <id> [--to file] | push <file> [--id id] [--title t] | rm <id>   (--space picks a space)"
+// The archive: where agent sessions keep their transcripts, each written by
+// the session's own identity. The principal governs it and reads all of it.
+// See docs/design/sessions.md.
 
-// cmdSessions keeps agent sessions in the spaces: where each one stands, and
-// its transcript, so it can be picked up on another machine.
+const archiveUsage = `engram archive create <name>     make an archive (agents keep their sessions there) and make it the agents' archive
+engram archive index [--stop]   let the appview index it (approve in the browser)`
+
+const sessionUsage = `engram sessions list [--author did]                 the sessions in the archive
+engram sessions pull <id|uri> [--author did] [--to file]   one transcript, as complete JSONL lines
+engram sessions rm <id|uri> [--author did]          delete a session (with its agent's identity file)`
+
+func (c *cli) cmdArchive(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return usageError{errors.New(archiveUsage)}
+	}
+	switch args[0] {
+	case "create":
+		pos, err := parse(flag.NewFlagSet("archive create", flag.ContinueOnError), args[1:])
+		if err != nil {
+			return err
+		}
+		if len(pos) != 1 {
+			return usageError{errors.New("usage: engram archive create <name>")}
+		}
+		p, err := c.principal()
+		if err != nil {
+			return err
+		}
+		if err := p.CheckCreateArchive(); err != nil {
+			return err
+		}
+		sess, err := c.principalSession(ctx, p)
+		if err != nil {
+			return fmt.Errorf("signing in as the principal: %w", err)
+		}
+		uri, err := agent.CreateArchive(ctx, sess, pos[0])
+		if err != nil {
+			return err
+		}
+		p.Archive = uri
+		if err := p.Save(c.principalPath); err != nil {
+			return err
+		}
+		c.print(map[string]any{"archive": uri}, func(w io.Writer) {
+			fmt.Fprintf(w, "Created the archive %s; new agents keep their sessions there.\nNext: engram archive index (let the appview index it).\n", uri)
+		})
+		return nil
+	case "index":
+		fs := flag.NewFlagSet("archive index", flag.ContinueOnError)
+		stop := fs.Bool("stop", false, "stop the appview indexing it")
+		if _, err := parse(fs, args[1:]); err != nil {
+			return err
+		}
+		p, err := c.principal()
+		if err != nil {
+			return err
+		}
+		if p.Archive == "" {
+			return errors.New("no archive yet: engram archive create <name>")
+		}
+		s, err := c.settings()
+		if err != nil {
+			return err
+		}
+		mode := "grant"
+		if *stop {
+			mode = "stop"
+		}
+		link, err := agent.GrantLink(ctx, s.AppviewURL, c.provisionHTTP, p.Archive, mode)
+		if err != nil {
+			return err
+		}
+		c.print(map[string]any{"archive": p.Archive, "link": link}, func(w io.Writer) {
+			fmt.Fprintf(w, "Open this and sign in as %s to approve:\n\n  %s\n", p.Account.Handle, link)
+		})
+		if c.browser != nil && !c.json {
+			_ = c.browser(link)
+		}
+		return nil
+	}
+	return usageError{fmt.Errorf("unknown archive command %q:\n%s", args[0], archiveUsage)}
+}
+
+// cmdSessions reads the archive as the principal, who governs it.
 func (c *cli) cmdSessions(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return usageError{errors.New(sessionUsage)}
@@ -29,54 +107,62 @@ func (c *cli) cmdSessions(ctx context.Context, args []string) error {
 		return c.cmdSessionsList(ctx, args[1:])
 	case "pull", "get", "show":
 		return c.cmdSessionsPull(ctx, args[1:])
-	case "push", "put", "save":
-		return c.cmdSessionsPush(ctx, args[1:])
 	case "rm", "delete":
 		return c.cmdSessionsRm(ctx, args[1:])
 	}
-	return usageError{fmt.Errorf("unknown sessions command %q: %s", args[0], sessionUsage)}
+	return usageError{fmt.Errorf("unknown sessions command %q:\n%s", args[0], sessionUsage)}
+}
+
+// archiveReader opens the archive as the principal.
+func (c *cli) archiveReader(ctx context.Context) (*agent.Archive, error) {
+	p, err := c.principal()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.CheckArchive(); err != nil {
+		return nil, err
+	}
+	sess, err := c.principalSession(ctx, p)
+	if err != nil {
+		return nil, fmt.Errorf("signing in as the principal: %w", err)
+	}
+	sc, err := c.spaceClient(sess)
+	if err != nil {
+		return nil, err
+	}
+	return &agent.Archive{Client: sc, Space: p.Archive}, nil
 }
 
 func (c *cli) cmdSessionsList(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("sessions list", flag.ContinueOnError)
-	sp := fs.String("space", "", "only this space")
+	author := fs.String("author", "", "only this agent's sessions (a DID)")
 	if _, err := parse(fs, args); err != nil {
 		return err
 	}
-	s, _, err := c.agent(ctx)
+	a, err := c.archiveReader(ctx)
 	if err != nil {
 		return err
 	}
-	out, err := s.ListSessions(ctx, agent.ListSessionsIn{Space: *sp})
+	out, err := a.ListSessions(ctx, agent.ListSessionsIn{Author: *author})
 	if err != nil {
 		return err
 	}
-	me := s.Client.DID().String()
 	c.print(out, func(w io.Writer) {
 		if len(out.Sessions) == 0 {
-			fmt.Fprintln(w, "No stored sessions. A harness pushes one with push_session, or: engram sessions push <file.jsonl>")
+			fmt.Fprintln(w, "No sessions in the archive yet.")
 		}
 		for _, si := range out.Sessions {
-			where := si.Machine
-			if si.Branch != "" {
-				where += " " + si.Branch
+			kind := si.Kind
+			if si.Parent != "" {
+				kind += " of " + si.Parent
 			}
-			if where != "" {
-				where = "(" + strings.TrimSpace(where) + ")"
-			}
-			by := ""
-			if si.Author != me {
-				by = " by " + si.Author
-			}
+			where := strings.TrimSpace(si.Machine + " " + si.Branch)
 			stored := "no transcript"
 			if si.Head != nil && si.Head.Bytes > 0 {
 				stored = fmt.Sprintf("%d entries, %s", si.Head.Entries, humanBytes(si.Head.Bytes))
-				if si.Mode != "" {
-					stored += " in " + si.Mode
-				}
 			}
-			fields := []string{si.Space, where, "updated " + si.UpdatedAt, stored}
-			fmt.Fprintf(w, "%s  %s%s\n  %s\n", si.SessionID, si.Title, by, strings.Join(slices.DeleteFunc(fields, func(f string) bool { return f == "" }), " · "))
+			fields := []string{si.Author, kind, si.Status, where, "updated " + si.UpdatedAt, stored}
+			fmt.Fprintf(w, "%s  %s\n  %s\n", si.SessionID, si.Title, strings.Join(slices.DeleteFunc(fields, func(f string) bool { return f == "" }), " · "))
 			if si.Cwd != "" {
 				fmt.Fprintf(w, "  %s\n", si.Cwd)
 			}
@@ -90,20 +176,20 @@ func (c *cli) cmdSessionsList(ctx context.Context, args []string) error {
 
 func (c *cli) cmdSessionsPull(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("sessions pull", flag.ContinueOnError)
-	sp := fs.String("space", "", "the space (default: wherever the session is)")
+	author := fs.String("author", "", "the session's agent (a DID), when the ID isn't enough")
 	to := fs.String("to", "", "write the transcript here instead of to stdout")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 1 {
-		return usageError{errors.New("engram sessions pull <id> [--to file] [--space s]")}
+		return usageError{errors.New("engram sessions pull <id|uri> [--author did] [--to file]")}
 	}
-	s, _, err := c.agent(ctx)
+	a, err := c.archiveReader(ctx)
 	if err != nil {
 		return err
 	}
-	out, err := s.PullSession(ctx, agent.GetSessionIn{Session: pos[0], Space: *sp})
+	out, err := a.PullSession(ctx, agent.GetSessionIn{Session: pos[0], Author: *author})
 	if err != nil {
 		return err
 	}
@@ -111,122 +197,59 @@ func (c *cli) cmdSessionsPull(ctx context.Context, args []string) error {
 		if err := os.WriteFile(*to, []byte(out.Data), 0o600); err != nil {
 			return err
 		}
-		c.print(map[string]string{"wrote": *to, "session": out.Session.SessionID}, func(w io.Writer) {
-			fmt.Fprintf(w, "Wrote %s (%s) from %s\n", *to, humanBytes(int64(len(out.Data))), out.Space)
+		c.print(map[string]string{"wrote": *to, "session": out.URI}, func(w io.Writer) {
+			fmt.Fprintf(w, "Wrote %s (%s) from %s\n", *to, humanBytes(int64(len(out.Data))), out.URI)
 		})
 		return nil
 	}
 	// The transcript goes to stdout as it is, so it can be piped.
-	if _, err := io.WriteString(c.out, out.Data); err != nil {
-		return err
-	}
-	if !strings.HasSuffix(out.Data, "\n") && out.Data != "" {
-		fmt.Fprintln(c.out)
-	}
-	return nil
+	_, err = io.WriteString(c.out, out.Data)
+	return err
 }
 
-func (c *cli) cmdSessionsPush(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("sessions push", flag.ContinueOnError)
-	sp := fs.String("space", "", "the space (default: the default space)")
-	id := fs.String("id", "", "the session id (default: from the file's name)")
-	title := fs.String("title", "", "a short name for the work")
-	summary := fs.String("summary", "", "markdown: the goal, what's done and the next steps")
-	cwd := fs.String("cwd", "", "the working directory the session ran in")
-	machine := fs.String("machine", "", "the machine's host name")
-	pos, err := parse(fs, args)
-	if err != nil {
-		return err
-	}
-	if len(pos) != 1 {
-		return usageError{errors.New("engram sessions push <file> [--id id] [--title t] [--space s]")}
-	}
-	data, err := os.ReadFile(pos[0])
-	if err != nil {
-		return err
-	}
-	if *id == "" {
-		*id = sessionIDFromFile(pos[0])
-	}
-	if *title == "" {
-		*title = *id
-	}
-	s, _, err := c.agent(ctx)
-	if err != nil {
-		return err
-	}
-	rec, err := sessionRecord(*id, *title, *summary, *cwd, *machine)
-	if err != nil {
-		return err
-	}
-	out, err := s.PushSession(ctx, agent.PushSessionIn{
-		Space:   *sp,
-		Replace: true,
-		Data:    string(data),
-		Session: rec,
-	})
-	if err != nil {
-		return err
-	}
-	c.print(out, func(w io.Writer) {
-		fmt.Fprintf(w, "Stored %s: %d entries, %s in %s\n", out.Session, out.Entries, humanBytes(out.Bytes), out.Mode)
-		if out.Note != "" {
-			fmt.Fprintf(w, "Note: %s\n", out.Note)
-		}
-	})
-	return nil
-}
-
+// cmdSessionsRm deletes a session as its own agent: the record is in the
+// agent's repo, so only the agent's identity can delete it.
 func (c *cli) cmdSessionsRm(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("sessions rm", flag.ContinueOnError)
-	sp := fs.String("space", "", "the space (default: wherever your session is)")
+	author := fs.String("author", "", "the session's agent (a DID), when the ID isn't enough")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 1 {
-		return usageError{errors.New("engram sessions rm <id> [--space s]")}
+		return usageError{errors.New("engram sessions rm <id|uri> [--author did]")}
 	}
-	s, _, err := c.agent(ctx)
+	r, err := c.archiveReader(ctx)
 	if err != nil {
 		return err
 	}
-	out, err := s.DeleteSession(ctx, agent.DeleteSessionIn{Session: pos[0], Space: *sp})
+	found, err := r.PullSession(ctx, agent.GetSessionIn{Session: pos[0], Author: *author})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(c.identitiesDir, "claimed", found.Author+".json")
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("%s was written by %s, whose identity file (%s) isn't on this machine: only that agent can delete it", found.URI, found.Author, path)
+	}
+	s, err := c.settings()
+	if err != nil {
+		return err
+	}
+	s.Identity, s.Archive = path, r.Space
+	sc, id, err := c.identityClient(ctx, s)
+	if err != nil {
+		return err
+	}
+	a, err := agent.NewArchive(sc, id, s)
+	if err != nil {
+		return err
+	}
+	out, err := a.DeleteSession(ctx, agent.DeleteSessionIn{Session: found.SessionID})
 	if err != nil {
 		return err
 	}
 	c.print(out, func(w io.Writer) { fmt.Fprintf(w, "Deleted %s\n", out.Deleted) })
 	return nil
-}
-
-// sessionRecord is the manifest a CLI push writes: what the flags said, and
-// what this machine can see for itself.
-func sessionRecord(id, title, summary, cwd, machine string) (lex.Session, error) {
-	if !lex.ValidSessionID(id) {
-		return lex.Session{}, fmt.Errorf("%q isn't a session id (use --id)", id)
-	}
-	now := time.Now().UTC()
-	rec := lex.Session{
-		SessionID: id, Title: title, Summary: summary, Status: "ended",
-		Cwd: cwd, Machine: machine, UpdatedAt: now.Format("2006-01-02T15:04:05.000Z"),
-	}
-	if rec.Machine == "" {
-		rec.Machine, _ = os.Hostname()
-	}
-	if rec.Cwd == "" {
-		rec.Cwd, _ = os.Getwd()
-	}
-	return rec, nil
-}
-
-// sessionIDFromFile guesses a session id from a harness's file name, which
-// looks like 2026-10-22T00-21-19-078Z_01a160fb-….jsonl.
-func sessionIDFromFile(path string) string {
-	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	if i := strings.LastIndex(base, "_"); i >= 0 && i+1 < len(base) {
-		base = base[i+1:]
-	}
-	return base
 }
 
 func humanBytes(n int64) string {

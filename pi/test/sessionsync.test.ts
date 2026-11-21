@@ -9,7 +9,7 @@ import {
 	gitInfo,
 	lastSync,
 	pushSession,
-	readSuffix,
+	readPiece,
 	resumePath,
 	SESSION_SYNC_ENTRY,
 	shortenLine,
@@ -83,41 +83,70 @@ test("shortenLine keeps short text and cuts long text", () => {
 	assert.equal(shortenLine("abcdefghij", 4), "abc…");
 });
 
-test("readSuffix reads from the offset, and the whole file when the offset is past it", () => {
+test("readPiece reads complete lines from the offset, at most max bytes", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pi-sync-"));
 	const file = join(dir, "s.jsonl");
-	writeFileSync(file, "aaaa\nbbbb\n");
-	assert.deepEqual(readSuffix(file, 0), { fromBytes: 0, data: "aaaa\nbbbb\n", size: 10 });
-	assert.deepEqual(readSuffix(file, 5), { fromBytes: 5, data: "bbbb\n", size: 10 });
-	// A cursor past the end (a fork of a shorter file) reads all of it.
-	assert.deepEqual(readSuffix(file, 99), { fromBytes: 0, data: "aaaa\nbbbb\n", size: 10 });
+	writeFileSync(file, "aaaa\nbbbb\ncc");
+	assert.deepEqual(readPiece(file, 0), { data: "aaaa\nbbbb\n", end: 10, more: false });
+	assert.deepEqual(readPiece(file, 5), { data: "bbbb\n", end: 10, more: false });
+	// A partial last line waits.
+	assert.deepEqual(readPiece(file, 10), { data: "", end: 10, more: false });
+	// A cap cuts on a line, and says there's more.
+	assert.deepEqual(readPiece(file, 0, 7), { data: "aaaa\n", end: 5, more: true });
+	// Multi-byte text survives the cut.
+	writeFileSync(file, "é\nü\n");
+	assert.deepEqual(readPiece(file, 0), { data: "é\nü\n", end: 6, more: false });
+	// A line longer than the cap can't be stored.
+	writeFileSync(file, "aaaaaaaaaa\n");
+	assert.throws(() => readPiece(file, 0, 4), /longer than 4 bytes/);
 });
 
-test("pushSession sends what grew, and resyncs with the whole file", async () => {
+/** fakeArchive answers push_session the way the archive does. */
+function fakeArchive(stored = "") {
+	const calls: Array<Record<string, any>> = [];
+	const call = async <T,>(_tool: string, args: Record<string, any>): Promise<T> => {
+		calls.push(args);
+		if (!args.replace && stored !== "" && args.fromBytes !== Buffer.byteLength(stored))
+			return { session: "s", bytes: Buffer.byteLength(stored), entries: 0, storedBytes: 0, resync: true } as unknown as T;
+		const data = String(args.data);
+		stored = (args.replace ? "" : stored) + data;
+		return { session: "s", bytes: Buffer.byteLength(stored), entries: stored.split("\n").length - 1, storedBytes: Buffer.byteLength(data) } as unknown as T;
+	};
+	return { call, calls, stored: () => stored };
+}
+
+const manifest = { sessionId: "s", title: "t", summary: "", status: "active" as const };
+
+test("pushSession sends what grew, in pieces", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "pi-sync-"));
 	const file = join(dir, "s.jsonl");
-	writeFileSync(file, "one\ntwo\n");
-	const calls: Array<Record<string, any>> = [];
-	const call = async <T,>(tool: string, args: Record<string, any>): Promise<T> => {
-		calls.push({ tool, ...args });
-		if (args.fromBytes === 0 && !args.replace) {
-			return { session: "s", mode: "blob", bytes: 4, entries: 1, storedBytes: 0, resync: true } as unknown as T;
-		}
-		return { session: "s", mode: "blob", bytes: String(args.data).length, entries: 2, storedBytes: String(args.data).length } as unknown as T;
-	};
-	const { record, answer } = await pushSession({
-		call,
-		file,
-		session: { sessionId: "s", title: "t", summary: "", status: "active" },
-		from: 0,
-		now: new Date("2026-10-23T07:00:00Z"),
-	});
-	// The first call is refused as a resync, so a second one carries it all.
-	assert.equal(calls.length, 2);
-	assert.equal(calls[1].replace, true);
-	assert.equal(calls[1].data, "one\ntwo\n");
-	assert.equal(answer.mode, "blob");
-	assert.deepEqual(record, { bytes: 8, entries: 2, mode: "blob", at: "2026-10-23T07:00:00.000Z" });
+	writeFileSync(file, "one\ntwo\nthree\nfour\n");
+	const a = fakeArchive();
+	const { record } = await pushSession({ call: a.call, file, session: manifest, from: 0, max: 9, now: new Date("2026-10-23T07:00:00Z") });
+	assert.equal(a.stored(), "one\ntwo\nthree\nfour\n");
+	assert.deepEqual(
+		a.calls.map((c) => c.data),
+		["one\ntwo\n", "three\n", "four\n"],
+	);
+	assert.deepEqual(record, { bytes: 19, entries: 4, at: "2026-10-23T07:00:00.000Z" });
+
+	// Then only what grew.
+	writeFileSync(file, "one\ntwo\nthree\nfour\nfive\n");
+	await pushSession({ call: a.call, file, session: manifest, from: record.bytes, max: 9 });
+	assert.equal(a.calls.at(-1)!.data, "five\n");
+	assert.equal(a.stored(), "one\ntwo\nthree\nfour\nfive\n");
+});
+
+test("pushSession answers a resync with the whole file, replace first", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-sync-"));
+	const file = join(dir, "s.jsonl");
+	writeFileSync(file, "one\ntwo\nthree\n");
+	const a = fakeArchive("old\n");
+	await pushSession({ call: a.call, file, session: manifest, from: 8, max: 9 });
+	assert.equal(a.stored(), "one\ntwo\nthree\n");
+	assert.equal(a.calls[1].replace, true);
+	assert.equal(a.calls[1].data, "one\ntwo\n");
+	assert.equal(a.calls[2].replace, undefined);
 });
 
 test("gitInfo reads the repository, its branch, commit and dirty state", async (t) => {
@@ -165,7 +194,7 @@ test("pushSession won't replace a session another machine has further along", as
 	const file = join(dir, "s.jsonl");
 	writeFileSync(file, "one\n");
 	const call = async <T,>(_tool: string, _args: Record<string, any>): Promise<T> =>
-		({ session: "s", mode: "blob", bytes: 4096, entries: 9, storedBytes: 0, resync: true }) as unknown as T;
+		({ session: "s", bytes: 4096, entries: 9, storedBytes: 0, resync: true }) as unknown as T;
 	await assert.rejects(
 		pushSession({ call, file, session: { sessionId: "s", title: "t", summary: "", status: "active" }, from: 0 }),
 		/further along/,
@@ -179,7 +208,7 @@ test("pushSession won't replace with an empty file either", async () => {
 	const file = join(dir, "s.jsonl");
 	writeFileSync(file, "");
 	const call = async <T,>(_tool: string, _args: Record<string, any>): Promise<T> =>
-		({ session: "s", mode: "blob", bytes: 10, entries: 1, storedBytes: 0, resync: true }) as unknown as T;
+		({ session: "s", bytes: 10, entries: 1, storedBytes: 0, resync: true }) as unknown as T;
 	await assert.rejects(
 		pushSession({ call, file, session: { sessionId: "s", title: "t", summary: "", status: "active" }, from: 0 }),
 		/further along/,

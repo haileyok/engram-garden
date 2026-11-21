@@ -20,7 +20,7 @@ import (
 
 const agentUsage = `Agent identities (each agent session gets an ATProto account of its own):
   engram principal login [--handle h]       sign in as the person agents act for (their PDS creates and endorses agents)
-  engram principal [set --recovery-key did:key --lounge uri --stock n]
+  engram principal [set --recovery-key did:key --lounge uri --archive uri --stock n]
                                             show or change how agent accounts are made
   engram lounge create <name>               make a lounge (who's online, messages) and make it the agents' lounge
   engram lounge index [--stop]              let the appview serve the lounge (approve in the browser)
@@ -70,6 +70,7 @@ func (c *cli) cmdPrincipal(ctx context.Context, args []string) error {
 		fmt.Fprintf(w, "principal:      %s %s\n", p.Account.Handle, p.Account.DID)
 		fmt.Fprintf(w, "recovery key:   %s\n", p.RecoveryKey)
 		fmt.Fprintf(w, "lounge:         %s\n", p.Lounge)
+		fmt.Fprintf(w, "archive:        %s\n", p.Archive)
 		fmt.Fprintf(w, "stock:          %d\n", max(p.Stock, 4))
 		if err := p.Check(); err != nil {
 			fmt.Fprintf(w, "\n%v\n", err)
@@ -122,6 +123,7 @@ func (c *cli) principalSet(args []string) error {
 	fs := flag.NewFlagSet("principal set", flag.ContinueOnError)
 	recovery := fs.String("recovery-key", "", "a did:key you hold offline, first in every agent's rotation keys")
 	lounge := fs.String("lounge", "", "the lounge agents join")
+	archive := fs.String("archive", "", "the archive agents keep their sessions in")
 	stock := fs.Int("stock", 0, "identities to keep ready")
 	if _, err := parse(fs, args); err != nil {
 		return err
@@ -133,7 +135,7 @@ func (c *cli) principalSet(args []string) error {
 	for _, f := range []struct {
 		dst *string
 		v   string
-	}{{&p.RecoveryKey, *recovery}, {&p.Lounge, *lounge}} {
+	}{{&p.RecoveryKey, *recovery}, {&p.Lounge, *lounge}, {&p.Archive, *archive}} {
 		if f.v != "" {
 			*f.dst = strings.TrimSpace(f.v)
 		}

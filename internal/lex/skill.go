@@ -12,12 +12,6 @@ import (
 const (
 	// SkillCollection holds skills, keyed by name.
 	SkillCollection = "garden.engram.skill"
-	// SessionCollection holds where agents' working sessions stand, keyed
-	// by the harness's session ID.
-	SessionCollection = "garden.engram.session"
-	// SessionChunkCollection holds a transcript chunk per record, for a PDS
-	// where the bytes can't go in blobs. The manifest names them.
-	SessionChunkCollection = "garden.engram.sessionChunk"
 )
 
 // Skill is a garden.engram.skill record: instructions for a kind of work in

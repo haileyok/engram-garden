@@ -61,9 +61,10 @@ export interface Config {
 	/** How long quitting may wait for capturing (switching sessions: at most 8s). */
 	captureExitTimeoutMs: number;
 	/**
-	 * Store the session's transcript (and where the work stands) in the space,
-	 * so it can be resumed on another machine. Pushed as the session goes,
-	 * and once more when it ends.
+	 * Keep the session's transcript (and where the work stands) in the
+	 * principal's archive, as the session's own identity, so it can be
+	 * searched and resumed on another machine. Pushed as the session goes,
+	 * and once more when it ends. Needs an identity and an archive.
 	 */
 	autoSessionSync: boolean;
 	/** At most one push this often while the session is working. */

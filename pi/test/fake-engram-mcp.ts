@@ -57,13 +57,15 @@ let wakeEvents: (() => void) | undefined;
 
 // Sessions, kept the way the real tool keeps them: bytes of a transcript
 // per session, appended to unless the caller says replace.
+// Only an agent with an identity in an archive keeps sessions (FAKE_ARCHIVE
+// stands in for the archive).
 interface StoredSession {
 	session: Record<string, any>;
 	data: string;
-	mode: string;
 }
+const archive = !!process.env.FAKE_ARCHIVE;
 const sessions = new Map<string, StoredSession>(
-	(JSON.parse(process.env.FAKE_SESSIONS ?? "[]") as any[]).map((s) => [s.session.sessionId, { session: s.session, data: s.data ?? "", mode: s.mode ?? "blob" }]),
+	(JSON.parse(process.env.FAKE_SESSIONS ?? "[]") as any[]).map((s) => [s.session.sessionId, { session: s.session, data: s.data ?? "" }]),
 );
 const entriesOf = (data: string) => data.split("\n").filter(Boolean).length;
 
@@ -178,35 +180,26 @@ function tool(name: string, args: any): unknown {
 				sessions: [...sessions.values()].map((s) => ({
 					...s.session,
 					head: { bytes: s.data.length, entries: entriesOf(s.data) },
-					space: "coding-agents",
+					author: "did:plc:a",
 				})),
 			};
 		case "push_session": {
 			const id = args.session.sessionId;
 			const cur = sessions.get(id);
-			if (!args.replace && args.fromBytes !== (cur?.data.length ?? 0))
-				return { session: id, mode: cur?.mode ?? "metadata", bytes: cur?.data.length ?? 0, entries: entriesOf(cur?.data ?? ""), storedBytes: 0, resync: true };
+			if (cur && !args.replace && args.fromBytes !== cur.data.length)
+				return { session: id, bytes: cur.data.length, entries: entriesOf(cur.data), storedBytes: 0, resync: true };
 			const base = args.replace ? "" : (cur?.data ?? "");
-			const data = base + String(args.data ?? "");
 			// A trailing line without its newline is held back, like the real one.
-			const cut = data.lastIndexOf("\n") + 1;
-			const kept = data.slice(0, cut);
-			const entry = { session: { ...args.session }, data: kept, mode: process.env.NO_BLOBS ? "record" : "blob" };
-			sessions.set(id, entry);
-			return {
-				session: id,
-				mode: entry.mode,
-				bytes: kept.length,
-				entries: entriesOf(kept),
-				chunks: 1,
-				storedBytes: kept.length - base.length,
-				...(process.env.NO_BLOBS ? { note: "the transcript is in chunk records, not blobs" } : {}),
-			};
+			const add = String(args.data ?? "");
+			const complete = add.slice(0, add.lastIndexOf("\n") + 1);
+			const kept = base + complete;
+			sessions.set(id, { session: { ...args.session, kind: "session" }, data: kept });
+			return { session: id, bytes: kept.length, entries: entriesOf(kept), chunks: 1, storedBytes: complete.length };
 		}
 		case "pull_session": {
 			const s = sessions.get(args.session);
-			if (!s) throw new Error(`no session ${args.session} in any of your spaces`);
-			return { session: { ...s.session, head: { bytes: s.data.length, entries: entriesOf(s.data) } }, data: s.data, space: "coding-agents" };
+			if (!s) throw new Error(`no session ${args.session} in the archive`);
+			return { ...s.session, head: { bytes: s.data.length, entries: entriesOf(s.data) }, author: "did:plc:a", data: s.data };
 		}
 		case "delete_session":
 			return { deleted: `at://did:plc:a/garden.engram.session/${args.session}` };
@@ -255,7 +248,8 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 				id: msg.id,
 				result: {
 					tools: [
-						"list_spaces", "remember", "recall", "get_memory", "list_memories", "forget", "debug_hang", "list_skills", "get_skill", "save_skill", "debug_skills", "debug_recalls", "list_sessions", "push_session", "pull_session", "delete_session", "debug_sessions",
+						"list_spaces", "remember", "recall", "get_memory", "list_memories", "forget", "debug_hang", "list_skills", "get_skill", "save_skill", "debug_skills", "debug_recalls", "debug_sessions",
+						...(lounge || archive ? ["list_sessions", "push_session", "pull_session", "delete_session"] : []),
 						...(lounge ? ["lounge_status", "list_agents", "send_message", "list_messages", "set_presence", "lounge_events", "debug_lounge", "debug_deliver"] : []),
 					].map((name) => ({
 						name,

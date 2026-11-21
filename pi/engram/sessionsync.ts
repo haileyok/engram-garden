@@ -1,11 +1,12 @@
 // Session sync: a session's transcript, and where the work stands, kept in
-// Engram so the session can be picked up on another machine. The manifest is
-// a garden.engram.session record; the bytes go up in chunks of complete JSONL
-// lines. This side only has to know how much of the file it has stored, and
-// what to say about the work.
+// the principal's archive by the session's own identity, so other agents can
+// search what it did and it can be picked up on another machine. The record
+// is a garden.engram.session; the bytes go up as complete JSONL lines. This
+// side only has to know how much of the file it has stored, and what to say
+// about the work.
 
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 
@@ -15,12 +16,14 @@ export const SESSION_SYNC_ENTRY = "engram-session-sync";
 /** HARness is what this writes in a session record. */
 export const HARNESS = "pi";
 
+/** MAX_PUSH_BYTES is the most one push_session carries. */
+export const MAX_PUSH_BYTES = 8 << 20;
+
 export interface SyncRecord {
-	/** Bytes of the transcript the space reported holding after this sync. */
+	/** Bytes of the transcript the archive reported holding after this sync. */
 	bytes: number;
-	/** Entries the space reported, and how it stored the bytes. */
+	/** Entries the archive reported. */
 	entries?: number;
-	mode?: string;
 	/** When this was written. */
 	at: string;
 	/** Why the last attempt failed, if it did. */
@@ -37,7 +40,7 @@ export interface EntryLike {
 	timestamp?: string;
 }
 
-/** Manifest is the garden.engram.session record this pushes. */
+/** Manifest is the garden.engram.session record this pushes (the archive adds kind and parent from the identity). */
 export interface Manifest {
 	sessionId: string;
 	title: string;
@@ -56,12 +59,12 @@ export interface Manifest {
 
 export interface PushAnswer {
 	session: string;
-	mode: string;
+	uri?: string;
 	bytes: number;
 	entries: number;
+	chunks?: number;
 	storedBytes: number;
 	resync?: boolean;
-	note?: string;
 }
 
 /** syncedBytes is the most of the file any sync entry on the session says was stored. */
@@ -194,20 +197,36 @@ export async function gitInfo(cwd: string): Promise<GitInfo> {
 }
 
 /**
- * readSuffix reads a session file from `from` to the end. A caller that
- * believes more is stored than the file holds gets the whole file and a
- * fromBytes of 0, so the space replaces what it has instead of guessing.
+ * readPiece reads complete lines of a session file from `from`: at most max
+ * bytes, cut after the last newline. more says whether lines beyond the piece
+ * remain. A line longer than max can't be stored, which is an error.
  */
-export function readSuffix(path: string, from: number): { fromBytes: number; data: string; size: number } {
+export function readPiece(path: string, from: number, max = MAX_PUSH_BYTES): { data: string; end: number; more: boolean } {
 	const size = statSync(path).size;
-	const start = from > 0 && from <= size ? from : 0;
-	const buf = readFileSync(path);
-	return { fromBytes: start, data: buf.subarray(start).toString("utf8"), size };
+	const want = Math.max(0, Math.min(size - from, max));
+	const buf = Buffer.alloc(want);
+	const fd = openSync(path, "r");
+	try {
+		let got = 0;
+		while (got < want) {
+			const n = readSync(fd, buf, got, want - got, from + got);
+			if (n <= 0) break;
+			got += n;
+		}
+		const cut = buf.subarray(0, got).lastIndexOf(0x0a) + 1;
+		if (cut === 0 && got === max)
+			throw new Error(`the session has a line longer than ${max} bytes at byte ${from}; it can't be stored`);
+		return { data: buf.subarray(0, cut).toString("utf8"), end: from + cut, more: got === max && from + cut < size };
+	} finally {
+		closeSync(fd);
+	}
 }
 
 /**
- * pushSession stores what the file grew by. When the space holds something
- * else, it asks for a resync and this sends the whole file instead.
+ * pushSession stores what the file grew by, in pieces of at most
+ * MAX_PUSH_BYTES. When the archive holds something else it asks for a resync,
+ * and this sends the whole file instead: replace with the first piece, then
+ * the rest.
  */
 export async function pushSession(opts: {
 	call: <T>(tool: string, args: Record<string, unknown>) => Promise<T>;
@@ -215,34 +234,47 @@ export async function pushSession(opts: {
 	session: Manifest;
 	from: number;
 	now?: Date;
+	max?: number;
 }): Promise<{ record: SyncRecord; answer: PushAnswer }> {
 	const now = opts.now ?? new Date();
-	let { fromBytes, data } = readSuffix(opts.file, opts.from);
-	let answer = await opts.call<PushAnswer>("push_session", {
-		session: { ...opts.session, sessionId: opts.session.sessionId },
-		fromBytes,
-		data,
-	});
-	if (answer.resync) {
-		// The space holds a different transcript: send this whole file, unless
-		// another machine has it further along, in which case replacing it
-		// would throw that machine's work away.
-		const whole = readSuffix(opts.file, 0);
-		if (answer.bytes > whole.size)
-			throw new Error(
-				`another machine has this session further along (${answer.bytes} bytes stored, ${whole.size} here); not replacing it. Pull it there, or start a new session`,
-			);
-		answer = await opts.call<PushAnswer>("push_session", { session: opts.session, fromBytes: 0, replace: true, data: whole.data });
+	const max = opts.max ?? MAX_PUSH_BYTES;
+	let from = opts.from;
+	let replace = false;
+	if (from > statSync(opts.file).size) {
+		// The file is shorter than what was stored from it: start over.
+		from = 0;
+		replace = true;
+	}
+	let answer: PushAnswer;
+	for (let rounds = 0; ; rounds++) {
+		if (rounds > 10_000) throw new Error("pushing the session isn't getting anywhere");
+		const piece = readPiece(opts.file, from, max);
+		answer = await opts.call<PushAnswer>("push_session", {
+			session: opts.session,
+			fromBytes: from,
+			...(replace ? { replace: true } : {}),
+			data: piece.data,
+		});
+		if (answer.resync) {
+			// The archive holds a different transcript: send this whole file,
+			// unless another machine has it further along, in which case
+			// replacing it would throw that machine's work away.
+			const size = statSync(opts.file).size;
+			if (replace || answer.bytes > size)
+				throw new Error(
+					`another machine has this session further along (${answer.bytes} bytes stored, ${size} here); not replacing it. Pull it there, or start a new session`,
+				);
+			from = 0;
+			replace = true;
+			continue;
+		}
+		replace = false;
+		from = answer.bytes;
+		if (!piece.more) break;
 	}
 	return {
 		answer,
-		record: {
-			bytes: answer.bytes,
-			entries: answer.entries,
-			mode: answer.mode,
-			at: now.toISOString(),
-			...(answer.note ? { error: answer.note } : {}),
-		},
+		record: { bytes: answer.bytes, entries: answer.entries, at: now.toISOString() },
 	};
 }
 

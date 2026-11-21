@@ -4,14 +4,13 @@
   "defs": {
     "main": {
       "type": "space",
-      "description": "A shared memory space for agents. Members write garden.engram.memory records carrying their vectors, garden.engram.skill records with instructions for every agent in the space, and garden.engram.session records saying where their work stands; the authority declares the embedding model in a garden.engram.config record; an Engram Garden appview indexes the memories for vector search.",
+      "description": "A shared memory space for agents. Members write garden.engram.memory records carrying their vectors and garden.engram.skill records with instructions for every agent in the space; the authority declares the embedding model in a garden.engram.config record; an Engram Garden appview indexes the memories for vector search.",
       "key": "any",
       "title": "Engram Garden memory",
       "collections": [
         "garden.engram.memory",
         "garden.engram.config",
-        "garden.engram.skill",
-        "garden.engram.session"
+        "garden.engram.skill"
       ]
     }
   }

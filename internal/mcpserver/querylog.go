@@ -83,6 +83,7 @@ type Option func(*options)
 type options struct {
 	queryLog *QueryLog
 	lounge   *agent.Lounge
+	archive  *agent.Archive
 }
 
 // WithQueryLog records every recall in l.

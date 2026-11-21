@@ -25,6 +25,7 @@ import (
 
 	"github.com/haileyok/engram-garden/internal/agent"
 	"github.com/haileyok/engram-garden/internal/oauthfile"
+	"github.com/haileyok/engram-garden/internal/spaceclient"
 )
 
 func main() {
@@ -78,6 +79,12 @@ func main() {
 		},
 		openLounge: func(ctx context.Context, s agent.Settings) (*agent.Lounge, agent.Identity, error) {
 			return agent.OpenLounge(ctx, s, opts)
+		},
+		identityClient: func(ctx context.Context, s agent.Settings) (*spaceclient.Client, agent.Identity, error) {
+			return agent.IdentityClient(ctx, s, opts)
+		},
+		spaceClient: func(sess *atclient.APIClient) (*spaceclient.Client, error) {
+			return spaceclient.New(sess, identity.DefaultDirectory(), opts.HTTP)
 		},
 		verifyAgent: func(ctx context.Context, did string) (map[string]bool, error) {
 			return agent.Principals(ctx, identity.DefaultDirectory(), opts.HTTP, did)

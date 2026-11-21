@@ -27,14 +27,11 @@ import (
 
 // Scopes are what an agent's OAuth sign-in asks for: read the memory spaces
 // it belongs to, and write and delete its own memories, skills and session
-// records in them, and upload the blobs a session transcript's chunks are.
+// records in them.
 var Scopes = []string{
 	"atproto",
 	"space:" + lex.SpaceType + "?authority=*&collection=" + lex.MemoryCollection + "&collection=" + lex.SkillCollection +
-		"&collection=" + lex.SessionCollection + "&collection=" + lex.SessionChunkCollection + "&action=read&action=create&action=update&action=delete",
-	// Session transcripts are stored as blobs, so a resume doesn't drag the
-	// whole transcript through the space's repo and its indexer.
-	"blob:" + lex.SessionBlobMime,
+		"&collection=" + lex.SessionCollection + "&action=read&action=create&action=update&action=delete",
 	// In spaces the account governs: create them, manage their members and
 	// write their model (the web app asks for the same).
 	"space:" + lex.SpaceType + "?collection=" + lex.ConfigCollection + "&action=read&action=create&action=update&manage=create&manage=update",
@@ -218,22 +215,15 @@ func Open(ctx context.Context, s Settings, o Options) (*Spaces, error) {
 	return &Spaces{Client: c, AppviewURL: s.AppviewURL, AppviewDID: s.AppviewDID, Provider: p, Log: o.Log, Settings: s}, nil
 }
 
-// OpenLounge signs in as the agent's own identity (Settings.Identity) and
-// returns its place in the lounge (Settings.Lounge, else the identity's).
-func OpenLounge(ctx context.Context, s Settings, o Options) (*Lounge, Identity, error) {
+// IdentityClient signs in as the agent's own identity (Settings.Identity).
+// The lounge and the archive both act through it.
+func IdentityClient(ctx context.Context, s Settings, o Options) (*spaceclient.Client, Identity, error) {
 	if s.Identity == "" {
 		return nil, Identity{}, errors.New("no agent identity (ENGRAM_IDENTITY)")
 	}
 	id, err := LoadIdentity(s.Identity)
 	if err != nil {
 		return nil, id, err
-	}
-	loungeURI := s.Lounge
-	if loungeURI == "" {
-		loungeURI = id.Lounge
-	}
-	if loungeURI == "" {
-		return nil, id, fmt.Errorf("the identity %s has no lounge (ENGRAM_LOUNGE)", id.DID)
 	}
 	ls := Settings{Account: id.Account()}
 	sess, err := ls.Session(ctx, o)
@@ -244,11 +234,52 @@ func OpenLounge(ctx context.Context, s Settings, o Options) (*Lounge, Identity, 
 	if err != nil {
 		return nil, id, err
 	}
+	return c, id, nil
+}
+
+// OpenLounge signs in as the agent's own identity (Settings.Identity) and
+// returns its place in the lounge (Settings.Lounge, else the identity's).
+func OpenLounge(ctx context.Context, s Settings, o Options) (*Lounge, Identity, error) {
+	c, id, err := IdentityClient(ctx, s, o)
+	if err != nil {
+		return nil, id, err
+	}
+	l, err := NewLounge(c, id, s, o)
+	return l, id, err
+}
+
+// NewLounge is the identity's place in the lounge (Settings.Lounge, else the
+// identity's), acting through c.
+func NewLounge(c *spaceclient.Client, id Identity, s Settings, o Options) (*Lounge, error) {
+	loungeURI := s.Lounge
+	if loungeURI == "" {
+		loungeURI = id.Lounge
+	}
+	if loungeURI == "" {
+		return nil, fmt.Errorf("the identity %s has no lounge (ENGRAM_LOUNGE)", id.DID)
+	}
 	dir, httpc := o.dir(), o.HTTP
 	verify := func(ctx context.Context, did string) (map[string]bool, error) {
 		return Principals(ctx, dir, httpc, did)
 	}
-	return &Lounge{Client: c, Space: loungeURI, AppviewURL: s.AppviewURL, AppviewDID: s.AppviewDID, Log: o.Log, Principal: id.Principal, Verify: verify}, id, nil
+	return &Lounge{Client: c, Space: loungeURI, AppviewURL: s.AppviewURL, AppviewDID: s.AppviewDID, Log: o.Log, Principal: id.Principal, Verify: verify}, nil
+}
+
+// NewArchive is where the identity keeps its sessions (Settings.Archive,
+// else the identity's), acting through c.
+func NewArchive(c *spaceclient.Client, id Identity, s Settings) (*Archive, error) {
+	uri := s.Archive
+	if uri == "" {
+		uri = id.Archive
+	}
+	if uri == "" {
+		return nil, fmt.Errorf("the identity %s has no archive (ENGRAM_ARCHIVE)", id.DID)
+	}
+	a := &Archive{Client: c, Space: uri, Identity: id, AppviewURL: s.AppviewURL, AppviewDID: s.AppviewDID}
+	if _, err := a.ref(); err != nil {
+		return nil, err
+	}
+	return a, nil
 }
 
 // ErrSignInExpired means the account's server no longer accepts the

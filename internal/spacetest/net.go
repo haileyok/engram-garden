@@ -102,10 +102,9 @@ type Net struct {
 	// Created records each agent account created (createAgent), in order.
 	Created []CreateAccount
 
-	// Permission knobs, standing in for a sign-in that predates a scope.
-	NoBlobs          bool   // refuse com.atproto.repo.uploadBlob
-	NoChunkRecords   bool   // refuse writes to garden.engram.sessionChunk
-	RefuseCollection string // refuse writes to this collection
+	// CorruptBlobs serves space blobs with a byte changed, as a host that
+	// damaged or swapped them would.
+	CorruptBlobs bool
 }
 
 // CreateAccount is an account the network created for an agent.
@@ -814,10 +813,6 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		if body.Space != n.Space || body.Repo != a.DID {
 			return nil, &xerr{400, "InvalidRequest", "can only write your own repo in the test space"}
 		}
-		if n.NoChunkRecords && body.Collection == "garden.engram.sessionChunk" ||
-			n.RefuseCollection != "" && body.Collection == n.RefuseCollection {
-			return nil, &xerr{403, "InsufficientScope", "Missing required scope for collection " + body.Collection}
-		}
 		if nsid == "com.atproto.space.deleteRecord" {
 			n.mu.Lock()
 			_, ok := a.records[space.FormatRecordPath(body.Collection, body.Rkey)]
@@ -846,10 +841,7 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		return map[string]any{"uri": uri, "cid": c, "validationStatus": "unknown"}, nil
 
 	case "com.atproto.repo.uploadBlob":
-		if n.NoBlobs {
-			return nil, &xerr{403, "InsufficientScope", "Missing required scope: blob:application/octet-stream"}
-		}
-		a := n.account(r.Header.Get("X-Test-Did"))
+		a := n.account(n.callerDID(r))
 		if a == nil {
 			return nil, &xerr{401, "AuthRequired", "no session"}
 		}
@@ -893,6 +885,10 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		if data == nil {
 			// Unreferenced blobs are invisible, as on a real PDS.
 			return nil, &xerr{400, "BlobNotFound", "blob not found"}
+		}
+		if n.CorruptBlobs && len(data) > 0 {
+			data = append([]byte(nil), data...)
+			data[0] ^= 0x20
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		if _, err := w.Write(data); err != nil {
