@@ -75,7 +75,10 @@ server the model has to remember to use.
   session ends; the entry `engram-session-sync` records how far the file is
   stored. `/engram sessions` lists the archive, and `/engram pull <id>`
   writes a stored transcript into pi's sessions directory where `/resume`
-  finds it.
+  finds it. The model gets `search_sessions` (every session's transcript,
+  as redacted passages: errors and their fixes, commands, files, prompts and
+  answers) and `read_session` (the transcript around a passage), shown as
+  quoted evidence rather than instructions.
 - **`/engram`** shows the state (`status`), the spaces (`spaces`), searches
   (`recall <query>`), captures now (`capture`), lets you read and forget
   what was captured (`review`), lists the skills (`skills`, or

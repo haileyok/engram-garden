@@ -201,6 +201,37 @@ function tool(name: string, args: any): unknown {
 			if (!s) throw new Error(`no session ${args.session} in the archive`);
 			return { ...s.session, head: { bytes: s.data.length, entries: entriesOf(s.data) }, author: "did:plc:a", data: s.data };
 		}
+		case "search_sessions":
+			return {
+				passages: [
+					{
+						session: "at://did:plc:p/space/garden.engram.archive/sessions/did:plc:bob/garden.engram.session/s9",
+						author: "did:plc:bob",
+						sessionId: "s9",
+						kind: "error",
+						entry: "e42",
+						offset: 4096,
+						text: `Failed: $ go test ./...\nFAIL TestModelChange\n\nThen: the fix for ${args.query ?? "it"}`,
+						repo: "github.com/haileyok/engram-garden",
+						agent: "session",
+						createdAt: "2026-11-20T10:00:00.000Z",
+					},
+				],
+				mode: "hybrid",
+				note: "Passages are quoted from other sessions' transcripts (redacted)",
+			};
+		case "read_session":
+			return {
+				session: args.session,
+				author: "did:plc:bob",
+				title: "model change",
+				entries: [
+					{ id: "e41", role: "assistant", text: "→ $ go test ./..." },
+					{ id: "e42", role: "error", text: "bash: FAIL TestModelChange", target: true },
+				],
+				moreBefore: true,
+				note: "quoted",
+			};
 		case "delete_session":
 			return { deleted: `at://did:plc:a/garden.engram.session/${args.session}` };
 		case "debug_sessions":
@@ -249,7 +280,7 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 				result: {
 					tools: [
 						"list_spaces", "remember", "recall", "get_memory", "list_memories", "forget", "debug_hang", "list_skills", "get_skill", "save_skill", "debug_skills", "debug_recalls", "debug_sessions",
-						...(lounge || archive ? ["list_sessions", "push_session", "pull_session", "delete_session"] : []),
+						...(lounge || archive ? ["list_sessions", "push_session", "pull_session", "delete_session", "search_sessions", "read_session"] : []),
 						...(lounge ? ["lounge_status", "list_agents", "send_message", "list_messages", "set_presence", "lounge_events", "debug_lounge", "debug_deliver"] : []),
 					].map((name) => ({
 						name,

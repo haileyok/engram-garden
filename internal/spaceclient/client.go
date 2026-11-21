@@ -21,6 +21,7 @@ import (
 	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 	"github.com/haileyok/cocoon/space"
+	"github.com/ipfs/go-cid"
 )
 
 // renewBefore is how long before expiry a cached credential is replaced.
@@ -344,6 +345,43 @@ func (c *Client) Procedure(ctx context.Context, host, spaceURI, audience, nsid s
 	return c.withCredential(ctx, spaceURI, func(h map[string]string) error {
 		return c.do(ctx, http.MethodPost, host, nsid, nil, body, h, out)
 	}, audience)
+}
+
+// MaxBlobBytes is the most FetchBlob reads.
+const MaxBlobBytes = 8 << 20
+
+// FetchBlob reads a blob a space record names, from its author's PDS, and
+// checks its bytes against its CID: the record names the CID, so what comes
+// back is what the record's author stored.
+func (c *Client) FetchBlob(ctx context.Context, spaceURI, author, link string) ([]byte, error) {
+	want, err := cid.Decode(link)
+	if err != nil {
+		return nil, fmt.Errorf("blob %q: %w", link, err)
+	}
+	host, err := c.PDSHost(ctx, author)
+	if err != nil {
+		return nil, err
+	}
+	body, err := c.QueryRaw(ctx, host, spaceURI, author, "com.atproto.space.getBlob", url.Values{"space": {spaceURI}, "repo": {author}, "cid": {link}})
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	b, err := io.ReadAll(io.LimitReader(body, MaxBlobBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > MaxBlobBytes {
+		return nil, fmt.Errorf("blob %s is larger than %d bytes", link, MaxBlobBytes)
+	}
+	got, err := want.Prefix().Sum(b)
+	if err != nil {
+		return nil, err
+	}
+	if !got.Equals(want) {
+		return nil, fmt.Errorf("blob %s doesn't match its CID: what was served isn't what was stored", link)
+	}
+	return b, nil
 }
 
 // QueryRaw makes a credentialed GET and returns the response body, for

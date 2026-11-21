@@ -603,3 +603,28 @@ func GrantLink(ctx context.Context, appviewURL string, httpc *http.Client, space
 	}
 	return out.GrantURL + "?space=" + url.QueryEscape(spaceURI) + "&mode=" + mode, nil
 }
+
+// DeclareArchiveModel writes the archive's garden.engram.config: the model
+// the appview embeds its passages with. Changing it later re-embeds every
+// passage.
+func DeclareArchiveModel(ctx context.Context, principal *atclient.APIClient, archive string, m lex.ModelInfo) (lex.Config, error) {
+	ref, err := space.ParseRef(archive)
+	if err != nil {
+		return lex.Config{}, err
+	}
+	if ref.Type != lex.ArchiveType {
+		return lex.Config{}, fmt.Errorf("%s isn't an archive", archive)
+	}
+	cfg, err := lex.ChangeConfig(nil, lex.Declare, m, "", "")
+	if err != nil {
+		return cfg, err
+	}
+	body := map[string]any{
+		"space": archive, "repo": ref.Authority, "collection": lex.ConfigCollection, "rkey": lex.ConfigRkey,
+		"record": cfg.Record(time.Now()),
+	}
+	if err := principal.Post(ctx, "com.atproto.space.putRecord", body, nil); err != nil {
+		return cfg, manageErr("declaring the archive's model", err)
+	}
+	return cfg, nil
+}

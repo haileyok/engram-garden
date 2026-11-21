@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/bluesky-social/indigo/atproto/atclient"
+
 	"github.com/haileyok/engram-garden/internal/agent"
 )
 
@@ -18,10 +20,12 @@ import (
 // the session's own identity. The principal governs it and reads all of it.
 // See docs/design/sessions.md.
 
-const archiveUsage = `engram archive create <name>     make an archive (agents keep their sessions there) and make it the agents' archive
-engram archive index [--stop]   let the appview index it (approve in the browser)`
+const archiveUsage = `engram archive create <name> [--model m]   make an archive (agents keep their sessions there), the agents' archive
+engram archive model <model>               declare the model the appview embeds passages with
+engram archive index [--stop]              let the appview index it (approve in the browser)`
 
-const sessionUsage = `engram sessions list [--author did]                 the sessions in the archive
+const sessionUsage = `engram sessions search <query> [--kind k] [--repo r] [--file f] [--cmd c] [--author did] [--limit n]
+engram sessions list [--author did]                 the sessions in the archive
 engram sessions pull <id|uri> [--author did] [--to file]   one transcript, as complete JSONL lines
 engram sessions rm <id|uri> [--author did]          delete a session (with its agent's identity file)`
 
@@ -31,12 +35,15 @@ func (c *cli) cmdArchive(ctx context.Context, args []string) error {
 	}
 	switch args[0] {
 	case "create":
-		pos, err := parse(flag.NewFlagSet("archive create", flag.ContinueOnError), args[1:])
+		fs := flag.NewFlagSet("archive create", flag.ContinueOnError)
+		model := fs.String("model", "", "declare this embedding model (an Ollama model name, e.g. nomic-embed-text)")
+		dims := fs.Int("dims", 0, "vector size; only for the offline hashing provider")
+		pos, err := parse(fs, args[1:])
 		if err != nil {
 			return err
 		}
 		if len(pos) != 1 {
-			return usageError{errors.New("usage: engram archive create <name>")}
+			return usageError{errors.New("usage: engram archive create <name> [--model m]")}
 		}
 		p, err := c.principal()
 		if err != nil {
@@ -57,8 +64,44 @@ func (c *cli) cmdArchive(ctx context.Context, args []string) error {
 		if err := p.Save(c.principalPath); err != nil {
 			return err
 		}
+		next := "Next: engram archive model <model>, then engram archive index (let the appview index it)."
+		if *model != "" {
+			if err := c.declareArchiveModel(ctx, sess, uri, *model, *dims); err != nil {
+				next = fmt.Sprintf("Declaring its model failed (%v): engram archive model <model>, then engram archive index.", err)
+			} else {
+				next = "Next: engram archive index (let the appview index it)."
+			}
+		}
 		c.print(map[string]any{"archive": uri}, func(w io.Writer) {
-			fmt.Fprintf(w, "Created the archive %s; new agents keep their sessions there.\nNext: engram archive index (let the appview index it).\n", uri)
+			fmt.Fprintf(w, "Created the archive %s; new agents keep their sessions there.\n%s\n", uri, next)
+		})
+		return nil
+	case "model":
+		fs := flag.NewFlagSet("archive model", flag.ContinueOnError)
+		dims := fs.Int("dims", 0, "vector size; only for the offline hashing provider")
+		pos, err := parse(fs, args[1:])
+		if err != nil {
+			return err
+		}
+		if len(pos) != 1 {
+			return usageError{errors.New("usage: engram archive model <model>")}
+		}
+		p, err := c.principal()
+		if err != nil {
+			return err
+		}
+		if err := p.CheckArchive(); err != nil {
+			return err
+		}
+		sess, err := c.principalSession(ctx, p)
+		if err != nil {
+			return fmt.Errorf("signing in as the principal: %w", err)
+		}
+		if err := c.declareArchiveModel(ctx, sess, p.Archive, pos[0], *dims); err != nil {
+			return err
+		}
+		c.print(map[string]any{"archive": p.Archive, "model": pos[0]}, func(w io.Writer) {
+			fmt.Fprintf(w, "The archive's passages are embedded with %s.\n", pos[0])
 		})
 		return nil
 	case "index":
@@ -97,12 +140,27 @@ func (c *cli) cmdArchive(ctx context.Context, args []string) error {
 	return usageError{fmt.Errorf("unknown archive command %q:\n%s", args[0], archiveUsage)}
 }
 
+func (c *cli) declareArchiveModel(ctx context.Context, sess *atclient.APIClient, archive, model string, dims int) error {
+	s, err := c.settings()
+	if err != nil {
+		return err
+	}
+	m, err := s.DescribeModel(ctx, model, dims)
+	if err != nil {
+		return err
+	}
+	_, err = agent.DeclareArchiveModel(ctx, sess, archive, m)
+	return err
+}
+
 // cmdSessions reads the archive as the principal, who governs it.
 func (c *cli) cmdSessions(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return usageError{errors.New(sessionUsage)}
 	}
 	switch args[0] {
+	case "search", "find":
+		return c.cmdSessionsSearch(ctx, args[1:])
 	case "list", "ls":
 		return c.cmdSessionsList(ctx, args[1:])
 	case "pull", "get", "show":
@@ -131,6 +189,48 @@ func (c *cli) archiveReader(ctx context.Context) (*agent.Archive, error) {
 		return nil, err
 	}
 	return &agent.Archive{Client: sc, Space: p.Archive}, nil
+}
+
+func (c *cli) cmdSessionsSearch(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("sessions search", flag.ContinueOnError)
+	var in agent.SearchSessionsIn
+	fs.StringVar(&in.Kind, "kind", "", "turn, step, error, summary or session")
+	fs.StringVar(&in.Repo, "repo", "", "only this repository")
+	fs.StringVar(&in.File, "file", "", "only passages that touched this path")
+	fs.StringVar(&in.Command, "cmd", "", "only passages that ran this program")
+	fs.StringVar(&in.Author, "author", "", "only this agent's sessions (a DID)")
+	fs.StringVar(&in.Mode, "mode", "", "hybrid, vector or keyword")
+	fs.IntVar(&in.Limit, "limit", 10, "at most this many")
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	in.Query = strings.Join(pos, " ")
+	a, err := c.archiveReader(ctx)
+	if err != nil {
+		return err
+	}
+	s, err := c.settings()
+	if err != nil {
+		return err
+	}
+	a.AppviewURL, a.AppviewDID = s.AppviewURL, s.AppviewDID
+	out, err := a.SearchSessions(ctx, in)
+	if err != nil {
+		return err
+	}
+	c.print(out, func(w io.Writer) {
+		if len(out.Passages) == 0 {
+			fmt.Fprintln(w, "No passages matched.")
+		}
+		for i, p := range out.Passages {
+			fmt.Fprintf(w, "[%d] %s · %s · %s %s\n    %s#%s\n", i+1, p.Kind, p.CreatedAt, p.Author, p.Repo, p.Session, p.Entry)
+			for line := range strings.SplitSeq(p.Text, "\n") {
+				fmt.Fprintf(w, "    %s\n", line)
+			}
+		}
+	})
+	return nil
 }
 
 func (c *cli) cmdSessionsList(ctx context.Context, args []string) error {

@@ -167,8 +167,10 @@ Skills (instructions every agent in a space shares; --space picks one):
 
 %s
 Sessions (agents keep their transcripts in the principal's archive; read as the principal):
-  engram archive create <name>               make the archive agents keep their sessions in
+  engram archive create <name> [--model m]   make the archive agents keep their sessions in
+  engram archive model <model>               declare the model the appview embeds passages with
   engram archive index [--stop]              let the appview index it (approve in the browser)
+  engram sessions search <query> [--kind k --repo r --file f --cmd c]   search every session's transcript
   engram sessions list [--author did]        the sessions in the archive
   engram sessions pull <id|uri> [--to file]  one transcript, as complete JSONL lines
   engram sessions rm <id|uri>                delete a session (needs its agent's identity file)

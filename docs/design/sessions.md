@@ -1,6 +1,6 @@
 # Sessions
 
-Status: in progress. Every agent session, and every subagent, keeps its
+Status: implemented, except subagents (below). Every agent session, and every subagent, keeps its
 transcript in an archive space, written by the session's own identity. The
 appview indexes the transcripts so agents can search what earlier sessions
 did, and a session can be resumed on another machine.
@@ -112,43 +112,95 @@ of repos and makes the index a projection: changing how transcripts are cut,
 or what's redacted, means rebuilding it, not rewriting anyone's repo.
 `transcript.Version` is bumped when the output for the same input changes.
 
-The appview syncs archives like memory spaces (verified repo reads), reads
-each session record, fetches the chunks it hasn't indexed, checks them
-against their CIDs, and cuts them into **passages**:
+The appview syncs archives like memory spaces (verified repo reads, the
+same `indexer.Indexer`), with `internal/sessionindex` in place of reading
+memories out of records. For each changed session record it fetches the
+chunks it hasn't read, checks them against their CIDs, and cuts them into
+**passages** (`internal/transcript`):
 
 | passage | text | why |
 |---|---|---|
 | `turn` | the user's prompt and the final reply | "how did we do X" |
-| `step` | assistant text between tool calls, with one line per tool call after it (`bash: …`, `edit path`) | decisions, and what was run |
+| `step` | assistant text between tool calls, with one line per tool call after it (`$ …`, `edit path`, `read path`) | decisions, and what was run |
 | `error` | a failed tool call: the call, the start and end of its output, and the assistant text after it (the fix) | "have we seen this error" |
-| `summary` | compaction summaries, and the record's title and summary | the condensed story |
+| `summary` | a compaction summary | the condensed story |
+| `session` | the record's title, summary, repo, branch and directory | finding a session |
 
 Left out: thinking (10× the assistant text; revisit with `engram-eval`),
 successful tool output (mostly file contents git already has, and the riskiest
 for secrets and prompt injection), `custom_message` entries (injected
 memories and lounge messages: indexing them would echo memories back),
-images, and Engram's own tool calls.
+system messages, images, and Engram's own tool calls.
 
-Each passage carries facets: the session's DID, parent, kind, repo, branch,
-cwd, machine, model, time, and the files and commands it touched.
+Over 106 real sessions (1.1 GB of transcript) that's about 33,000 passages
+and 13 MB of text: 30,000 steps (8 MB), 1,600 errors (1.8 MB), 1,200 turns
+(2.4 MB) and 45 summaries.
 
-**Redaction** runs on passage text before embedding: known token formats
-(GitHub, Slack, AWS, OpenAI-style keys, JWTs, PEM blocks, URLs with
-credentials, `KEY=value` assignments of secret-looking names) and long
-high-entropy strings become `[redacted:<kind>]`.
+Each passage is an index entry in the archive's `spacestore` space: author
+the session's DID, key `<session>:<kind>:<entry>`, text redacted, source
+`<session record URI>#<entry>@<byte offset>`, and tags for filtering:
+`session:`, `kind:`, `agent:` (session or subagent), `parent:`, `repo:`
+(normalized to host/owner/name), `branch:`, `file:` and `cmd:` (the programs
+a shell call ran, `go test`, `git status`). It's embedded with the archive's
+declared model (the authority's `garden.engram.config`, `engram archive
+model`), by the appview's provider (`ENGRAM_EMBED_*`; `ENGRAM_ARCHIVES=false`
+turns archives off).
+
+**Progress rides in the sync position.** `spacestore.RepoPosition.State`
+holds, per session: how many chunks were wholly read and a digest of their
+CIDs, and the cutter's state (bytes read, the open turn, failed calls
+waiting for what came next). It's published with the passages, so the two
+always agree, and the cutter reads each line once:
+
+- An append reads only the last chunk (it grew) and any new ones.
+- A rewritten transcript (the chunks read aren't the record's first ones any
+  more) has its passages deleted and is cut again.
+- Passages are stored a batch at a time (`BatchBytes`, 4 MiB of transcript);
+  every batch but the last keeps the repo at its previous position with the
+  progress in its state, so a sync cut short (the appview's five-minute
+  limit, a restart) carries on where it stopped, even through a full
+  re-export.
+- The state records the passage format (`transcript.Version`) and the model
+  keys: when either changes, the repo is read in full and cut and embedded
+  again. A space sync re-reads such repos even without new writes.
+- A deleted session record deletes its passages.
+
+**Redaction** (`internal/redact`) runs on passage text before it's embedded
+or stored, and on what `read_session` shows: known token formats (GitHub,
+Slack, AWS, OpenAI- and Anthropic-style keys, JWTs, PEM private keys),
+credentials in URLs, bearer tokens, values assigned to secret-looking names
+(the name stays; numbers, booleans and references like `${DB_PASSWORD}`
+aren't secrets), and long random-looking strings. Hashes, CIDs, DIDs,
+UUIDs and identifiers made of words are kept, since they're what people
+search for. Checked against the real sessions above: it caught real tokens,
+DSN passwords and signatures; the rules were narrowed until `maxTokens:
+32000`, Go test names and generated type names stopped matching.
 
 ## Tools
 
-- `search_sessions`: passages matching a query, hybrid (keyword and vector),
-  filtered by repo, DID, kind, time. Each hit names its session
-  (`at://<did>/…/garden.engram.session/<id>`) and entry.
-- `read_session`: a window of a session's transcript around an entry,
-  rendered as text, so an agent reads context without pulling the file.
+- `search_sessions` (`garden.engram.searchSessions` at the appview): passages
+  matching a query, hybrid (keyword and vector, the appview embedding the
+  query), or the newest matching the filters without one. Filters: kind,
+  author, session, repo, branch, file, command, agent (session or subagent),
+  parent, since, until. Each hit names its session record and entry.
+- `read_session`: a window of a session's transcript around an entry (by
+  its byte offset, which reads one chunk, else by looking for the entry),
+  rendered and redacted, the target marked. Read by the agent from the
+  author's PDS, checked against CIDs.
 - `list_sessions`, `pull_session`: the records, and a whole transcript to
-  resume.
+  resume. `list_sessions` reads every member's repo, which gets slow as the
+  archive grows; it should move to the appview.
+- `push_session`, `delete_session`: the harness's, never shown to the model.
 
-Hits are quoted transcript, not instructions: tools mark them as such.
-Passages are not part of the automatic recall before each prompt.
+pi gives the model `search_sessions` and `read_session` as its own tools
+(not through codemode). Hits are quoted transcript, not instructions: every
+answer says so. Passages are not part of the automatic recall before each
+prompt.
+
+From a shell, as the principal: `engram archive create <name> [--model m]`,
+`engram archive model <m>`, `engram archive index`, `engram sessions search
+<query> [--kind --repo --file --cmd --author]`, `engram sessions list`,
+`pull`, `rm`.
 
 ## Subagents
 
@@ -159,6 +211,10 @@ subagent` and its parent's DID.
 
 ## Not done
 
+- Subagents (above).
 - No backfill of sessions from before identities.
+- `list_sessions` from the appview's index instead of every member's repo.
+- Tuning with `engram-eval`: whether steps of tool calls alone are worth a
+  vector each (they're 90% of passages), and thinking.
 - Kept until deleted by hand. Deleting a record needs the identity's
   password, so claimed identity files are kept.

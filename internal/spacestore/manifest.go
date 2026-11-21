@@ -60,6 +60,10 @@ type RepoPosition struct {
 	SetHash []byte `json:"setHash"`
 	// SpaceRev is the authority's rev for the repo's latest known write.
 	SpaceRev string `json:"spaceRev"`
+	// State is what an indexer that derives entries from the repo's
+	// records (an archive's, from transcripts) needs to carry on where it
+	// stopped. It's published with the position, so the two always agree.
+	State json.RawMessage `json:"state,omitempty"`
 }
 
 // Manifest is a space's root: its state is exactly what its newest

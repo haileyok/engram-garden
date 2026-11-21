@@ -42,8 +42,8 @@ func alice(t *testing.T, n *spacetest.Net) *Archive {
 	return archiveAs(t, n, "did:plc:alice", Identity{DID: "did:plc:alice", Kind: "session"})
 }
 
-// transcript is lines from..to-1, shaped like a harness's session file.
-func transcript(from, to int) string {
+// jsonl is lines from..to-1, shaped like a harness's session file.
+func jsonl(from, to int) string {
 	var b strings.Builder
 	for i := from; i < to; i++ {
 		fmt.Fprintf(&b, `{"type":"message","id":"e%05d","message":{"role":"user","content":"line %d"}}`+"\n", i, i)
@@ -57,7 +57,7 @@ func TestArchivePushAndPull(t *testing.T) {
 	n := archiveNet(t)
 	a := alice(t, n)
 
-	data := transcript(0, 20)
+	data := jsonl(0, 20)
 	out, err := a.PushSession(ctx, PushSessionIn{
 		Session: lex.Session{SessionID: sid, Title: "template tenancy audit", Summary: "Audit the handlers.", Status: "active", Cwd: "/root/worktrees/attie", Machine: "dev-box", Harness: "pi", GitHead: "cbb578c", Kind: "subagent", Parent: "did:plc:mallory"},
 		Data:    data,
@@ -114,7 +114,7 @@ func TestArchiveAppendGrowsTheLastChunk(t *testing.T) {
 	var stored strings.Builder
 	var first string
 	for i := range 5 {
-		piece := transcript(i*10, i*10+10)
+		piece := jsonl(i*10, i*10+10)
 		out, err := a.PushSession(ctx, PushSessionIn{Session: meta, FromBytes: int64(stored.Len()), Data: piece})
 		if err != nil {
 			t.Fatal(err)
@@ -138,7 +138,7 @@ func TestArchiveAppendGrowsTheLastChunk(t *testing.T) {
 
 	// A fresh process (no tail in memory) reads the tail back and goes on.
 	again := alice(t, n)
-	piece := transcript(50, 60)
+	piece := jsonl(50, 60)
 	if _, err := again.PushSession(ctx, PushSessionIn{Session: meta, FromBytes: int64(stored.Len()), Data: piece}); err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestArchiveChunksRollOver(t *testing.T) {
 	for stored.Len() < 7_500_000 {
 		var b strings.Builder
 		for b.Len() < 2_000_000 {
-			b.WriteString(transcript(line, line+1))
+			b.WriteString(jsonl(line, line+1))
 			line++
 		}
 		out, err := a.PushSession(ctx, PushSessionIn{Session: meta, FromBytes: int64(stored.Len()), Data: b.String()})
@@ -203,23 +203,23 @@ func TestArchiveResyncAndPartialLines(t *testing.T) {
 	meta := lex.Session{SessionID: sid, Title: "t"}
 
 	// A trailing line without its newline waits.
-	data := transcript(0, 3) + `{"type":"message","id":"e00003"`
+	data := jsonl(0, 3) + `{"type":"message","id":"e00003"`
 	out, err := a.PushSession(ctx, PushSessionIn{Session: meta, Data: data})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Bytes != int64(len(transcript(0, 3))) || out.Stored != out.Bytes || out.Entries != 3 {
+	if out.Bytes != int64(len(jsonl(0, 3))) || out.Stored != out.Bytes || out.Entries != 3 {
 		t.Fatalf("partial: %+v", out)
 	}
 
 	// Pushing from the wrong place writes nothing and says how much is stored.
-	out, err = a.PushSession(ctx, PushSessionIn{Session: meta, FromBytes: 5, Data: transcript(3, 4)})
-	if err != nil || !out.Resync || out.Bytes != int64(len(transcript(0, 3))) {
+	out, err = a.PushSession(ctx, PushSessionIn{Session: meta, FromBytes: 5, Data: jsonl(3, 4)})
+	if err != nil || !out.Resync || out.Bytes != int64(len(jsonl(0, 3))) {
 		t.Fatalf("resync: %+v %v", out, err)
 	}
 
 	// Replace starts the transcript over.
-	whole := transcript(100, 104)
+	whole := jsonl(100, 104)
 	out, err = a.PushSession(ctx, PushSessionIn{Session: meta, Replace: true, Data: whole})
 	if err != nil || out.Bytes != int64(len(whole)) || out.Chunks != 1 {
 		t.Fatalf("replace: %+v %v", out, err)
@@ -247,7 +247,7 @@ func TestArchiveConcurrentPushesKeepEveryLine(t *testing.T) {
 	n := archiveNet(t)
 	a := alice(t, n)
 	meta := lex.Session{SessionID: sid, Title: "t"}
-	base := transcript(0, 5)
+	base := jsonl(0, 5)
 	if _, err := a.PushSession(ctx, PushSessionIn{Session: meta, Data: base}); err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestArchiveConcurrentPushesKeepEveryLine(t *testing.T) {
 	outs := make([]PushSessionOut, 2)
 	for i := range 2 {
 		wg.Go(func() {
-			out, err := a.PushSession(ctx, PushSessionIn{Session: meta, FromBytes: int64(len(base)), Data: transcript(5+i*10, 15+i*10)})
+			out, err := a.PushSession(ctx, PushSessionIn{Session: meta, FromBytes: int64(len(base)), Data: jsonl(5+i*10, 15+i*10)})
 			if err != nil {
 				t.Error(err)
 			}
@@ -278,7 +278,7 @@ func TestArchiveChecksBlobsAgainstTheirCID(t *testing.T) {
 	ctx := context.Background()
 	n := archiveNet(t)
 	a := alice(t, n)
-	if _, err := a.PushSession(ctx, PushSessionIn{Session: lex.Session{SessionID: sid, Title: "t"}, Data: transcript(0, 3)}); err != nil {
+	if _, err := a.PushSession(ctx, PushSessionIn{Session: lex.Session{SessionID: sid, Title: "t"}, Data: jsonl(0, 3)}); err != nil {
 		t.Fatal(err)
 	}
 	n.CorruptBlobs = true
@@ -288,7 +288,7 @@ func TestArchiveChecksBlobsAgainstTheirCID(t *testing.T) {
 	}
 	// Growing a damaged tail fails too, rather than storing it again.
 	again := alice(t, n)
-	if _, err := again.PushSession(ctx, PushSessionIn{Session: lex.Session{SessionID: sid, Title: "t"}, FromBytes: int64(len(transcript(0, 3))), Data: transcript(3, 4)}); err == nil {
+	if _, err := again.PushSession(ctx, PushSessionIn{Session: lex.Session{SessionID: sid, Title: "t"}, FromBytes: int64(len(jsonl(0, 3))), Data: jsonl(3, 4)}); err == nil {
 		t.Fatal("pushed onto a damaged tail")
 	}
 }
@@ -298,7 +298,7 @@ func TestArchiveDelete(t *testing.T) {
 	ctx := context.Background()
 	n := archiveNet(t)
 	a := alice(t, n)
-	out, err := a.PushSession(ctx, PushSessionIn{Session: lex.Session{SessionID: sid, Title: "t"}, Data: transcript(0, 3)})
+	out, err := a.PushSession(ctx, PushSessionIn{Session: lex.Session{SessionID: sid, Title: "t"}, Data: jsonl(0, 3)})
 	if err != nil {
 		t.Fatal(err)
 	}

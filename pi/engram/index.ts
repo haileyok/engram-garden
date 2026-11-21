@@ -89,6 +89,7 @@ import {
 	ungrounded,
 } from "./judge.ts";
 import { LOUNGE_TOOLS, lounge } from "./lounge.ts";
+import { registerSessionTools, SESSION_TOOLS } from "./sessiontools.ts";
 import { errorText, McpServer } from "./mcp.ts";
 import {
 	cachedSkills,
@@ -109,7 +110,7 @@ const run = promisify(execFile);
 /** Tools this extension wraps itself; engram-mcp's others pass through. */
 // push_session and delete_session are the harness's: the model never stores
 // or deletes its own transcript.
-const WRAPPED = new Set(["remember", "recall", "get_memory", "list_memories", "forget", "save_skill", "push_session", "delete_session", ...LOUNGE_TOOLS]);
+const WRAPPED = new Set(["remember", "recall", "get_memory", "list_memories", "forget", "save_skill", "push_session", "delete_session", ...SESSION_TOOLS, ...LOUNGE_TOOLS]);
 const CHUNK_CHARS = 80_000;
 
 interface RecallDetails {
@@ -188,6 +189,7 @@ export default function engram(pi: ExtensionAPI) {
 	let lastPushAt = 0;
 	// Whether engram-mcp keeps sessions: only with an identity in an archive.
 	let archived = false;
+	let sessionToolsRegistered = false;
 
 	const need = (): McpServer => {
 		if (!server) throw new Error("Engram isn't running in this session");
@@ -247,6 +249,10 @@ export default function engram(pi: ExtensionAPI) {
 	async function registerOtherTools(ctx?: ExtensionContext) {
 		const tools = await need().listTools();
 		archived = tools.some((t) => t.name === "push_session");
+		if (tools.some((t) => t.name === "search_sessions") && !sessionToolsRegistered) {
+			sessionToolsRegistered = true;
+			registerSessionTools(pi, () => server);
+		}
 		if (ctx) void room.onStarted(ctx, tools);
 		for (const t of tools) {
 			if (WRAPPED.has(t.name) || passedThrough.has(t.name)) continue;

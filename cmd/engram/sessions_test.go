@@ -34,7 +34,7 @@ func TestArchiveCommands(t *testing.T) {
 		var out, errOut bytes.Buffer
 		c := &cli{
 			in: strings.NewReader(""), out: &out, err: &errOut,
-			getenv:        func(string) string { return "" },
+			getenv:        func(k string) string { return map[string]string{"ENGRAM_EMBED_PROVIDER": "hashing"}[k] },
 			configPath:    filepath.Join(dir, "config.json"),
 			principalPath: filepath.Join(dir, "principal.json"),
 			identitiesDir: filepath.Join(dir, "agents"),
@@ -79,6 +79,15 @@ func TestArchiveCommands(t *testing.T) {
 	}
 	// The test network serves one space: use that one.
 	must("principal", "set", "--archive", n.Space)
+	if out := must("archive", "model", "hashing-64", "--dims", "64"); !strings.Contains(out, "embedded with hashing-64") {
+		t.Fatalf("archive model: %s", out)
+	}
+	var cfgOut struct {
+		Value map[string]any `json:"value"`
+	}
+	if err := n.Session(n.Authority).Get(ctx, "com.atproto.space.getRecord", map[string]any{"space": n.Space, "repo": n.Authority.DID, "collection": lex.ConfigCollection, "rkey": lex.ConfigRkey}, &cfgOut); err != nil || cfgOut.Value["model"] != "hashing-64" {
+		t.Fatalf("the archive's config: %+v %v", cfgOut, err)
+	}
 	if out := must("principal"); !strings.Contains(out, "archive:        "+n.Space) {
 		t.Fatalf("principal: %s", out)
 	}

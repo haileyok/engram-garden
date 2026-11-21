@@ -176,6 +176,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /xrpc/garden.engram.getSpaceStatus", s.owned(q, s.handleStatus))
 	mux.HandleFunc("GET /xrpc/garden.engram.exportSpace", s.owned(q, s.handleExport))
 	mux.HandleFunc("POST /xrpc/garden.engram.warmSpace", s.ownedBody(s.handleWarm))
+	mux.HandleFunc("GET /xrpc/garden.engram.searchSessions", s.owned(q, s.handleSearchSessions))
 	mux.HandleFunc("GET /xrpc/garden.engram.listPresence", s.owned(q, s.handleListPresence))
 	mux.HandleFunc("GET /xrpc/garden.engram.listMessages", s.owned(q, s.handleListMessages))
 	mux.HandleFunc("GET /xrpc/garden.engram.subscribeLounge", s.owned(q, s.handleSubscribeLounge))
@@ -529,21 +530,42 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, err)
 		return
 	}
+	text := q.Get("q")
+	res, ran, err := s.runSearch(r, spaceURI, text, q.Get("mode"), limit, f)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	out := make([]memoryView, len(res.Hits))
+	for i, m := range res.Hits {
+		out[i] = view(spaceURI, m, m.HasSimilarity)
+	}
+	if ran != "vector" {
+		explain(out, res.Hits, text, ran, res.TermIDF)
+	}
+	body := map[string]any{"memories": out, "mode": ran}
+	if res.Approximate {
+		body["approximate"] = true
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// runSearch runs a search of a space: mode is hybrid (the default with
+// text and a vector), vector, or keyword. It returns the mode that ran.
+func (s *Server) runSearch(r *http.Request, spaceURI, text, mode string, limit int, f spacestore.Filter) (*spacestore.SearchResult, string, error) {
 	// mode: hybrid (the default with text and a vector), vector, or
 	// keyword. An explicit mode never falls back.
-	mode := q.Get("mode")
-	text := q.Get("q")
 	hasText := strings.TrimSpace(text) != ""
 	switch mode {
 	case "", "hybrid", "vector", "keyword":
 	default:
-		s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "mode must be hybrid, vector or keyword"))
-		return
+		return nil, "", errf(http.StatusBadRequest, "InvalidRequest", "mode must be hybrid, vector or keyword")
 	}
 	if (mode == "keyword" || mode == "hybrid") && !hasText {
-		s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "mode %s needs q", mode))
-		return
+		return nil, "", errf(http.StatusBadRequest, "InvalidRequest", "mode %s needs q", mode)
 	}
+	q := r.URL.Query()
+	var err error
 	var (
 		vector []float32
 		model  lex.ModelInfo
@@ -570,19 +592,16 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			named := errors.As(embedErr, &xe)
 			fallback := mode == "" && (s.TextSearch == nil || named && (xe.name == "ModelNotHosted" || xe.name == "TextSearchNotAllowed"))
 			if !fallback {
-				s.writeErr(w, embedErr)
-				return
+				return nil, "", embedErr
 			}
 			keywordOnly = true
 		}
 	default:
 		if q.Get("vector") == "" || q.Get("model") == "" || q.Get("modelDigest") == "" {
-			s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "vector, model and modelDigest are required: embed the query with the space's model"))
-			return
+			return nil, "", errf(http.StatusBadRequest, "InvalidRequest", "vector, model and modelDigest are required: embed the query with the space's model")
 		}
 		if vector, err = lex.DecodeQueryVector(q.Get("vector")); err != nil || len(vector) == 0 || len(vector) > 16000 {
-			s.writeErr(w, errf(http.StatusBadRequest, "InvalidRequest", "vector must be base64url-encoded f16le"))
-			return
+			return nil, "", errf(http.StatusBadRequest, "InvalidRequest", "vector must be base64url-encoded f16le")
 		}
 		model = lex.ModelInfo{Model: q.Get("model"), ModelDigest: q.Get("modelDigest"), Dims: len(vector)}
 	}
@@ -599,8 +618,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			// Neither embedding nor keyword search can serve this space.
 			err = embedErr
 		}
-		s.writeErr(w, err)
-		return
+		return nil, "", err
 	}
 	ran := "vector"
 	switch {
@@ -609,18 +627,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	case res.Hybrid:
 		ran = "hybrid"
 	}
-	out := make([]memoryView, len(res.Hits))
-	for i, m := range res.Hits {
-		out[i] = view(spaceURI, m, m.HasSimilarity)
-	}
-	if ran != "vector" {
-		explain(out, res.Hits, text, ran, res.TermIDF)
-	}
-	body := map[string]any{"memories": out, "mode": ran}
-	if res.Approximate {
-		body["approximate"] = true
-	}
-	writeJSON(w, http.StatusOK, body)
+	return res, ran, nil
 }
 
 // embedQuery turns a search's text into a vector with the space's declared

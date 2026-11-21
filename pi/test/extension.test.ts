@@ -1071,6 +1071,17 @@ test("the session's transcript is stored, listed, and pulled back", async () => 
 		await waitFor(() => h.tools.has("engram_list_sessions"));
 		// The harness's own session tools never reach the model.
 		assert.ok(!h.tools.has("engram_push_session") && !h.tools.has("engram_delete_session"));
+		// Searching and reading sessions are the model's own tools.
+		const found = await h.tools.get("search_sessions").execute("t1", { query: "model change drops memories" }, undefined);
+		const shown = found.content[0].text;
+		assert.match(shown, /quoted/);
+		assert.match(shown, /\[1\] error · 2026-11-20 10:00 · did:plc:bob/);
+		assert.match(shown, /entry: e42  offset: 4096/);
+		assert.match(shown, /Then: the fix for model change drops memories/);
+		const read = await h.tools.get("read_session").execute("t2", { session: "s9", entry: "e42", offset: 4096 }, undefined);
+		assert.match(read.content[0].text, /▶ e42 error\n  bash: FAIL TestModelChange/);
+		assert.match(read.content[0].text, /… earlier entries/);
+		assert.ok(!h.tools.has("engram_search_sessions"), "search_sessions is the model's tool, not codemode's");
 		h.addMessage("user", "audit the template handlers for cross-tenant reads");
 		// The transcript grows the way pi's file does.
 		writeFileSync(

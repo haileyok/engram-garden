@@ -74,6 +74,14 @@ Guidance for working on Engram Garden.
   archive), `cmd/engram/sessions.go` (`engram archive`, `engram sessions`, as
   the principal), and `pi/engram/sessionsync.ts` (pushes on turn end and
   session end; pi never shows the model `push_session` or `delete_session`).
+  The appview indexes archives: `internal/transcript` cuts pi transcripts
+  into passages (bump `transcript.Version` when its output changes),
+  `internal/redact` removes secrets from them, `internal/sessionindex`
+  fetches chunks, embeds passages and keeps per-session progress in
+  `spacestore.RepoPosition.State` (the indexer calls it for archive spaces),
+  and `internal/appview/sessions.go` serves `garden.engram.searchSessions`.
+  Agents: `search_sessions` and `read_session` (`internal/agent/archive_search.go`;
+  pi registers them as the model's own tools in `pi/engram/sessiontools.ts`).
   Not in the Python client, like the lounge.
 - `internal/lex`: record formats: the space's config, the vectors memories
   carry (`f16le`), the query vector encoding, and the text that gets embedded.

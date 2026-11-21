@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"slices"
 	"strings"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/bluesky-social/indigo/atproto/syntax"
 	"github.com/haileyok/cocoon/space"
-	"github.com/ipfs/go-cid"
 
 	"github.com/haileyok/engram-garden/internal/lex"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
@@ -60,7 +58,7 @@ const (
 	// MaxPushBytes is the most one push carries; a harness sends more in
 	// several pushes. It is also the longest line a transcript can have: a
 	// line longer than MaxChunkBytes is a chunk of its own.
-	MaxPushBytes = 8 << 20
+	MaxPushBytes = spaceclient.MaxBlobBytes
 )
 
 // SessionInfo is a session as an agent sees it: the record, and who wrote it.
@@ -350,34 +348,8 @@ func (a *Archive) FetchChunk(ctx context.Context, author string, c lex.SessionCh
 
 // FetchBlob reads a space blob and checks its bytes against its CID.
 func FetchBlob(ctx context.Context, c *spaceclient.Client, spaceURI, author, link string) (string, error) {
-	want, err := cid.Decode(link)
-	if err != nil {
-		return "", fmt.Errorf("blob %q: %w", link, err)
-	}
-	host, err := c.PDSHost(ctx, author)
-	if err != nil {
-		return "", err
-	}
-	body, err := c.QueryRaw(ctx, host, spaceURI, author, "com.atproto.space.getBlob", url.Values{"space": {spaceURI}, "repo": {author}, "cid": {link}})
-	if err != nil {
-		return "", err
-	}
-	defer body.Close()
-	b, err := io.ReadAll(io.LimitReader(body, MaxPushBytes+1))
-	if err != nil {
-		return "", err
-	}
-	if len(b) > MaxPushBytes {
-		return "", fmt.Errorf("blob %s is larger than %d bytes", link, MaxPushBytes)
-	}
-	got, err := want.Prefix().Sum(b)
-	if err != nil {
-		return "", err
-	}
-	if !got.Equals(want) {
-		return "", fmt.Errorf("blob %s doesn't match its CID: what was served isn't what was stored", link)
-	}
-	return string(b), nil
+	b, err := c.FetchBlob(ctx, spaceURI, author, link)
+	return string(b), err
 }
 
 // parseSessionURI splits a session record's URI in this archive into its

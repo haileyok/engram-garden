@@ -68,6 +68,7 @@ and `recall` tools.
 | `garden.engram.config` | record (`self`) | The space's embedding model: `model`, `modelDigest`, `dims`, optional `documentPrefix`, `queryPrefix`, and `next` during a model change |
 | `garden.engram.memory` | record | `text`, optional `tags`, optional `source`, `createdAt`, `embedding`, and `nextEmbedding` during a model change |
 | `garden.engram.searchMemories` | query | Search with `vector`, `model`, `modelDigest`, `q`, `limit`, `author`, `tags`, `since` and `until`. With `q` and a keyword index (`ENGRAM_KEYWORD_SEARCH`), results rank by meaning and exact words together and explain each `match`; `mode` picks `hybrid`, `vector` or `keyword` (no vector needed). With text search on, `q` alone is enough: the appview embeds it (see `ENGRAM_TEXT_SEARCH`); otherwise `q` alone searches by keyword. The response's `mode` says what ran. |
+| `garden.engram.searchSessions` | query | Search an archive's session transcripts, as redacted passages (`turn`, `step`, `error`, `summary`, `session`), with `q`, `mode`, `limit` and the filters `kind`, `author`, `session`, `repo`, `branch`, `file`, `cmd`, `agent`, `parent`, `since`, `until`. Without `q`, the newest matching passages. Ranks like `searchMemories`; the appview embeds `q` with text search on. See [docs/design/sessions.md](docs/design/sessions.md). |
 | `garden.engram.getMemory` | query | One memory by URI |
 | `garden.engram.listMemories` | query | Newest first, paged, with `author`, `tags`, `since` and `until` filters (`since` is inclusive, `until` exclusive). For everything in a slice: search ranks by a query and leaves out the rest |
 | `garden.engram.getMemoryGraph` | query | The newest memories (up to 500) and links between the ones that mean similar things, for drawing the space as a graph |
@@ -114,6 +115,7 @@ to set the DNS record. A deployment on other NSIDs would publish its own.
 | `ENGRAM_RAM_BYTES` | 8 GiB | RAM budget for loaded spaces |
 | `ENGRAM_LIMIT_MEMORIES` / `ENGRAM_LIMIT_BYTES` / `ENGRAM_LIMIT_SEARCHES_PER_SECOND` / `ENGRAM_LIMIT_WRITES_PER_DAY` | unlimited | Per-space limits |
 | `ENGRAM_KEYWORD_SEARCH` | `false` | Write segments with a keyword index and rewrite older ones. Once all of a space's segments have one, its searches that include `q` rank by meaning and exact words together (hybrid search; see `docs/design/keyword-search.md`). Every node reads keyword segments either way; turn this on only after every node runs a release that does. |
+| `ENGRAM_ARCHIVES` | `true` | Index archives (`garden.engram.archive` spaces): cut their sessions' transcripts into passages and embed them with the `ENGRAM_EMBED_*` model, which has to be the archive's declared model. Searching them by text needs `ENGRAM_TEXT_SEARCH` too, else it's keyword search. |
 | `ENGRAM_TEXT_SEARCH` | `false` | Embed the text of searches that come without a vector, for callers that have no model of their own (the web app, the Claude connector). Uses the model `ENGRAM_EMBED_URL` / `ENGRAM_EMBED_MODEL` / `ENGRAM_EMBED_MODEL_DIGEST` name, usually an Ollama next to the appview, and only serves spaces that declare that same model (same name and digest); others get `ModelNotHosted`. The appview embeds only after verifying a credential for an indexed space. |
 | `ENGRAM_TEXT_SEARCH_PER_SECOND` / `ENGRAM_TEXT_SEARCH_BURST` | `2` / `20` | How many text searches one space authority may make (not per space, so many spaces don't multiply it) |
 | `ENGRAM_TEXT_SEARCH_CONCURRENCY` | `4` | Embeddings running at once on a node; callers past it get `EmbedderBusy` (503) |
@@ -343,12 +345,18 @@ The tools (`remember`, `recall` and `list_memories` take an optional
 - Sessions (see [docs/design/sessions.md](docs/design/sessions.md)), for an
   agent with its own identity and an archive: `list_sessions` lists the
   sessions in the archive (who, title, where the work stands, machine,
-  branch, how much transcript is stored); `pull_session` returns one's
+  branch, how much transcript is stored); `search_sessions` searches every
+  session's transcript, as passages the appview cuts and redacts (errors and
+  what fixed them, commands run, files touched, prompts and answers), and
+  `read_session` shows the transcript around one; `pull_session` returns one's
   transcript as JSONL, ready to resume; `push_session` and `delete_session`
   are the harness's, for the agent's own session. The principal makes the
-  archive (`engram archive create <name>`, then `engram archive index`) and
-  reads it from a shell: `engram sessions list`, `engram sessions pull
-  <id|uri> [--to file]`, `engram sessions rm <id|uri>`.
+  archive (`engram archive create <name> --model <m>`, then `engram archive
+  index`) and reads it from a shell: `engram sessions search <query>`,
+  `engram sessions list`, `engram sessions pull <id|uri> [--to file]`,
+  `engram sessions rm <id|uri>`. The appview embeds passages with its
+  `ENGRAM_EMBED_*` model, which has to be the archive's (`ENGRAM_ARCHIVES=false`
+  turns archive indexing off).
 - For spaces the agent's account governs: `create_space` (optionally
   declaring the model), `list_members`, `add_member` (`readOnly` to let
   them only recall), `remove_member`, `set_model` (`declare`, `next`,
