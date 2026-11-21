@@ -300,7 +300,12 @@ func (x *Indexer) cut(ctx context.Context, spaceURI, did string, rec lex.Session
 	add := func(p transcript.Passage) {
 		*pending = append(*pending, pendingPassage{session: rec.SessionID, uri: uri, facets: facets, p: p})
 	}
-	if meta := digest(rec.Title, rec.Summary, rec.Repo, rec.Branch, rec.Cwd, rec.StartedAt); meta != ss.Meta {
+	// The session passage's time is startedAt, else updatedAt.
+	when := rec.StartedAt
+	if when == "" {
+		when = rec.UpdatedAt
+	}
+	if meta := digest(rec.Title, rec.Summary, rec.Repo, rec.Branch, rec.Cwd, when); meta != ss.Meta {
 		ss.Meta = meta
 		if p, ok := sessionPassage(rec); ok {
 			add(p)
@@ -318,6 +323,13 @@ func (x *Indexer) cut(ctx context.Context, spaceURI, did string, rec lex.Session
 		ch := rec.Chunks[i]
 		end := start + ch.Bytes
 		if end <= ss.Cut.Offset && ch.Blob.Link == ss.TailCID {
+			// Read already, and unchanged; once another chunk follows it,
+			// it won't change again.
+			if i < len(rec.Chunks)-1 {
+				ss.Read = i + 1
+				ss.Prefix = prefixDigest(rec.Chunks[:ss.Read])
+				ss.Tail, ss.TailCID = "", ""
+			}
 			start = end
 			continue
 		}

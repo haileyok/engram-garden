@@ -439,3 +439,21 @@ func TestReadSessionFindsTheRightEntry(t *testing.T) {
 		t.Fatalf("by offset: %q %v", target(out), err)
 	}
 }
+
+func TestReadSessionEscapedIDsAndBadOffsets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	n := archiveNet(t)
+	a := alice(t, n)
+	data := jsonl(0, 2) + `{"type":"message","id":"\u0073caped","message":{"role":"user","content":"escaped id"}}` + "\n"
+	if _, err := a.PushSession(ctx, PushSessionIn{Session: lex.Session{SessionID: sid, Title: "t"}, Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := a.ReadSession(ctx, ReadSessionIn{Session: sid, Entry: "scaped"})
+	if err != nil || len(out.Entries) == 0 || !out.Entries[len(out.Entries)-1].Target {
+		t.Fatalf("escaped id: %+v %v", out, err)
+	}
+	if _, err := a.ReadSession(ctx, ReadSessionIn{Session: sid, Offset: -1}); err == nil {
+		t.Fatal("a negative offset was read")
+	}
+}

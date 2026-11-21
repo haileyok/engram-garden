@@ -386,3 +386,42 @@ func TestFacetsAreRedacted(t *testing.T) {
 		}
 	}
 }
+
+// A full last chunk that another chunk follows is read once, not again
+// with the next one, and the session isn't cut over.
+func TestDeriveMovesPastAFullTail(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	a, b := turns(0, 3), turns(3, 2)
+	if err := h.derive(record(h.b, []string{a}), false, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.derive(record(h.b, []string{a, b}), false, 0); err != nil {
+		t.Fatal(err)
+	}
+	b2 := b + turns(5, 1)
+	if err := h.derive(record(h.b, []string{a, b2}), false, 0); err != nil {
+		t.Fatal(err)
+	}
+	aLink := h.b.put(a).Link
+	if n := h.b.reads[aLink]; n != 1 {
+		t.Fatalf("the first chunk was read %d times", n)
+	}
+}
+
+// Without startedAt, the session passage's time follows updatedAt.
+func TestSessionPassageTimeFollowsUpdatedAt(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	chunks := []string{turns(0, 1)}
+	for _, at := range []string{"2026-11-21T01:00:00Z", "2026-11-22T01:00:00Z"} {
+		if err := h.derive(recordWith(h.b, chunks, func(s *lex.Session) { s.UpdatedAt = at }), false, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, hit := range h.hits() {
+		if TagValue(hit.Tags, TagKind) == KindSession && hit.CreatedAt.Format(time.RFC3339) != "2026-11-22T01:00:00Z" {
+			t.Fatalf("session passage at %s", hit.CreatedAt)
+		}
+	}
+}

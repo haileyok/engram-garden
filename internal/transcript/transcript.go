@@ -280,7 +280,8 @@ func (st *State) assistant(e entry, m message, off int64, at time.Time) []Passag
 		}
 	}
 	b.WriteString(strings.Join(lines, "\n"))
-	return append(out, Passage{Kind: KindStep, EntryID: e.ID, Offset: off, Time: at, Text: b.String(), Files: files, Commands: cmds})
+	// Redacted again as a whole: a secret can span the parts.
+	return append(out, Passage{Kind: KindStep, EntryID: e.ID, Offset: off, Time: at, Text: redact.Text(b.String()), Files: files, Commands: cmds})
 }
 
 func (st *State) result(e entry, m message, off int64, at time.Time) []Passage {
@@ -299,7 +300,7 @@ func (st *State) result(e entry, m message, off int64, at time.Time) []Passage {
 	if output != "" {
 		b.WriteString("\n" + headTail(output, maxErrHead, maxErrTail))
 	}
-	p := Pending{EntryID: e.ID, Offset: off, Time: at, Text: b.String()}
+	p := Pending{EntryID: e.ID, Offset: off, Time: at, Text: redact.Text(b.String())}
 	if known {
 		p.Files, p.Cmds = facetsOf(line)
 	}
@@ -312,7 +313,7 @@ func (t *Turn) passage() Passage {
 	if t.Reply != "" {
 		text += "\n\nAnswered: " + t.Reply
 	}
-	return Passage{Kind: KindTurn, EntryID: t.EntryID, Offset: t.Offset, Time: t.Time, Text: text}
+	return Passage{Kind: KindTurn, EntryID: t.EntryID, Offset: t.Offset, Time: t.Time, Text: redact.Text(text)}
 }
 
 func (p Pending) passage(fix string) Passage {
@@ -320,7 +321,7 @@ func (p Pending) passage(fix string) Passage {
 	if fix != "" {
 		text += "\n\nThen: " + clip(fix, maxFix)
 	}
-	return Passage{Kind: KindError, EntryID: p.EntryID, Offset: p.Offset, Time: p.Time, Text: text, Files: p.Files, Commands: p.Cmds}
+	return Passage{Kind: KindError, EntryID: p.EntryID, Offset: p.Offset, Time: p.Time, Text: redact.Text(text), Files: p.Files, Commands: p.Cmds}
 }
 
 // ownTool reports Engram's own tools, whose calls echo memories and
@@ -537,6 +538,9 @@ func Render(line string, maxOutput int) (Entry, bool) {
 	default:
 		return Entry{}, false
 	}
+	// Redacted again as a whole: a secret can span parts, or sit in a
+	// tool's name.
+	out.Text = redact.Text(out.Text)
 	if strings.TrimSpace(out.Text) == "" {
 		return Entry{}, false
 	}

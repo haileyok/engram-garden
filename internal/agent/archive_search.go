@@ -192,13 +192,13 @@ func (a *Archive) ReadSession(ctx context.Context, in ReadSessionIn) (ReadSessio
 		return false, nil
 	}
 	isEntry := func(line string) bool {
-		if !strings.Contains(line, in.Entry) {
-			return false
-		}
 		var e struct {
 			ID string `json:"id"`
 		}
 		return json.Unmarshal([]byte(line), &e) == nil && e.ID == in.Entry
+	}
+	if in.Offset < 0 {
+		return out, fmt.Errorf("offset %d isn't a position in a transcript", in.Offset)
 	}
 	if in.Offset > 0 {
 		// The line that starts at the offset, when it's still the entry

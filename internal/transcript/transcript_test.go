@@ -268,3 +268,24 @@ func TestRedactedBeforeClipped(t *testing.T) {
 		}
 	}
 }
+
+// A secret split over text blocks, or in a tool's name, is redacted too.
+func TestRenderRedactsAcrossParts(t *testing.T) {
+	t.Parallel()
+	var s session
+	s.msg("assistant", []any{map[string]any{"type": "text", "text": "password="}, map[string]any{"type": "text", "text": "hunter2hunter2"}})
+	s.msg("toolResult", []any{map[string]any{"type": "text", "text": "ok"}}, map[string]any{"toolCallId": "zz", "toolName": "password=12345678", "isError": true})
+	s.say("next")
+	lines := strings.Split(strings.TrimSpace(s.b.String()), "\n")
+	for _, l := range lines {
+		if e, ok := Render(l, 400); ok && (strings.Contains(e.Text, "hunter2") || strings.Contains(e.Text, "12345678")) {
+			t.Fatalf("rendered %q", e.Text)
+		}
+	}
+	var st State
+	for _, p := range append(st.Feed(s.b.String()), st.Finish()...) {
+		if strings.Contains(p.Text, "hunter2") || strings.Contains(p.Text, "12345678") {
+			t.Fatalf("%s: %q", p.Key(), p.Text)
+		}
+	}
+}
