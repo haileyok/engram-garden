@@ -336,3 +336,106 @@ func TestSplitChunks(t *testing.T) {
 		t.Fatal("chunks lost bytes")
 	}
 }
+
+func TestArchiveTrustsOnlyWhatVerifies(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	n := archiveNet(t)
+	a := alice(t, n)
+	if _, err := a.PushSession(ctx, PushSessionIn{Session: lex.Session{SessionID: sid, Title: "t"}, Data: jsonl(0, 3)}); err != nil {
+		t.Fatal(err)
+	}
+	// Another member's record has to verify against alice's commit, by ID
+	// (found through an unverified listing) and by URI.
+	n.BadMacs = true
+	bob := archiveAs(t, n, "did:plc:bob", Identity{DID: "did:plc:bob"})
+	for _, key := range []string{sid, n.Space + "/did:plc:alice/garden.engram.session/" + sid} {
+		if _, err := bob.PullSession(ctx, GetSessionIn{Session: key}); err == nil || !strings.Contains(err.Error(), "verify") {
+			t.Fatalf("pulled %s with a bad MAC: %v", key, err)
+		}
+	}
+	n.BadMacs = false
+	if _, err := bob.PullSession(ctx, GetSessionIn{Session: sid}); err != nil {
+		t.Fatal(err)
+	}
+	// An upload the PDS names with the wrong CID isn't stored.
+	n.WrongUploadCID = true
+	if _, err := a.PushSession(ctx, PushSessionIn{Session: lex.Session{SessionID: "s2", Title: "t"}, Data: jsonl(0, 2)}); err == nil || !strings.Contains(err.Error(), "digest") {
+		t.Fatalf("stored a blob under a CID that isn't its digest: %v", err)
+	}
+}
+
+func TestArchiveNewSessionFromAnOffsetResyncs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	n := archiveNet(t)
+	a := alice(t, n)
+	// A pulled transcript remembers how far another identity stored it:
+	// this identity has nothing yet, so it asks for the whole file.
+	out, err := a.PushSession(ctx, PushSessionIn{Session: lex.Session{SessionID: sid, Title: "t"}, FromBytes: 500, Data: jsonl(10, 12)})
+	if err != nil || !out.Resync || out.Bytes != 0 {
+		t.Fatalf("push from 500 onto nothing: %+v %v", out, err)
+	}
+	if got, _ := a.getSession(ctx, "did:plc:alice", sid); got != nil {
+		t.Fatal("a resync answer wrote a record")
+	}
+}
+
+func TestArchiveClipsLongTitles(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	n := archiveNet(t)
+	a := alice(t, n)
+	title := strings.Repeat("漢", 150) // 450 bytes
+	if _, err := a.PushSession(ctx, PushSessionIn{Session: lex.Session{SessionID: sid, Title: title, Summary: strings.Repeat("é", 40000)}, Data: jsonl(0, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := a.getSession(ctx, "did:plc:alice", sid)
+	if len(got.Title) > lex.MaxSessionTitle || !strings.HasPrefix(title, got.Title) || len(got.Summary) > lex.MaxSessionSummary {
+		t.Fatalf("title %d bytes, summary %d", len(got.Title), len(got.Summary))
+	}
+}
+
+func TestReadSessionFindsTheRightEntry(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	n := archiveNet(t)
+	a := alice(t, n)
+	lines := jsonl(0, 4) +
+		`{"type": "message", "id": "spaced", "message": {"role": "user", "content": "spaced json"}}` + "\n" +
+		`{"type":"message","id":"e00009","message":{"role":"assistant","content":[{"type":"toolCall","id":"spaced","name":"bash","arguments":{"command":"ls"}}]}}` + "\n" +
+		jsonl(10, 12)
+	title := "deploy with ENGRAM_PASSWORD=correct-horse-battery"
+	if _, err := a.PushSession(ctx, PushSessionIn{Session: lex.Session{SessionID: sid, Title: title}, Data: lines}); err != nil {
+		t.Fatal(err)
+	}
+	target := func(out ReadSessionOut) string {
+		for _, e := range out.Entries {
+			if e.Target {
+				return e.ID + " " + e.Text
+			}
+		}
+		return ""
+	}
+	// By ID, whatever the JSON's spacing, and not a nested call ID.
+	out, err := a.ReadSession(ctx, ReadSessionIn{Session: sid, Entry: "spaced", Before: 1, After: 1})
+	if err != nil || target(out) != "spaced spaced json" {
+		t.Fatalf("by entry: %q %v", target(out), err)
+	}
+	if strings.Contains(out.Title, "correct-horse") {
+		t.Fatalf("title %q", out.Title)
+	}
+	// An offset that points at another entry now falls back to the entry.
+	out, err = a.ReadSession(ctx, ReadSessionIn{Session: sid, Entry: "spaced", Offset: int64(len(jsonl(0, 2)))})
+	if err != nil || !strings.HasPrefix(target(out), "spaced ") {
+		t.Fatalf("stale offset: %q %v", target(out), err)
+	}
+	// An offset alone has to start an entry.
+	if _, err := a.ReadSession(ctx, ReadSessionIn{Session: sid, Offset: 3}); err == nil {
+		t.Fatal("read from the middle of a line")
+	}
+	out, err = a.ReadSession(ctx, ReadSessionIn{Session: sid, Offset: int64(len(jsonl(0, 2)))})
+	if err != nil || !strings.HasPrefix(target(out), "e00002 ") {
+		t.Fatalf("by offset: %q %v", target(out), err)
+	}
+}

@@ -10,9 +10,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"github.com/bluesky-social/indigo/atproto/atdata"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 	"github.com/haileyok/cocoon/space"
+	"github.com/ipfs/go-cid"
 
 	"github.com/haileyok/engram-garden/internal/lex"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
@@ -189,11 +192,7 @@ func (a *Archive) getSession(ctx context.Context, did, id string) (*SessionInfo,
 		params := map[string]any{"space": a.Space, "repo": did, "collection": lex.SessionCollection, "rkey": id}
 		err = a.Client.Session.Get(ctx, "com.atproto.space.getRecord", params, &out)
 	} else {
-		var host string
-		if host, err = a.Client.PDSHost(ctx, did); err == nil {
-			params := url.Values{"space": {a.Space}, "repo": {did}, "collection": {lex.SessionCollection}, "rkey": {id}}
-			_, err = a.Client.QueryMac(ctx, host, a.Space, did, space.RecordMacProfile, "com.atproto.space.getRecord", params, &out)
-		}
+		err = a.verifiedRecord(ctx, did, ref.RecordURI(did, lex.SessionCollection, id), url.Values{"space": {a.Space}, "repo": {did}, "collection": {lex.SessionCollection}, "rkey": {id}}, &out.CID, &out.Value)
 	}
 	if err != nil {
 		if isNotFound(err) {
@@ -207,6 +206,42 @@ func (a *Archive) getSession(ctx context.Context, did, id string) (*SessionInfo,
 	}
 	s.SessionID = id
 	return &SessionInfo{Session: s, URI: ref.RecordURI(did, lex.SessionCollection, id), Author: did, CID: out.CID}, nil
+}
+
+// verifiedRecord reads another member's record and verifies it against the
+// MAC its PDS returns for the member's commit: the record names the chunks'
+// CIDs, so it has to be the author's. A failure refetches the author's DID
+// document once, since its #atproto_kem key may have rotated.
+func (a *Archive) verifiedRecord(ctx context.Context, did, uri string, params url.Values, cidOut *string, valueOut *json.RawMessage) error {
+	host, err := a.Client.PDSHost(ctx, did)
+	if err != nil {
+		return err
+	}
+	for attempt := 0; ; attempt++ {
+		var out struct {
+			CID   string          `json:"cid"`
+			Value json.RawMessage `json:"value"`
+		}
+		mac, err := a.Client.QueryMac(ctx, host, a.Space, did, space.RecordMacProfile, "com.atproto.space.getRecord", params, &out)
+		if err != nil {
+			return err
+		}
+		rec, err := atdata.UnmarshalJSON(out.Value)
+		if err != nil {
+			return err
+		}
+		verr := space.VerifyRecord(uri, out.CID, rec, space.VerifyRecordParams{URI: uri, VerifyMacParams: mac.Params()})
+		if verr == nil {
+			*cidOut, *valueOut = out.CID, out.Value
+			return nil
+		}
+		if attempt > 0 || a.Client.Dir == nil {
+			return fmt.Errorf("%s doesn't verify against its author's commit: %w", uri, verr)
+		}
+		if d, err := syntax.ParseDID(did); err == nil {
+			_ = a.Client.Dir.Purge(ctx, d.AtIdentifier())
+		}
+	}
 }
 
 // memberSessions reads one member's session records.
@@ -312,7 +347,8 @@ func (a *Archive) findSession(ctx context.Context, in GetSessionIn) (*SessionInf
 	}
 	for _, s := range all.Sessions {
 		if s.SessionID == id {
-			return &s, nil
+			// A listing carries no MAC: read the record again, verified.
+			return a.getSession(ctx, s.Author, id)
 		}
 	}
 	return nil, nil
@@ -392,10 +428,13 @@ func (a *Archive) PushSession(ctx context.Context, in PushSessionIn) (PushSessio
 	if cur != nil && cur.Head != nil {
 		stored = cur.Head.Bytes
 	}
-	replace := in.Replace || cur == nil
-	if !replace && in.FromBytes != stored {
+	// Without Replace, the caller's idea of what's stored has to be the
+	// record's (none stored when there's no record yet), or the transcript
+	// would gain a hole: ask for the whole file instead.
+	if !in.Replace && in.FromBytes != stored {
 		return PushSessionOut{Session: id, Resync: true, Bytes: stored}, nil
 	}
+	replace := in.Replace || cur == nil
 
 	// Only complete lines are stored.
 	data := in.Data[:strings.LastIndexByte(in.Data, '\n')+1]
@@ -429,6 +468,8 @@ func (a *Archive) PushSession(ctx context.Context, in PushSessionIn) (PushSessio
 
 	next := in.Session
 	next.SessionID = id
+	next.Title = clipBytes(next.Title, lex.MaxSessionTitle)
+	next.Summary = clipBytes(next.Summary, lex.MaxSessionSummary)
 	next.Kind, next.Parent = a.Identity.Kind, a.Identity.Parent
 	if next.Kind == "" {
 		next.Kind = lex.SessionKindSession
@@ -528,6 +569,13 @@ func (a *Archive) uploadBlob(ctx context.Context, data string) (lex.Blob, error)
 	if out.Blob.Link == "" {
 		return lex.Blob{}, errors.New("the PDS accepted the blob but named no CID")
 	}
+	want, err := cid.Decode(out.Blob.Link)
+	if err != nil {
+		return lex.Blob{}, fmt.Errorf("the PDS named the blob %q: %w", out.Blob.Link, err)
+	}
+	if got, err := want.Prefix().Sum([]byte(data)); err != nil || !got.Equals(want) {
+		return lex.Blob{}, fmt.Errorf("the PDS named the blob %s, which isn't the digest of what was uploaded", out.Blob.Link)
+	}
 	return lex.Blob{Link: out.Blob.Link, MimeType: lex.SessionBlobMime, Size: int64(len(data))}, nil
 }
 
@@ -586,3 +634,15 @@ func describePiece(data string) chunkPiece {
 }
 
 func (id Identity) zero() bool { return id.DID == "" }
+
+// clipBytes cuts s to at most n bytes, on a character boundary.
+func clipBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}

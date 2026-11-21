@@ -68,7 +68,7 @@ type Session struct {
 	// StartedAt and UpdatedAt are when the session began and when this
 	// record was last written.
 	StartedAt string `json:"startedAt,omitempty"`
-	UpdatedAt string `json:"updatedAt"`
+	UpdatedAt string `json:"updatedAt,omitempty"`
 	// Head says how much of the transcript is stored.
 	Head *SessionHead `json:"head,omitempty"`
 	// Chunks name the transcript's bytes, oldest first.

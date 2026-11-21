@@ -214,3 +214,15 @@ test("pushSession won't replace with an empty file either", async () => {
 		/further along/,
 	);
 });
+
+// A file shorter than what was stored from it (truncated, or an older copy)
+// asks first: the archive's longer transcript is never replaced.
+test("pushSession won't replace a longer archived transcript with a shorter file", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-sync-"));
+	const file = join(dir, "s.jsonl");
+	writeFileSync(file, "one\n");
+	const a = fakeArchive("one\ntwo\nthree\n");
+	await assert.rejects(pushSession({ call: a.call, file, session: manifest, from: 14 }), /further along/);
+	assert.equal(a.stored(), "one\ntwo\nthree\n");
+	assert.ok(a.calls.every((c) => !c.replace), "nothing was replaced");
+});

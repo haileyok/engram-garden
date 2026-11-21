@@ -17,6 +17,7 @@ import (
 	"github.com/haileyok/engram-garden/internal/lex"
 	"github.com/haileyok/engram-garden/internal/sessionindex"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
+	"github.com/haileyok/engram-garden/internal/spacestore"
 	"github.com/haileyok/engram-garden/internal/spacetest"
 )
 
@@ -58,12 +59,19 @@ func (p *piLines) result(id, tool, out string, isErr bool) string {
 	return p.entry("message", map[string]any{"message": map[string]any{"role": "toolResult", "toolCallId": id, "toolName": tool, "isError": isErr, "content": []any{map[string]any{"type": "text", "text": out}}}})
 }
 
-// TestArchiveIndexAndSearch: a session identity keeps its transcript in an
-// archive; the appview cuts it into passages, embeds them, and agents
-// search them and read around a hit. Appends read only the growing chunk;
-// a rewritten or deleted session leaves nothing stale behind.
-func TestArchiveIndexAndSearch(t *testing.T) {
-	t.Parallel()
+type archiveFixture struct {
+	n      *spacetest.Net
+	srv    *Server
+	st     *spacestore.Node
+	alice  *spacetest.Account
+	bob    *spacetest.Account
+	al, bo *agent.Archive
+}
+
+// newArchiveFixture is an archive with two identities in it (alice, and
+// bob, a subagent alice started) and an appview indexing it.
+func newArchiveFixture(t *testing.T, limits spacestore.Limits) *archiveFixture {
+	t.Helper()
 	ctx := context.Background()
 	n := spacetest.NewTyped(t, "principal", lex.ArchiveType, "sessions")
 	alice := n.NewAccount("did:plc:alice")
@@ -82,7 +90,11 @@ func TestArchiveIndexAndSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st := newNode(t, blob.Dir{Root: t.TempDir()}, nil)
+	st, err := spacestore.New(spacestore.Options{Blob: blob.Dir{Root: t.TempDir()}, CacheDir: t.TempDir(), Limits: limits})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close(context.Background()) })
 	srv := &Server{
 		Store: st, Dir: n.Dir, ServiceDID: serviceDID, Spaces: []string{n.Space}, Grants: grants,
 		Indexer: &indexer.Indexer{Store: st, Client: client, Dir: n.Dir,
@@ -92,7 +104,6 @@ func TestArchiveIndexAndSearch(t *testing.T) {
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	srv.PublicURL = hs.URL
-
 	open := func(a *spacetest.Account, id agent.Identity) *agent.Archive {
 		c, err := spaceclient.New(n.Session(a), n.Dir, nil)
 		if err != nil {
@@ -100,8 +111,20 @@ func TestArchiveIndexAndSearch(t *testing.T) {
 		}
 		return &agent.Archive{Client: c, Space: n.Space, Identity: id, AppviewURL: hs.URL, AppviewDID: serviceDID}
 	}
-	al := open(alice, agent.Identity{DID: alice.DID, Kind: "session"})
-	bo := open(bob, agent.Identity{DID: bob.DID, Kind: "subagent", Parent: alice.DID})
+	return &archiveFixture{n: n, srv: srv, st: st, alice: alice, bob: bob,
+		al: open(alice, agent.Identity{DID: alice.DID, Kind: "session"}),
+		bo: open(bob, agent.Identity{DID: bob.DID, Kind: "subagent", Parent: alice.DID})}
+}
+
+// TestArchiveIndexAndSearch: a session identity keeps its transcript in an
+// archive; the appview cuts it into passages, embeds them, and agents
+// search them and read around a hit. Appends read only the growing chunk;
+// a rewritten or deleted session leaves nothing stale behind.
+func TestArchiveIndexAndSearch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newArchiveFixture(t, spacestore.Limits{})
+	n, srv, alice, bob, al, bo := f.n, f.srv, f.alice, f.bob, f.al, f.bo
 	sync := func() {
 		t.Helper()
 		if err := srv.Indexer.SyncSpace(ctx, n.Space); err != nil {
@@ -253,5 +276,30 @@ func TestArchiveIndexAndSearch(t *testing.T) {
 	}
 	if other, _ := bo.SearchSessions(ctx, agent.SearchSessionsIn{Session: "s2"}); len(other.Passages) == 0 {
 		t.Fatal("another session's passages went too")
+	}
+}
+
+// TestArchiveOverLimitHoldsProgress: passages the store won't take over its
+// limits are pulled again later, so the cutter's progress isn't published
+// past them.
+func TestArchiveOverLimitHoldsProgress(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newArchiveFixture(t, spacestore.Limits{MaxMemories: 2})
+	var p piLines
+	for i := range 6 {
+		p.user(fmt.Sprintf("question %d about widgets", i))
+		p.say(fmt.Sprintf("answer %d about widgets", i))
+	}
+	if _, err := f.al.PushSession(ctx, agent.PushSessionIn{Session: lex.Session{SessionID: "s1", Title: "widgets"}, Data: p.b.String()}); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.srv.Indexer.SyncSpace(ctx, f.n.Space)
+	pos, err := f.st.RepoState(ctx, f.n.Space, f.alice.DID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pos != nil && sessionindex.Current(pos.State, &lex.Config{ModelInfo: model}) && len(pos.State) > 0 {
+		t.Fatalf("progress was published past held passages: %s", pos.State)
 	}
 }

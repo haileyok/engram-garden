@@ -26,8 +26,10 @@ type rule struct {
 	value bool
 }
 
-// notSecret is a value that names or counts rather than holds a secret.
-var notSecret = regexp.MustCompile(`^["']?(?:[0-9][0-9._]*|true|false|null|none|nil|undefined|required|optional|string|\[?redacted.*|\*+|x+|<[^>]*>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|process\.env\.[A-Za-z0-9_]+|os\.Getenv\(.*|env\(.*|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_.]*)["']?$`)
+// notSecret is a value that refers to a secret rather than holding one
+// (a variable, a placeholder, a mask). Numbers and dotted words under a
+// secret's name are still redacted: numeric passwords exist.
+var notSecret = regexp.MustCompile(`^["']?(?:true|false|null|none|nil|undefined|required|optional|string|\[?redacted.*|\*+|x+|<[^>]*>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|process\.env\.[A-Za-z0-9_]+|os\.Getenv\(.*|env\(.*)["']?$`)
 
 var rules = []rule{
 	{kind: "private-key", re: regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----[\s\S]*?(-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----|$)`)},

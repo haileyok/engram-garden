@@ -178,7 +178,7 @@ func (st *State) line(line string, off int64) []Passage {
 		if strings.TrimSpace(e.Summary) == "" {
 			return nil
 		}
-		return []Passage{{Kind: KindSummary, EntryID: e.ID, Offset: off, Time: at, Text: redact.Text(clip(e.Summary, maxSummary))}}
+		return []Passage{{Kind: KindSummary, EntryID: e.ID, Offset: off, Time: at, Text: clip(redact.Text(e.Summary), maxSummary)}}
 	case "message":
 	default:
 		return nil
@@ -207,7 +207,8 @@ func (st *State) user(e entry, m message, off int64, at time.Time) []Passage {
 	if t := st.Turn; t != nil && t.Reply != "" {
 		out = append(out, t.passage())
 	}
-	st.Turn = &Turn{EntryID: e.ID, Offset: off, Time: at, Prompt: clip(text, maxPrompt)}
+	// Everything kept in State is redacted as it's read: State is stored too.
+	st.Turn = &Turn{EntryID: e.ID, Offset: off, Time: at, Prompt: clip(redact.Text(text), maxPrompt)}
 	return out
 }
 
@@ -228,7 +229,7 @@ func (st *State) assistant(e entry, m message, off int64, at time.Time) []Passag
 			calls = append(calls, p)
 		}
 	}
-	said := strings.Join(text, "\n")
+	said := redact.Text(strings.Join(text, "\n"))
 	var out []Passage
 	// What the assistant said next is how its failed calls were taken.
 	if said != "" && len(st.Pending) > 0 {
@@ -279,7 +280,7 @@ func (st *State) assistant(e entry, m message, off int64, at time.Time) []Passag
 		}
 	}
 	b.WriteString(strings.Join(lines, "\n"))
-	return append(out, Passage{Kind: KindStep, EntryID: e.ID, Offset: off, Time: at, Text: redact.Text(b.String()), Files: files, Commands: cmds})
+	return append(out, Passage{Kind: KindStep, EntryID: e.ID, Offset: off, Time: at, Text: b.String(), Files: files, Commands: cmds})
 }
 
 func (st *State) result(e entry, m message, off int64, at time.Time) []Passage {
@@ -292,7 +293,7 @@ func (st *State) result(e entry, m message, off int64, at time.Time) []Passage {
 	if !known || line == "" {
 		line = m.ToolName
 	}
-	output := strings.TrimSpace(texts(m.Content))
+	output := strings.TrimSpace(redact.Text(texts(m.Content)))
 	var b strings.Builder
 	b.WriteString("Failed: " + line)
 	if output != "" {
@@ -311,7 +312,7 @@ func (t *Turn) passage() Passage {
 	if t.Reply != "" {
 		text += "\n\nAnswered: " + t.Reply
 	}
-	return Passage{Kind: KindTurn, EntryID: t.EntryID, Offset: t.Offset, Time: t.Time, Text: redact.Text(text)}
+	return Passage{Kind: KindTurn, EntryID: t.EntryID, Offset: t.Offset, Time: t.Time, Text: text}
 }
 
 func (p Pending) passage(fix string) Passage {
@@ -319,7 +320,7 @@ func (p Pending) passage(fix string) Passage {
 	if fix != "" {
 		text += "\n\nThen: " + clip(fix, maxFix)
 	}
-	return Passage{Kind: KindError, EntryID: p.EntryID, Offset: p.Offset, Time: p.Time, Text: redact.Text(text), Files: p.Files, Commands: p.Cmds}
+	return Passage{Kind: KindError, EntryID: p.EntryID, Offset: p.Offset, Time: p.Time, Text: text, Files: p.Files, Commands: p.Cmds}
 }
 
 // ownTool reports Engram's own tools, whose calls echo memories and
@@ -357,7 +358,7 @@ func callLine(c part) (string, []string, []string) {
 		}
 		line = strings.TrimSpace(c.Name + " " + raw)
 	}
-	line = clip(strings.TrimSpace(line), maxCallLine)
+	line = clip(redact.Text(strings.TrimSpace(line)), maxCallLine)
 	f, cmd := facetsOf(line)
 	return line, f, cmd
 }
@@ -498,7 +499,7 @@ func Render(line string, maxOutput int) (Entry, bool) {
 	out := Entry{ID: e.ID, Time: at}
 	switch e.Type {
 	case "compaction":
-		out.Role, out.Text = "compaction", clip(e.Summary, 4000)
+		out.Role, out.Text = "compaction", clip(redact.Text(e.Summary), 4000)
 	case "message":
 		var m message
 		if json.Unmarshal(e.Message, &m) != nil {
@@ -506,7 +507,7 @@ func Render(line string, maxOutput int) (Entry, bool) {
 		}
 		switch m.Role {
 		case "user":
-			out.Role, out.Text = "user", strings.TrimSpace(texts(m.Content))
+			out.Role, out.Text = "user", redact.Text(strings.TrimSpace(texts(m.Content)))
 		case "assistant":
 			var parts []part
 			_ = json.Unmarshal(m.Content, &parts)
@@ -515,7 +516,7 @@ func Render(line string, maxOutput int) (Entry, bool) {
 				switch p.Type {
 				case "text":
 					if s := strings.TrimSpace(p.Text); s != "" {
-						b = append(b, s)
+						b = append(b, redact.Text(s))
 					}
 				case "toolCall":
 					l, _, _ := callLine(p)
@@ -529,7 +530,7 @@ func Render(line string, maxOutput int) (Entry, bool) {
 				out.Role = "error"
 			}
 			half := max(maxOutput/2, 100)
-			out.Text = m.ToolName + ": " + headTail(strings.TrimSpace(texts(m.Content)), half, half)
+			out.Text = m.ToolName + ": " + headTail(redact.Text(strings.TrimSpace(texts(m.Content))), half, half)
 		default:
 			return Entry{}, false
 		}
@@ -539,6 +540,5 @@ func Render(line string, maxOutput int) (Entry, bool) {
 	if strings.TrimSpace(out.Text) == "" {
 		return Entry{}, false
 	}
-	out.Text = redact.Text(out.Text)
 	return out, true
 }

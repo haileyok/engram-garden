@@ -2,12 +2,14 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
 
+	"github.com/haileyok/engram-garden/internal/redact"
 	"github.com/haileyok/engram-garden/internal/transcript"
 )
 
@@ -167,7 +169,7 @@ func (a *Archive) ReadSession(ctx context.Context, in ReadSessionIn) (ReadSessio
 		cache[i] = l
 		return l, nil
 	}
-	out := ReadSessionOut{Session: info.URI, Author: info.Author, Title: info.Title, Entries: []SessionEntry{}, Note: quotedNote}
+	out := ReadSessionOut{Session: info.URI, Author: info.Author, Title: redact.Text(info.Title), Entries: []SessionEntry{}, Note: quotedNote}
 	if len(info.Chunks) == 0 {
 		return out, nil
 	}
@@ -189,18 +191,37 @@ func (a *Archive) ReadSession(ctx context.Context, in ReadSessionIn) (ReadSessio
 		}
 		return false, nil
 	}
-	switch {
-	case in.Offset > 0:
-		found, err := find(chunkAt(in.Offset), func(off int64, _ string) bool { return off >= in.Offset })
+	isEntry := func(line string) bool {
+		if !strings.Contains(line, in.Entry) {
+			return false
+		}
+		var e struct {
+			ID string `json:"id"`
+		}
+		return json.Unmarshal([]byte(line), &e) == nil && e.ID == in.Entry
+	}
+	if in.Offset > 0 {
+		// The line that starts at the offset, when it's still the entry
+		// asked for (a transcript can change between a search and a read).
+		found, err := find(chunkAt(in.Offset), func(off int64, line string) bool { return off == in.Offset })
 		if err != nil {
 			return out, err
 		}
-		if !found {
-			return out, fmt.Errorf("offset %d is past the end of session %s", in.Offset, info.URI)
+		if found && in.Entry != "" {
+			l, _ := lines(ci)
+			if !isEntry(l[li]) {
+				found, li = false, -1
+			}
 		}
+		if !found && in.Entry == "" {
+			return out, fmt.Errorf("no entry starts at offset %d of session %s", in.Offset, info.URI)
+		}
+	}
+	switch {
+	case li >= 0:
 	case in.Entry != "":
 		for c := len(info.Chunks) - 1; c >= 0 && li < 0; c-- {
-			if _, err := find(c, func(_ int64, line string) bool { return strings.Contains(line, `"id":"`+in.Entry+`"`) }); err != nil {
+			if _, err := find(c, func(_ int64, line string) bool { return isEntry(line) }); err != nil {
 				return out, err
 			}
 		}
@@ -208,6 +229,7 @@ func (a *Archive) ReadSession(ctx context.Context, in ReadSessionIn) (ReadSessio
 			return out, fmt.Errorf("entry %s isn't in session %s", in.Entry, info.URI)
 		}
 	default:
+		ci = len(info.Chunks) - 1
 		l, err := lines(ci)
 		if err != nil {
 			return out, err

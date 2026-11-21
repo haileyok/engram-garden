@@ -277,9 +277,10 @@ export async function pushSession(opts: {
 	let from = opts.from;
 	let replace = false;
 	if (from > t.size()) {
-		// The file is shorter than what was stored from it: start over.
+		// The file is shorter than what was stored from it: ask from the
+		// start. The archive answers with what it holds, and a longer
+		// transcript there (another machine's) is never replaced.
 		from = 0;
-		replace = true;
 	}
 	let answer: PushAnswer;
 	for (let rounds = 0; ; rounds++) {

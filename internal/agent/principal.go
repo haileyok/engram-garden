@@ -406,9 +406,10 @@ func (pv *Provisioner) Claim(ctx context.Context, in ClaimIn) (Identity, string,
 			return id, "", err
 		}
 	} else {
-		// One stocked before the principal had an archive joins it now.
-		if id.Archive == "" {
-			id.Archive = pv.Principal.Archive
+		// One stocked before the principal had this archive (or any) joins
+		// the archive the principal uses now.
+		if id.Archive != pv.Principal.Archive {
+			id.Archive, id.Archived = pv.Principal.Archive, false
 		}
 		if id, err = pv.finish(ctx, path, id); err != nil {
 			return id, path, err

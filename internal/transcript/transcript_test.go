@@ -235,3 +235,36 @@ func TestFacets(t *testing.T) {
 		t.Fatalf("files %v", files)
 	}
 }
+
+// What State keeps between pieces is stored with the index's positions, so
+// it's redacted too.
+func TestStateHoldsNoSecrets(t *testing.T) {
+	t.Parallel()
+	var s session
+	s.user("deploy with ENGRAM_PASSWORD=correct-horse-battery-staple please")
+	s.say("", call("c1", "bash", map[string]any{"command": "curl -H 'Authorization: Bearer abcdefghijklmnop1234567890' https://x"}))
+	s.result("c1", "bash", "denied for ghp_aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5", true)
+	s.say("", call("c2", "bash", map[string]any{"command": "export TOKEN=s3cr3t-t0ken-value"}))
+	var st State
+	st.Feed(s.b.String())
+	raw, _ := json.Marshal(st)
+	for _, secret := range []string{"correct-horse", "abcdefghijklmnop1234567890", "ghp_aB3dE5", "s3cr3t-t0ken"} {
+		if strings.Contains(string(raw), secret) {
+			t.Fatalf("state holds %q: %s", secret, raw)
+		}
+	}
+}
+
+// Clipping can't cut a secret's closing quote off before redaction sees it.
+func TestRedactedBeforeClipped(t *testing.T) {
+	t.Parallel()
+	var s session
+	summary := strings.Repeat("words ", (maxSummary-30)/6) + `password="` + strings.Repeat("hunter", 20) + `"`
+	s.add("compaction", map[string]any{"summary": summary})
+	var st State
+	for _, p := range st.Feed(s.b.String()) {
+		if strings.Contains(p.Text, "hunterhunter") {
+			t.Fatalf("a clipped secret survived: …%s", p.Text[len(p.Text)-80:])
+		}
+	}
+}

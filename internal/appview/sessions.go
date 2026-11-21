@@ -42,8 +42,9 @@ type passageView struct {
 
 func passage(m spacestore.Hit) passageView {
 	uri, entry, off, _ := sessionindex.ParseSource(m.Source)
-	session, kind, _ := strings.Cut(m.Rkey, ":")
-	kind, _, _ = strings.Cut(kind, ":")
+	// From the tags: a session ID may itself hold a colon.
+	session := sessionindex.TagValue(m.Tags, sessionindex.TagSession)
+	kind := sessionindex.TagValue(m.Tags, sessionindex.TagKind)
 	v := passageView{
 		Session: uri, Author: m.Author, SessionID: session, Kind: kind, Entry: entry, Offset: off,
 		Text: m.Text, CreatedAt: m.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),

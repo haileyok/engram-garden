@@ -632,7 +632,19 @@ func (ix *Indexer) deriveSessions(ctx context.Context, spaceURI, did string, pre
 			pos = next
 		}
 		pos.State = b.State
-		return ix.apply(ctx, spaceURI, did, pos, b.Upserts, b.Deletes, false)
+		err := ix.Store.ApplyRepoChanges(ctx, spaceURI, did, pos, b.Upserts, b.Deletes, false)
+		if err == nil || errors.Is(err, spacestore.ErrOverLimit) {
+			recordsIndexed.WithLabelValues("upsert").Add(float64(len(b.Upserts)))
+			recordsIndexed.WithLabelValues("delete").Add(float64(len(b.Deletes)))
+		}
+		if errors.Is(err, spacestore.ErrOverLimit) {
+			// The store held passages back and kept the old position and
+			// state: stop here, so the cutter's progress isn't published past
+			// them by a later batch. The next sync tries again.
+			overLimit.Inc()
+			ix.log().Warn("archive is over a limit; its passages wait", "space", spaceURI, "repo", did)
+		}
+		return err
 	})
 }
 

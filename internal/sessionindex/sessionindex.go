@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -89,9 +90,13 @@ type Change struct {
 // state is a repo's progress, in its sync position.
 type state struct {
 	Version int `json:"v"`
-	// Models are the model keys the passages were embedded with.
-	Models   string                   `json:"models"`
-	Sessions map[string]*sessionState `json:"sessions,omitempty"`
+	// Models are the model keys (and document prefix) the passages were
+	// embedded with.
+	Models string `json:"models"`
+	// Incomplete is set while a sync is part way: the repo is read again
+	// even with no new writes.
+	Incomplete bool                     `json:"incomplete,omitempty"`
+	Sessions   map[string]*sessionState `json:"sessions,omitempty"`
 }
 
 type sessionState struct {
@@ -102,10 +107,16 @@ type sessionState struct {
 	// Cut is the transcript cutter's state: how many bytes were read, and
 	// what's still open.
 	Cut transcript.State `json:"cut"`
-	// Meta is a digest of the record's title, summary and facets, so the
-	// session passage is redone when they change.
-	Meta  string `json:"meta,omitempty"`
-	Ended bool   `json:"ended,omitempty"`
+	// Tail is a digest of the last chunk as it was read (TailCID), so a
+	// rewrite of the chunk that grows is noticed too.
+	Tail    string `json:"tail,omitempty"`
+	TailCID string `json:"tailCid,omitempty"`
+	// Meta is a digest of the record's title and summary, so the session
+	// passage is redone when they change; Facets one of the facets every
+	// passage carries, so they're all redone.
+	Meta   string `json:"meta,omitempty"`
+	Facets string `json:"facets,omitempty"`
+	Ended  bool   `json:"ended,omitempty"`
 }
 
 // Batch is one step's changes: passages to store and delete, and the
@@ -132,7 +143,7 @@ func loadState(raw json.RawMessage, models string) (*state, bool) {
 }
 
 func modelsKey(cfg *lex.Config) string {
-	k := cfg.ModelInfo.Key()
+	k := cfg.ModelInfo.Key() + " " + digest(cfg.DocumentPrefix)[:8]
 	if cfg.Next != nil && cfg.Next.Valid() {
 		k += " " + cfg.Next.Key()
 	}
@@ -197,6 +208,7 @@ func (x *Indexer) Derive(ctx context.Context, spaceURI, did string, prev json.Ra
 		if err != nil {
 			return err
 		}
+		st.Incomplete = !done
 		raw, err := json.Marshal(st)
 		if err != nil {
 			return err
@@ -232,76 +244,126 @@ func (x *Indexer) Derive(ctx context.Context, spaceURI, did string, prev json.Ra
 		}
 		rec.SessionID = c.Rkey
 		uri := ref.RecordURI(did, lex.SessionCollection, c.Rkey)
+		facets := sessionTags(rec)
 		ss := st.Sessions[c.Rkey]
-		if ss != nil && !prefixHolds(ss, rec.Chunks) {
-			// The transcript was rewritten (a resync): start it over.
+		restart := func() error {
+			// Start the session over: its passages go, and it's cut again.
 			keys, err := x.sessionKeys(ctx, spaceURI, did, c.Rkey)
 			if err != nil {
 				return err
 			}
 			deletes = append(deletes, keys...)
-			ss = nil
-		}
-		if ss == nil {
-			ss = &sessionState{}
+			pending = slices.DeleteFunc(pending, func(pp pendingPassage) bool { return pp.session == c.Rkey })
+			ss = &sessionState{Facets: digest(facets...)}
 			st.Sessions[c.Rkey] = ss
+			return nil
 		}
-		facets := sessionTags(rec)
-		if meta := metaDigest(rec); meta != ss.Meta {
-			ss.Meta = meta
-			if p, ok := sessionPassage(rec); ok {
-				pending = append(pending, pendingPassage{session: rec.SessionID, uri: uri, facets: facets, p: p})
+		switch {
+		case ss == nil:
+			ss = &sessionState{Facets: digest(facets...)}
+			st.Sessions[c.Rkey] = ss
+		case !prefixHolds(ss, rec.Chunks):
+			// The transcript was rewritten (a resync).
+			if err := restart(); err != nil {
+				return err
+			}
+		case ss.Facets != digest(facets...):
+			// Every passage carries the session's facets (repo, branch, ...).
+			if err := restart(); err != nil {
+				return err
 			}
 		}
-		// Read the chunks from the first one not wholly read.
-		var start int64
-		for i := 0; i < ss.Read && i < len(rec.Chunks); i++ {
-			start += rec.Chunks[i].Bytes
-		}
-		read := int64(0)
-		for i := ss.Read; i < len(rec.Chunks); i++ {
-			ch := rec.Chunks[i]
-			end := start + ch.Bytes
-			if end <= ss.Cut.Offset {
-				start = end
-				continue
-			}
-			data, err := x.Blobs.FetchBlob(ctx, spaceURI, did, ch.Blob.Link)
+		for attempt := 0; ; attempt++ {
+			drop := func(key string) { deletes = append(deletes, key) }
+			rewritten, err := x.cut(ctx, spaceURI, did, rec, uri, facets, ss, budget, &pending, drop, flush)
 			if err != nil {
-				return fmt.Errorf("session %s chunk %d: %w", c.Rkey, i, err)
+				return err
 			}
-			if int64(len(data)) != ch.Bytes {
-				return fmt.Errorf("session %s chunk %d is %d bytes; its record says %d", c.Rkey, i, len(data), ch.Bytes)
+			if !rewritten {
+				break
 			}
-			skip := max(0, ss.Cut.Offset-start)
-			for _, p := range ss.Cut.Feed(string(data[skip:])) {
-				pending = append(pending, pendingPassage{session: rec.SessionID, uri: uri, facets: facets, p: p})
+			if attempt > 0 {
+				return fmt.Errorf("session %s keeps changing under the indexer", c.Rkey)
 			}
-			start = end
-			read += ch.Bytes - skip
-			// Every chunk but the last is full and won't change; the last
-			// grows, so it's read again from where the cutter stopped.
-			if i < len(rec.Chunks)-1 {
-				ss.Read = i + 1
-				ss.Prefix = prefixDigest(rec.Chunks[:ss.Read])
+			if err := restart(); err != nil {
+				return err
 			}
-			if read >= budget {
-				if err := flush(false); err != nil {
-					return err
-				}
-				read = 0
-			}
-		}
-		if rec.Status == lex.SessionEnded && !ss.Ended && ss.Cut.Offset == start {
-			ss.Ended = true
-			for _, p := range ss.Cut.Finish() {
-				pending = append(pending, pendingPassage{session: rec.SessionID, uri: uri, facets: facets, p: p})
-			}
-		} else if rec.Status != lex.SessionEnded {
-			ss.Ended = false
 		}
 	}
 	return flush(true)
+}
+
+// cut reads the session's chunks from the first one not wholly read, and
+// adds the passages they finish to pending. It reports rewritten when what
+// was already read of the last chunk isn't there any more.
+func (x *Indexer) cut(ctx context.Context, spaceURI, did string, rec lex.Session, uri string, facets []string, ss *sessionState, budget int64, pending *[]pendingPassage, drop func(string), flush func(bool) error) (bool, error) {
+	add := func(p transcript.Passage) {
+		*pending = append(*pending, pendingPassage{session: rec.SessionID, uri: uri, facets: facets, p: p})
+	}
+	if meta := digest(rec.Title, rec.Summary, rec.Repo, rec.Branch, rec.Cwd, rec.StartedAt); meta != ss.Meta {
+		ss.Meta = meta
+		if p, ok := sessionPassage(rec); ok {
+			add(p)
+		} else {
+			// No title or summary any more: its passage goes.
+			drop(Rkey(rec.SessionID, transcript.Passage{Kind: KindSession, EntryID: "record"}))
+		}
+	}
+	var start int64
+	for i := 0; i < ss.Read && i < len(rec.Chunks); i++ {
+		start += rec.Chunks[i].Bytes
+	}
+	read := int64(0)
+	for i := ss.Read; i < len(rec.Chunks); i++ {
+		ch := rec.Chunks[i]
+		end := start + ch.Bytes
+		if end <= ss.Cut.Offset && ch.Blob.Link == ss.TailCID {
+			start = end
+			continue
+		}
+		data, err := x.Blobs.FetchBlob(ctx, spaceURI, did, ch.Blob.Link)
+		if err != nil {
+			return false, fmt.Errorf("session %s chunk %d: %w", rec.SessionID, i, err)
+		}
+		if int64(len(data)) != ch.Bytes {
+			return false, fmt.Errorf("session %s chunk %d is %d bytes; its record says %d", rec.SessionID, i, len(data), ch.Bytes)
+		}
+		skip := min(max(0, ss.Cut.Offset-start), int64(len(data)))
+		if skip > 0 && digest(string(data[:skip])) != ss.Tail {
+			// The chunk that was growing holds something else now.
+			return true, nil
+		}
+		for _, p := range ss.Cut.Feed(string(data[skip:])) {
+			add(p)
+		}
+		start = end
+		read += ch.Bytes - skip
+		// Every chunk but the last is full and won't change; the last
+		// grows, so it's read again from where the cutter stopped, after
+		// checking that what was read of it is still there.
+		if i < len(rec.Chunks)-1 {
+			ss.Read = i + 1
+			ss.Prefix = prefixDigest(rec.Chunks[:ss.Read])
+			ss.Tail, ss.TailCID = "", ""
+		} else {
+			ss.Tail, ss.TailCID = digest(string(data)), ch.Blob.Link
+		}
+		if read >= budget {
+			if err := flush(false); err != nil {
+				return false, err
+			}
+			read = 0
+		}
+	}
+	if rec.Status == lex.SessionEnded && !ss.Ended && ss.Cut.Offset == start {
+		ss.Ended = true
+		for _, p := range ss.Cut.Finish() {
+			add(p)
+		}
+	} else if rec.Status != lex.SessionEnded {
+		ss.Ended = false
+	}
+	return false, nil
 }
 
 // Current reports whether a repo's stored state was made by this version
@@ -311,8 +373,8 @@ func Current(raw json.RawMessage, cfg *lex.Config) bool {
 	if len(raw) == 0 || cfg == nil {
 		return true
 	}
-	_, ok := loadState(raw, modelsKey(cfg))
-	return ok
+	st, ok := loadState(raw, modelsKey(cfg))
+	return ok && !st.Incomplete
 }
 
 // prefixHolds reports whether the chunks already read are still the
@@ -340,9 +402,9 @@ func prefixDigest(chunks []lex.SessionChunkRef) string {
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
-func metaDigest(r lex.Session) string {
+func digest(parts ...string) string {
 	h := sha256.New()
-	for _, s := range []string{r.Title, r.Summary, r.Repo, r.Branch, r.Cwd, r.Kind, r.Parent, r.StartedAt} {
+	for _, s := range parts {
 		h.Write([]byte(s))
 		h.Write([]byte{0})
 	}
@@ -377,6 +439,8 @@ func sessionPassage(r lex.Session) (transcript.Passage, bool) {
 // sessionTags are the record's facets every passage of it carries.
 func sessionTags(r lex.Session) []string {
 	tags := []string{TagSession + r.SessionID}
+	// Facets are stored and returned as they are: they're redacted too.
+	clean := func(v string) string { return redact.Text(v) }
 	if r.Kind != "" {
 		tags = append(tags, TagAgent+r.Kind)
 	}
@@ -384,10 +448,10 @@ func sessionTags(r lex.Session) []string {
 		tags = append(tags, TagParent+r.Parent)
 	}
 	if r.Repo != "" {
-		tags = append(tags, TagRepo+NormalizeRepo(r.Repo))
+		tags = append(tags, TagRepo+clean(NormalizeRepo(r.Repo)))
 	}
 	if r.Branch != "" {
-		tags = append(tags, TagBranch+r.Branch)
+		tags = append(tags, TagBranch+clean(r.Branch))
 	}
 	return tags
 }
@@ -401,7 +465,12 @@ func NormalizeRepo(u string) string {
 	for _, p := range []string{"https://", "http://", "ssh://", "git://"} {
 		s = strings.TrimPrefix(s, p)
 	}
-	if at := strings.Index(s, "@"); at >= 0 && at < strings.IndexAny(s+":/", ":/") {
+	// user@host:path (scp-style), or user:password@host/path.
+	host := s
+	if i := strings.IndexByte(host, '/'); i >= 0 {
+		host = host[:i]
+	}
+	if at := strings.LastIndexByte(host, '@'); at >= 0 {
 		s = s[at+1:]
 	}
 	s = strings.Replace(s, ":", "/", 1)
@@ -413,6 +482,16 @@ type pendingPassage struct {
 	uri     string
 	facets  []string
 	p       transcript.Passage
+}
+
+// TagValue is the value of the first tag with the prefix.
+func TagValue(tags []string, prefix string) string {
+	for _, t := range tags {
+		if v, ok := strings.CutPrefix(t, prefix); ok {
+			return v
+		}
+	}
+	return ""
 }
 
 // Rkey is a passage's key in the index.
@@ -484,12 +563,14 @@ func (x *Indexer) embed(ctx context.Context, cfg *lex.Config, emb embedders, did
 		tags := append([]string{}, pp.facets...)
 		tags = append(tags, TagKind+pp.p.Kind)
 		for _, f := range pp.p.Files {
-			tags = append(tags, TagFile+f)
+			tags = append(tags, TagFile+redact.Text(f))
 		}
 		for _, c := range pp.p.Commands {
-			tags = append(tags, TagCmd+c)
+			tags = append(tags, TagCmd+redact.Text(c))
 		}
-		sum := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s", transcript.Version, pp.p.Text)))
+		// The store skips an entry whose CID it has: the CID covers
+		// everything stored, not only the text.
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%s\x00%s\x00%d", transcript.Version, pp.p.Text, strings.Join(tags, "\x01"), Source(pp.uri, pp.p), pp.p.Time.UnixMicro())))
 		at := pp.p.Time
 		if at.IsZero() {
 			at = time.Now().UTC()
@@ -554,8 +635,7 @@ func (x *Indexer) staleKeys(ctx context.Context, spaceURI, did string, keep map[
 			return nil, err
 		}
 		for _, h := range hits {
-			session, _, _ := strings.Cut(h.Rkey, ":")
-			if !current || !keep[session] {
+			if !current || !keep[TagValue(h.Tags, TagSession)] {
 				keys = append(keys, h.Rkey)
 			}
 		}

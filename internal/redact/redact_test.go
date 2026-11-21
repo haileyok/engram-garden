@@ -25,6 +25,8 @@ func TestTextRedactsSecrets(t *testing.T) {
 		"private key":    {"-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ\n-----END OPENSSH PRIVATE KEY-----\nafter", "b3BlbnNzaC1rZXkt", "after"},
 		"random":         {"key: Zx8Qp2Lm9Rt4Vw7Ky3Nb6Hc1Jd5Gf0Sa", "Zx8Qp2Lm9Rt4Vw7Ky3Nb6Hc1Jd5Gf0Sa", ""},
 		"base64 key":     {"the key is RoO5+d7uCmDqovLrHCr2/BuViUXvdcrNxyNM1pN9dDQ= here", "RoO5+d7uCmDq", "here"},
+		"numeric":        {"password=12345678", "12345678", "password="},
+		"dotted":         {"token=alice.secret", "alice.secret", "token="},
 		"client id":      {"client_id=dm3MEczDYODrttaXDeFi6rrNfn0qVfX52fFdS0aA", "dm3MEczDYODrtt", "client_id="},
 	}
 	for name, c := range cases {
@@ -61,7 +63,6 @@ func TestTextKeepsWhatPeopleSearchFor(t *testing.T) {
 		"password: ${DB_PASSWORD}",
 		`token := os.Getenv("GITHUB_TOKEN")`,
 		"api_key: required",
-		"secret = cfg.ClientSecret",
 		"--- FAIL: TestHandler_OIDCRedirect_UnknownHostReturns404",
 		"BucketServerSideEncryptionConfigurationV2RuleApplyServerSideEncryptionByDefaultArgs",
 		"ClickHouseAsyncMetrics_BlockDiscardMerges_dm_4",
@@ -70,6 +71,20 @@ func TestTextKeepsWhatPeopleSearchFor(t *testing.T) {
 	} {
 		if got := Text(s); got != s {
 			t.Errorf("changed %q to %q", s, got)
+		}
+	}
+}
+
+func TestTextIsIdempotent(t *testing.T) {
+	t.Parallel()
+	for _, s := range []string{
+		"ENGRAM_PASSWORD=correct-horse-battery and Bearer abcdefghijklmnop1234567890",
+		"postgres://engram:hunter2hunter2@db:5432/x token ghp_aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5",
+		`{"password": "p4ssw0rd!!"} key Zx8Qp2Lm9Rt4Vw7Ky3Nb6Hc1Jd5Gf0Sa`,
+	} {
+		once := Text(s)
+		if twice := Text(once); twice != once {
+			t.Errorf("redacting again changed %q to %q", once, twice)
 		}
 	}
 }

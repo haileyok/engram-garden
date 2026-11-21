@@ -103,8 +103,10 @@ type Net struct {
 	Created []CreateAccount
 
 	// CorruptBlobs serves space blobs with a byte changed, as a host that
-	// damaged or swapped them would.
-	CorruptBlobs bool
+	// damaged or swapped them would; WrongUploadCID answers an upload with
+	// another blob's CID.
+	CorruptBlobs   bool
+	WrongUploadCID bool
 }
 
 // CreateAccount is an account the network created for an agent.
@@ -857,6 +859,10 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		n.mu.Lock()
 		a.blobs[c.String()] = data
 		n.mu.Unlock()
+		if n.WrongUploadCID {
+			other, _ := multihash.Sum(append(data, 'x'), multihash.SHA2_256, -1)
+			c = cid.NewCidV1(cid.Raw, other)
+		}
 		ctype := r.Header.Get("Content-Type")
 		if ctype == "" {
 			ctype = "application/octet-stream"

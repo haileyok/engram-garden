@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -92,6 +93,23 @@ func TestArchiveCommands(t *testing.T) {
 		t.Fatalf("principal: %s", out)
 	}
 
+	// The stocked identity names an archive the principal no longer uses
+	// (as if it switched archives): it joins the current one when claimed.
+	stocked, _ := filepath.Glob(filepath.Join(dir, "agents", "stock", "*.json"))
+	if len(stocked) != 1 {
+		t.Fatalf("stock: %v", stocked)
+	}
+	raw, err := os.ReadFile(stocked[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stale map[string]any
+	_ = json.Unmarshal(raw, &stale)
+	stale["archive"], stale["archived"] = "at://"+n.Authority.DID+"/space/"+lex.ArchiveType+"/old", true
+	raw, _ = json.Marshal(stale)
+	if err := os.WriteFile(stocked[0], raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	// The stocked identity joins the archive when it's claimed.
 	var claimed struct {
 		DID  string `json:"did"`
