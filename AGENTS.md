@@ -61,6 +61,28 @@ Guidance for working on Engram Garden.
   `internal/skillfile` (SKILL.md and skill directories), the MCP tools `list_skills`, `get_skill`,
   `save_skill`, `delete_skill`, `engram skill`, `python/src/engram_garden/skills.py`, and
   `pi/engram/skills.ts` (the pi package keeps them on disk for pi and saves edits back).
+- Sessions (`docs/design/sessions.md`): every session identity keeps its
+  transcript in the principal's **archive** (`garden.engram.archive`, its
+  own space type), as a `garden.engram.session` record in the identity's own
+  repo naming the transcript's chunks, which are space **blobs**
+  (`com.atproto.repo.uploadBlob`, read with `com.atproto.space.getBlob`,
+  always checked against their CID). The last chunk grows with each push
+  until it holds 3 MiB. `internal/lex/session.go`, `internal/agent/archive.go`
+  (`Archive`: pushes as the identity, reads as an identity or the principal),
+  `internal/mcpserver/archive.go` (`list_sessions`, `pull_session`,
+  `push_session`, `delete_session`; only with `ENGRAM_IDENTITY` and an
+  archive), `cmd/engram/sessions.go` (`engram archive`, `engram sessions`, as
+  the principal), and `pi/engram/sessionsync.ts` (pushes on turn end and
+  session end; pi never shows the model `push_session` or `delete_session`).
+  The appview indexes archives: `internal/transcript` cuts pi transcripts
+  into passages (bump `transcript.Version` when its output changes),
+  `internal/redact` removes secrets from them, `internal/sessionindex`
+  fetches chunks, embeds passages and keeps per-session progress in
+  `spacestore.RepoPosition.State` (the indexer calls it for archive spaces),
+  and `internal/appview/sessions.go` serves `garden.engram.searchSessions`.
+  Agents: `search_sessions` and `read_session` (`internal/agent/archive_search.go`;
+  pi registers them as the model's own tools in `pi/engram/sessiontools.ts`).
+  Not in the Python client, like the lounge.
 - `internal/lex`: record formats: the space's config, the vectors memories
   carry (`f16le`), the query vector encoding, and the text that gets embedded.
 - `internal/embed`: OpenAI-compatible embedding client, the provider that

@@ -155,6 +155,9 @@ func NewServer(s *agent.Spaces, opts ...Option) *mcp.Server {
 	if o.lounge != nil {
 		addLoungeTools(srv, o.lounge)
 	}
+	if o.archive != nil {
+		addArchiveTools(srv, o.archive)
+	}
 	return srv
 }
 

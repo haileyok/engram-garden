@@ -47,13 +47,27 @@ const inWindow = (m: Mem, args: any) =>
 	(!args.since || m.createdAt >= args.since) && (!args.until || m.createdAt < args.until);
 
 const lounge = !!process.env.ENGRAM_IDENTITY;
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 const self: string = lounge ? JSON.parse(readFileSync(process.env.ENGRAM_IDENTITY!, "utf8")).did : "";
 const presences: any[] = [];
 const sentMessages: any[] = [];
 const events: any[] = [];
 let seq = 0;
 let wakeEvents: (() => void) | undefined;
+
+// Sessions, kept the way the real tool keeps them: bytes of a transcript
+// per session, appended to unless the caller says replace.
+// Only an agent with an identity in an archive keeps sessions (FAKE_ARCHIVE
+// stands in for the archive).
+interface StoredSession {
+	session: Record<string, any>;
+	data: string;
+}
+const archive = !!process.env.FAKE_ARCHIVE;
+const sessions = new Map<string, StoredSession>(
+	(JSON.parse(process.env.FAKE_SESSIONS ?? "[]") as any[]).map((s) => [s.session.sessionId, { session: s.session, data: s.data ?? "" }]),
+);
+const entriesOf = (data: string) => data.split("\n").filter(Boolean).length;
 
 function tool(name: string, args: any): unknown {
 	if (!lounge && ["lounge_status", "list_agents", "send_message", "list_messages", "set_presence", "debug_lounge", "debug_deliver"].includes(name))
@@ -161,6 +175,69 @@ function tool(name: string, args: any): unknown {
 		}
 		case "debug_skills":
 			return { skills: [...skills.values()] };
+		case "list_sessions":
+			return {
+				sessions: [...sessions.values()].map((s) => ({
+					...s.session,
+					head: { bytes: s.data.length, entries: entriesOf(s.data) },
+					author: "did:plc:a",
+				})),
+			};
+		case "push_session": {
+			const id = args.session.sessionId;
+			const cur = sessions.get(id);
+			if (cur && !args.replace && args.fromBytes !== cur.data.length)
+				return { session: id, bytes: cur.data.length, entries: entriesOf(cur.data), storedBytes: 0, resync: true };
+			const base = args.replace ? "" : (cur?.data ?? "");
+			// A trailing line without its newline is held back, like the real one.
+			const add = String(args.data ?? "");
+			const complete = add.slice(0, add.lastIndexOf("\n") + 1);
+			const kept = base + complete;
+			sessions.set(id, { session: { ...args.session, kind: "session" }, data: kept });
+			// Tests read what was stored after the server is gone.
+			if (process.env.FAKE_SESSIONS_OUT) writeFileSync(process.env.FAKE_SESSIONS_OUT, JSON.stringify([...sessions.values()]));
+			return { session: id, bytes: kept.length, entries: entriesOf(kept), chunks: 1, storedBytes: complete.length };
+		}
+		case "pull_session": {
+			const s = sessions.get(args.session);
+			if (!s) throw new Error(`no session ${args.session} in the archive`);
+			return { ...s.session, head: { bytes: s.data.length, entries: entriesOf(s.data) }, author: "did:plc:a", data: s.data };
+		}
+		case "search_sessions":
+			return {
+				passages: [
+					{
+						session: "at://did:plc:p/space/garden.engram.archive/sessions/did:plc:bob/garden.engram.session/s9",
+						author: "did:plc:bob",
+						sessionId: "s9",
+						kind: "error",
+						entry: "e42",
+						offset: 4096,
+						text: `Failed: $ go test ./...\nFAIL TestModelChange\n\nThen: the fix for ${args.query ?? "it"}`,
+						repo: "github.com/haileyok/engram-garden",
+						agent: "session",
+						createdAt: "2026-11-20T10:00:00.000Z",
+					},
+				],
+				mode: "hybrid",
+				note: "Passages are quoted from other sessions' transcripts (redacted)",
+			};
+		case "read_session":
+			return {
+				session: args.session,
+				author: "did:plc:bob",
+				title: "model change",
+				entries: [
+					{ id: "e41", role: "assistant", text: "→ $ go test ./..." },
+					{ id: "e42", role: "error", text: "bash: FAIL TestModelChange", target: true },
+				],
+				moreBefore: true,
+				note: "quoted",
+			};
+		case "delete_session":
+			return { deleted: `at://did:plc:a/garden.engram.session/${args.session}` };
+		case "debug_sessions":
+			return { sessions: [...sessions.values()] };
 		default:
 			throw new Error(`unknown tool ${name}`);
 	}
@@ -199,12 +276,15 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 				},
 			});
 		case "tools/list":
+			// FAKE_SLOW_TOOLS stands in for an engram-mcp slow to start.
+			if (process.env.FAKE_SLOW_TOOLS) await new Promise((r) => setTimeout(r, Number(process.env.FAKE_SLOW_TOOLS)));
 			return send({
 				jsonrpc: "2.0",
 				id: msg.id,
 				result: {
 					tools: [
-						"list_spaces", "remember", "recall", "get_memory", "list_memories", "forget", "debug_hang", "list_skills", "get_skill", "save_skill", "debug_skills", "debug_recalls",
+						"list_spaces", "remember", "recall", "get_memory", "list_memories", "forget", "debug_hang", "list_skills", "get_skill", "save_skill", "debug_skills", "debug_recalls", "debug_sessions",
+						...(lounge || archive ? ["list_sessions", "push_session", "pull_session", "delete_session", "search_sessions", "read_session"] : []),
 						...(lounge ? ["lounge_status", "list_agents", "send_message", "list_messages", "set_presence", "lounge_events", "debug_lounge", "debug_deliver"] : []),
 					].map((name) => ({
 						name,

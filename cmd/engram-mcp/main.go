@@ -12,7 +12,9 @@
 // also joins that identity's lounge as the agent: its presence, messages,
 // and the lounge's live stream (list_agents, send_message, list_messages,
 // set_presence, lounge_events, lounge_status). Memories then record the
-// identity as the agent they were written for (via).
+// identity as the agent they were written for (via). When the identity has
+// an archive (or ENGRAM_ARCHIVE names one), it keeps the session there
+// (push_session, list_sessions, pull_session, delete_session).
 package main
 
 import (
@@ -123,18 +125,29 @@ func run(log *slog.Logger) error {
 	if settings.Identity != "" {
 		// Signing in as the identity mustn't hold up memory for long.
 		octx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		l, id, err := agent.OpenLounge(octx, settings, agent.Options{HTTP: &http.Client{Timeout: time.Minute}, Log: log})
+		io := agent.Options{HTTP: &http.Client{Timeout: time.Minute}, Log: log}
+		c, id, err := agent.IdentityClient(octx, settings, io)
 		cancel()
 		if err != nil {
-			log.Warn("can't join the lounge; the lounge tools are off", "identity", settings.Identity, "err", err)
+			log.Warn("can't sign in as the agent's identity; the lounge and session tools are off", "identity", settings.Identity, "err", err)
 		} else {
-			opts = append(opts, mcpserver.WithLounge(l))
-			loungeDone = make(chan struct{})
-			go func() {
-				defer close(loungeDone)
-				l.Run(ctx)
-			}()
-			log.Info("joined the lounge", "agent", id.DID, "handle", id.Handle, "lounge", l.Space)
+			if l, err := agent.NewLounge(c, id, settings, io); err != nil {
+				log.Warn("no lounge; the lounge tools are off", "agent", id.DID, "err", err)
+			} else {
+				opts = append(opts, mcpserver.WithLounge(l))
+				loungeDone = make(chan struct{})
+				go func() {
+					defer close(loungeDone)
+					l.Run(ctx)
+				}()
+				log.Info("joined the lounge", "agent", id.DID, "handle", id.Handle, "lounge", l.Space)
+			}
+			if ar, err := agent.NewArchive(c, id, settings); err != nil {
+				log.Info("no archive; sessions aren't kept", "agent", id.DID, "err", err)
+			} else {
+				opts = append(opts, mcpserver.WithArchive(ar))
+				log.Info("keeping sessions in the archive", "agent", id.DID, "archive", ar.Space)
+			}
 		}
 	}
 	// The lounge marks the agent ended on the way out.

@@ -12,9 +12,6 @@ import (
 const (
 	// SkillCollection holds skills, keyed by name.
 	SkillCollection = "garden.engram.skill"
-	// SessionCollection holds where agents' working sessions stand, keyed
-	// by the harness's session ID.
-	SessionCollection = "garden.engram.session"
 )
 
 // Skill is a garden.engram.skill record: instructions for a kind of work in

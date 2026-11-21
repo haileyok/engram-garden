@@ -60,6 +60,9 @@ async function harness(settings: Record<string, unknown> = {}): Promise<Harness>
 		JSON.stringify({ command: process.execPath, args: [fake], env: { FAKE_MEMORIES: JSON.stringify(seeded) }, ...settings }),
 	);
 	process.env.PI_CODING_AGENT_DIR = dir;
+	// A session file the sync can read, as pi would have written it.
+	const sessionFile = join(dir, "session.jsonl");
+	writeFileSync(sessionFile, `{"type":"session","version":3,"id":"test-session","timestamp":"2026-10-23T00:00:00.000Z","cwd":"${dir}"}\n`);
 	process.env.XDG_CACHE_HOME = join(dir, "cache");
 	process.env.XDG_STATE_HOME = join(dir, "state");
 	const { default: engram } = await import("../engram/index.ts");
@@ -106,7 +109,15 @@ async function harness(settings: Record<string, unknown> = {}): Promise<Harness>
 			setStatus: () => {},
 			theme: { fg: (_: string, s: string) => s, bg: (_: string, s: string) => s, bold: (s: string) => s },
 		},
-		sessionManager: { getBranch: () => h.branch, getSessionFile: () => join(dir, "session.jsonl") },
+		sessionManager: {
+			getBranch: () => h.branch,
+			getEntries: () => h.branch,
+			getSessionFile: () => sessionFile,
+			getSessionId: () => "test-session",
+			getSessionName: () => undefined,
+			getSessionDir: () => dir,
+			getHeader: () => ({ timestamp: "2026-10-23T00:00:00.000Z" }),
+		},
 		modelRegistry: {
 			find: () => undefined,
 			complete: async (_model: any, context: any, opts: any) => {
@@ -1046,6 +1057,129 @@ test("consolidation reasons briefly, reads ids, and says why it stored as writte
 		h.completions.push(async () => ({ stopReason: "error", content: [], errorMessage: "503: inference audit sink unavailable" }));
 		const out = await h.tools.get("remember").execute("r2", { text: "Attie pop2 deploys use the Deploy Attie workflow since 2026-10-21." }, undefined, undefined, h.ctx);
 		assert.match(out.content[0].text, /Stored as written: comparing it with similar memories failed: 503: inference audit sink unavailable\./);
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("the session's transcript is stored, listed, and pulled back", async () => {
+	const h = await harness({ autoCapture: false, env: { FAKE_ARCHIVE: "1" } });
+	const dir = process.env.PI_CODING_AGENT_DIR!;
+	const file = join(dir, "session.jsonl");
+	try {
+		await start(h);
+		await waitFor(() => h.tools.has("engram_list_sessions"));
+		// The harness's own session tools never reach the model.
+		assert.ok(!h.tools.has("engram_push_session") && !h.tools.has("engram_delete_session"));
+		// Searching and reading sessions are the model's own tools.
+		const found = await h.tools.get("search_sessions").execute("t1", { query: "model change drops memories" }, undefined);
+		const shown = found.content[0].text;
+		assert.match(shown, /quoted/);
+		assert.match(shown, /\[1\] error · 2026-11-20 10:00 · did:plc:bob/);
+		assert.match(shown, /entry: e42  offset: 4096/);
+		assert.match(shown, /Then: the fix for model change drops memories/);
+		const read = await h.tools.get("read_session").execute("t2", { session: "s9", entry: "e42", offset: 4096 }, undefined);
+		assert.match(read.content[0].text, /▶ e42 error\n  bash: FAIL TestModelChange/);
+		assert.match(read.content[0].text, /… earlier entries/);
+		assert.ok(!h.tools.has("engram_search_sessions"), "search_sessions is the model's tool, not codemode's");
+		h.addMessage("user", "audit the template handlers for cross-tenant reads");
+		// The transcript grows the way pi's file does.
+		writeFileSync(
+			file,
+			`${readFileSync(file, "utf8")}{"type":"message","id":"m1","parentId":null,"timestamp":"2026-10-23T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"audit the template handlers"}]}}\n`,
+			{ flag: "a" },
+		);
+		await h.emit("agent_settled", { type: "agent_settled", aborted: false });
+		await waitFor(() => h.branch.some((e) => e.customType === "engram-session-sync"));
+		const sync = h.branch.find((e) => e.customType === "engram-session-sync");
+		assert.ok(sync.data.bytes >= readFileSync(file).length - 1, "stored as much as the file holds");
+
+		// The session is in the space, with what's worth knowing about it.
+		const out = h.commands.get("engram");
+		h.notes.length = 0;
+		await out.handler("sessions", h.ctx);
+		assert.match(h.notes.join("\n"), /test-session/);
+		assert.match(h.notes.join("\n"), /audit the template handlers/);
+
+		// Pulling it writes a session file where pi looks for one.
+		h.notes.length = 0;
+		await out.handler("pull test-session", h.ctx);
+		const path = h.notes[0].match(/is at (\S+)/)?.[1];
+		assert.ok(path, h.notes[0]);
+		assert.match(readFileSync(path!, "utf8"), /audit the template handlers/);
+		assert.match(path!, /--.*--\/\d{4}-\d{2}-\d{2}T[\d-]+Z_test-session\.jsonl$/);
+	} finally {
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("a subagent's in-memory session is pushed too, and marked ended", async () => {
+	const out = join(mkdtempSync(join(tmpdir(), "pi-sub-")), "sessions.json");
+	const h = await harness({ autoCapture: false, env: { FAKE_ARCHIVE: "1", FAKE_SESSIONS_OUT: out } });
+	h.ctx.mode = "print";
+	h.ctx.hasUI = false;
+	h.ctx.sessionManager.getSessionFile = () => undefined;
+	h.ctx.sessionManager.getSessionId = () => "sub-session";
+	h.ctx.sessionManager.getHeader = () => ({ type: "session", version: 3, id: "sub-session", timestamp: "2026-11-21T00:00:00.000Z", cwd: "/tmp" });
+	process.env.PI_ENGRAM_TASK = "find where the indexer drops memories";
+	let shut = false;
+	try {
+		await start(h);
+		await waitFor(() => h.tools.has("engram_debug_sessions"));
+		h.addMessage("user", "find where the indexer drops memories");
+		h.addMessage("assistant", "In SetConfig.");
+		await h.emit("agent_settled", { type: "agent_settled", aborted: false });
+		await waitFor(() => h.branch.some((e) => e.customType === "engram-session-sync"));
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+		shut = true;
+		const stored = JSON.parse(readFileSync(out, "utf8")).find((x: any) => x.session.sessionId === "sub-session");
+		assert.ok(stored, "the subagent's session was stored");
+		assert.equal(stored.session.status, "ended");
+		assert.equal(stored.session.title, "find where the indexer drops memories");
+		const lines = stored.data.trim().split("\n").map((l: string) => JSON.parse(l));
+		assert.equal(lines[0].type, "session");
+		assert.ok(lines.some((l: any) => l.message?.content?.[0]?.text === "In SetConfig."), "the reply is in the transcript");
+		// Pushed once as it went, and the rest at the end: nothing twice.
+		assert.equal(lines.filter((l: any) => l.message?.content?.[0]?.text === "In SetConfig.").length, 1);
+	} finally {
+		delete process.env.PI_ENGRAM_TASK;
+		if (!shut) await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
+test("a subagent that ends before engram-mcp's tools are known still pushes its session", async () => {
+	const out = join(mkdtempSync(join(tmpdir(), "pi-sub-")), "sessions.json");
+	const h = await harness({ autoCapture: false, autoRecall: false, env: { FAKE_ARCHIVE: "1", FAKE_SESSIONS_OUT: out, FAKE_SLOW_TOOLS: "400" } });
+	h.ctx.mode = "print";
+	h.ctx.hasUI = false;
+	h.ctx.sessionManager.getSessionFile = () => undefined;
+	h.ctx.sessionManager.getSessionId = () => "quick-sub";
+	h.ctx.sessionManager.getHeader = () => ({ type: "session", version: 3, id: "quick-sub", timestamp: "2026-11-21T00:00:00.000Z", cwd: "/tmp" });
+	await h.emit("session_start", { type: "session_start" });
+	h.addMessage("user", "one quick question");
+	h.addMessage("assistant", "one quick answer");
+	await h.emit("agent_settled", { type: "agent_settled", aborted: false });
+	await h.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+	const stored = JSON.parse(readFileSync(out, "utf8")).find((x: any) => x.session.sessionId === "quick-sub");
+	assert.ok(stored, "the session was pushed");
+	assert.equal(stored.session.status, "ended");
+	assert.match(stored.data, /one quick answer/);
+});
+
+test("without an archive, the session isn't pushed", async () => {
+	const h = await harness({ autoCapture: false });
+	try {
+		await start(h);
+		// engram-mcp's tools are known by now.
+		await waitFor(() => h.tools.has("engram_debug_sessions"));
+		writeFileSync(
+			join(process.env.PI_CODING_AGENT_DIR!, "session.jsonl"),
+			`${readFileSync(join(process.env.PI_CODING_AGENT_DIR!, "session.jsonl"), "utf8")}{"type":"message","id":"m2","timestamp":"2026-10-23T00:00:02.000Z","message":{"role":"user","content":[{"type":"text","text":"second"}]}}\n`,
+			{ flag: "a" },
+		);
+		await h.emit("agent_settled", { type: "agent_settled", aborted: false });
+		await new Promise((r) => setTimeout(r, 200));
+		assert.ok(!h.branch.some((e) => e.customType === "engram-session-sync"), "pushed without an archive");
 	} finally {
 		await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
 	}

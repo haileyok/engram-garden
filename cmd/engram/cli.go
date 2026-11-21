@@ -18,6 +18,7 @@ import (
 
 	"github.com/haileyok/engram-garden/internal/agent"
 	"github.com/haileyok/engram-garden/internal/embed"
+	"github.com/haileyok/engram-garden/internal/spaceclient"
 )
 
 // cli runs one command. Its fields are the outside world, so tests can
@@ -57,6 +58,10 @@ type cli struct {
 	principalSession func(ctx context.Context, p agent.Principal) (*atclient.APIClient, error)
 	// openLounge signs in as the agent identity the settings name.
 	openLounge func(ctx context.Context, s agent.Settings) (*agent.Lounge, agent.Identity, error)
+	// identityClient signs in as the agent identity the settings name, and
+	// spaceClient reads spaces through a session (the principal's).
+	identityClient func(ctx context.Context, s agent.Settings) (*spaceclient.Client, agent.Identity, error)
+	spaceClient    func(sess *atclient.APIClient) (*spaceclient.Client, error)
 	// verifyAgent returns the principals an agent declares and whether each
 	// endorses it.
 	verifyAgent func(ctx context.Context, did string) (map[string]bool, error)
@@ -161,6 +166,15 @@ Skills (instructions every agent in a space shares; --space picks one):
   engram skill rm <name>                     delete your own version of a skill
 
 %s
+Sessions (agents keep their transcripts in the principal's archive; read as the principal):
+  engram archive create <name> [--model m]   make the archive agents keep their sessions in
+  engram archive model <model>               declare the model the appview embeds passages with
+  engram archive index [--stop]              let the appview index it (approve in the browser)
+  engram sessions search <query> [--kind k --repo r --file f --cmd c]   search every session's transcript
+  engram sessions list [--author did]        the sessions in the archive
+  engram sessions pull <id|uri> [--to file]  one transcript, as complete JSONL lines
+  engram sessions rm <id|uri>                delete a session (needs its agent's identity file)
+
 Add --json to any command for machine-readable output. MCP clients can run
 engram-mcp, which uses the same settings.
 
@@ -202,6 +216,7 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		"create": c.cmdCreate, "members": c.cmdMembers, "model": c.cmdModel, "index": c.cmdIndex,
 		"skill": c.cmdSkill, "skills": c.cmdSkill,
 		"principal": c.cmdPrincipal, "lounge": c.cmdLounge, "agent": c.cmdAgent,
+		"session": c.cmdSessions, "sessions": c.cmdSessions, "archive": c.cmdArchive,
 	}
 	cmd, ok := cmds[rest[0]]
 	if !ok {

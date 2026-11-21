@@ -1,0 +1,234 @@
+{
+  "lexicon": 1,
+  "id": "garden.engram.searchSessions",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Search an archive's session transcripts, cut by the service into redacted passages: a prompt and its final answer (turn), what an agent said and the calls it made (step), a failed call with the start and end of its output and what came next (error), compaction summaries (summary), and session records' titles and summaries (session). Ranking works as in searchMemories. Requires a space credential for the archive, presented with an HTTP message signature whose audience is this service's DID.",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "space"
+        ],
+        "properties": {
+          "space": {
+            "type": "string",
+            "description": "The archive's URI (a garden.engram.archive space)."
+          },
+          "q": {
+            "type": "string",
+            "maxLength": 4000,
+            "description": "The query's text. A service that embeds queries embeds it with the archive's model; otherwise the search is by keyword alone. Empty lists the newest passages matching the filters."
+          },
+          "vector": {
+            "type": "string",
+            "maxLength": 43000,
+            "description": "The query's vector: little-endian IEEE half precision, base64url-encoded without padding."
+          },
+          "model": {
+            "type": "string",
+            "description": "Must match the space's model."
+          },
+          "modelDigest": {
+            "type": "string",
+            "description": "Must match the space's model digest."
+          },
+          "mode": {
+            "type": "string",
+            "knownValues": [
+              "hybrid",
+              "vector",
+              "keyword"
+            ],
+            "description": "hybrid (the default with q and a vector) ranks by meaning and exact words; vector ignores q for ranking; keyword ranks by q's words alone, needs no vector, and answers KeywordIndexBuilding until the space has a keyword index. An explicit mode never falls back."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 10
+          },
+          "author": {
+            "type": "string",
+            "format": "did",
+            "description": "Only passages of this agent's sessions."
+          },
+          "kind": {
+            "type": "string",
+            "knownValues": [
+              "turn",
+              "step",
+              "error",
+              "summary",
+              "session"
+            ],
+            "description": "Only this kind of passage."
+          },
+          "session": {
+            "type": "string",
+            "description": "Only this session (its ID)."
+          },
+          "repo": {
+            "type": "string",
+            "description": "Only sessions in this repository, as a remote URL or host/owner/name."
+          },
+          "branch": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string",
+            "description": "Only passages whose calls read or changed this path, as the call named it."
+          },
+          "cmd": {
+            "type": "string",
+            "description": "Only passages that ran this program (git, go test, kubectl, ...)."
+          },
+          "agent": {
+            "type": "string",
+            "knownValues": [
+              "session",
+              "subagent"
+            ],
+            "description": "Only top-level sessions, or only subagents."
+          },
+          "parent": {
+            "type": "string",
+            "format": "did",
+            "description": "Only subagents of this agent."
+          },
+          "since": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Only passages at or after this time."
+          },
+          "until": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Only passages before this time."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "passages"
+          ],
+          "properties": {
+            "passages": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#passageView"
+              }
+            },
+            "approximate": {
+              "type": "boolean"
+            },
+            "mode": {
+              "type": "string",
+              "knownValues": [
+                "hybrid",
+                "vector",
+                "keyword",
+                "list"
+              ],
+              "description": "What ran; list when there was no q."
+            }
+          }
+        }
+      }
+    },
+    "passageView": {
+      "type": "object",
+      "required": [
+        "session",
+        "author",
+        "sessionId",
+        "kind",
+        "offset",
+        "text",
+        "createdAt"
+      ],
+      "properties": {
+        "session": {
+          "type": "string",
+          "format": "at-uri",
+          "description": "The session record."
+        },
+        "author": {
+          "type": "string",
+          "format": "did",
+          "description": "The session's agent."
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "knownValues": [
+            "turn",
+            "step",
+            "error",
+            "summary",
+            "session"
+          ]
+        },
+        "entry": {
+          "type": "string",
+          "description": "The transcript entry the passage is anchored at."
+        },
+        "offset": {
+          "type": "integer",
+          "description": "That entry's byte offset in the transcript."
+        },
+        "text": {
+          "type": "string",
+          "description": "The passage, redacted."
+        },
+        "repo": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "agent": {
+          "type": "string",
+          "knownValues": [
+            "session",
+            "subagent"
+          ]
+        },
+        "parent": {
+          "type": "string",
+          "format": "did"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "similarity": {
+          "type": "integer",
+          "description": "Cosine similarity to the query, times 1000, when a vector ranked it."
+        },
+        "match": {
+          "type": "ref",
+          "ref": "garden.engram.defs#matchView"
+        }
+      }
+    }
+  }
+}

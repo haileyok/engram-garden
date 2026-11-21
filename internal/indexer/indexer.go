@@ -23,6 +23,7 @@ import (
 
 	"github.com/haileyok/engram-garden/internal/lex"
 	"github.com/haileyok/engram-garden/internal/metrics"
+	"github.com/haileyok/engram-garden/internal/sessionindex"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
 	"github.com/haileyok/engram-garden/internal/spacestore"
 )
@@ -36,6 +37,10 @@ type Indexer struct {
 	Client *spaceclient.Client
 	Dir    identity.Directory
 	Log    *slog.Logger
+	// Sessions indexes archives (garden.engram.archive spaces): their
+	// session records become passages of the transcripts they name. Nil
+	// indexes no archives.
+	Sessions *sessionindex.Indexer
 	// PageSize is the listRepoOps page size.
 	PageSize int
 
@@ -174,7 +179,7 @@ func (ix *Indexer) syncSpaceOnce(ctx context.Context, spaceURI string) error {
 			continue
 		}
 		isListed[r.DID] = true
-		if p, ok := known[r.DID]; ok && p.SpaceRev >= r.SpaceRev {
+		if p, ok := known[r.DID]; ok && p.SpaceRev >= r.SpaceRev && ix.current(ctx, spaceURI, p) {
 			continue
 		}
 		if err := ix.SyncRepo(ctx, spaceURI, r.DID, r.SpaceRev); err != nil {
@@ -331,7 +336,7 @@ func (ix *Indexer) SyncRepo(ctx context.Context, spaceURI, did, spaceRev string)
 	if err != nil {
 		return err
 	}
-	if st != nil && st.SetHash != nil {
+	if st != nil && st.SetHash != nil && ix.current(ctx, spaceURI, *st) {
 		mode = "incremental"
 		err := ix.syncIncremental(ctx, spaceURI, did, *st, spaceRev, false)
 		if errors.Is(err, errKemRotated) {
@@ -384,8 +389,12 @@ func (ix *Indexer) reader() *Reader {
 
 func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st spacestore.RepoPosition, spaceRev string, fresh bool) error {
 	ref, _ := space.ParseRef(spaceURI)
+	archive := IsArchive(spaceURI)
 	want := func(coll, rkey string) bool {
 		isConfig := did == ref.Authority && coll == lex.ConfigCollection && rkey == lex.ConfigRkey
+		if archive {
+			return coll == lex.SessionCollection || isConfig
+		}
 		return coll == Collection || isConfig
 	}
 	changes, pos, commit, err := ix.reader().ReadOps(ctx, spaceURI, did, Position{Rev: st.Rev, SetHash: st.SetHash}, fresh, want)
@@ -395,7 +404,16 @@ func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st
 
 	var upserts []spacestore.Memory
 	var deletes []string
+	var sessions []sessionindex.Change
 	for _, c := range changes {
+		if archive && c.Collection == lex.SessionCollection {
+			sc := sessionindex.Change{Rkey: c.Rkey, Record: c.Record}
+			if c.Cid == nil {
+				sc.Record = nil
+			}
+			sessions = append(sessions, sc)
+			continue
+		}
 		if c.Collection == lex.ConfigCollection {
 			resync, err := ix.applyConfig(ctx, spaceURI, c.Record)
 			if err != nil {
@@ -419,7 +437,20 @@ func (ix *Indexer) syncIncremental(ctx context.Context, spaceURI, did string, st
 			deletes = append(deletes, c.Rkey)
 		}
 	}
-	next := spacestore.RepoPosition{Rev: pos.Rev, SetHash: pos.SetHash, SpaceRev: max(st.SpaceRev, spaceRev)}
+	next := spacestore.RepoPosition{Rev: pos.Rev, SetHash: pos.SetHash, SpaceRev: max(st.SpaceRev, spaceRev), State: st.State}
+	if archive {
+		err := ix.deriveSessions(ctx, spaceURI, did, &st, next, sessions, false)
+		if errors.Is(err, sessionindex.ErrNeedFull) {
+			return fmt.Errorf("%w: %v", errResync, err)
+		}
+		if err != nil {
+			return err
+		}
+		if len(sessions) > 0 {
+			ix.log().Info("synced archive repo", "space", spaceURI, "repo", did, "sessions", len(sessions), "rev", commit.Rev)
+		}
+		return nil
+	}
 	if err := ix.apply(ctx, spaceURI, did, next, upserts, deletes, false); err != nil {
 		return err
 	}
@@ -528,6 +559,24 @@ func (ix *Indexer) syncFull(ctx context.Context, spaceURI, did, spaceRev string,
 			return err
 		}
 	}
+	next := spacestore.RepoPosition{Rev: pos.Rev, SetHash: pos.SetHash, SpaceRev: spaceRev}
+	if IsArchive(spaceURI) {
+		var sessions []sessionindex.Change
+		for _, r := range records {
+			if r.Collection == lex.SessionCollection {
+				sessions = append(sessions, sessionindex.Change{Rkey: r.Rkey, Record: r.Record})
+			}
+		}
+		prev, err := ix.Store.RepoState(ctx, spaceURI, did)
+		if err != nil {
+			return err
+		}
+		if err := ix.deriveSessions(ctx, spaceURI, did, prev, next, sessions, true); err != nil {
+			return err
+		}
+		ix.log().Info("exported archive repo", "space", spaceURI, "repo", did, "sessions", len(sessions), "rev", pos.Rev)
+		return nil
+	}
 	var upserts []spacestore.Memory
 	for _, r := range records {
 		if r.Collection != Collection {
@@ -537,12 +586,66 @@ func (ix *Indexer) syncFull(ctx context.Context, spaceURI, did, spaceRev string,
 			upserts = append(upserts, m)
 		}
 	}
-	next := spacestore.RepoPosition{Rev: pos.Rev, SetHash: pos.SetHash, SpaceRev: spaceRev}
 	if err := ix.apply(ctx, spaceURI, did, next, upserts, nil, true); err != nil {
 		return err
 	}
 	ix.log().Info("exported repo", "space", spaceURI, "repo", did, "memories", len(upserts), "rev", pos.Rev)
 	return nil
+}
+
+// IsArchive reports whether a space is an archive, whose session records
+// are indexed as passages of their transcripts.
+func IsArchive(spaceURI string) bool {
+	ref, err := space.ParseRef(spaceURI)
+	return err == nil && ref.Type == lex.ArchiveType
+}
+
+// current reports whether a repo's derived state is up to date with how
+// the space is indexed now (always, outside archives).
+func (ix *Indexer) current(ctx context.Context, spaceURI string, p spacestore.RepoPosition) bool {
+	if !IsArchive(spaceURI) || len(p.State) == 0 {
+		return true
+	}
+	cfg, err := ix.Store.Config(ctx, spaceURI)
+	if err != nil {
+		return true
+	}
+	return sessionindex.Current(p.State, cfg)
+}
+
+// deriveSessions indexes an archive repo's changed session records, a
+// batch at a time. Every batch but the last keeps the repo at its previous
+// position, with the progress made in its state, so a sync cut short reads
+// the same records again and carries on where it stopped.
+func (ix *Indexer) deriveSessions(ctx context.Context, spaceURI, did string, prev *spacestore.RepoPosition, next spacestore.RepoPosition, changes []sessionindex.Change, full bool) error {
+	if ix.Sessions == nil {
+		return errors.New("this appview doesn't index archives")
+	}
+	hold := spacestore.RepoPosition{}
+	var state json.RawMessage
+	if prev != nil {
+		hold, state = *prev, prev.State
+	}
+	return ix.Sessions.Derive(ctx, spaceURI, did, state, changes, full, func(b sessionindex.Batch) error {
+		pos := hold
+		if b.Done {
+			pos = next
+		}
+		pos.State = b.State
+		err := ix.Store.ApplyRepoChanges(ctx, spaceURI, did, pos, b.Upserts, b.Deletes, false)
+		if err == nil || errors.Is(err, spacestore.ErrOverLimit) {
+			recordsIndexed.WithLabelValues("upsert").Add(float64(len(b.Upserts)))
+			recordsIndexed.WithLabelValues("delete").Add(float64(len(b.Deletes)))
+		}
+		if errors.Is(err, spacestore.ErrOverLimit) {
+			// The store held passages back and kept the old position and
+			// state: stop here, so the cutter's progress isn't published past
+			// them by a later batch. The next sync tries again.
+			overLimit.Inc()
+			ix.log().Warn("archive is over a limit; its passages wait", "space", spaceURI, "repo", did)
+		}
+		return err
+	})
 }
 
 // memoryFromRecord reads a garden.engram.memory record. Records without

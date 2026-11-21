@@ -43,6 +43,9 @@ func PrincipalScopes(pdsDID string) []string {
 		"rpc:" + CreateAgentNSID + "?aud=" + pdsDID,
 		"repo:" + lex.EndorsementCollection,
 		"space:" + lex.LoungeType + "?collection=" + lex.PresenceCollection + "&action=read&manage=create&manage=update",
+		// The archive: create it, manage its members, declare its model,
+		// and read every session in it.
+		"space:" + lex.ArchiveType + "?collection=" + lex.SessionCollection + "&collection=" + lex.ConfigCollection + "&action=read&action=create&action=update&manage=create&manage=update",
 	}
 }
 
@@ -76,6 +79,8 @@ type Principal struct {
 	RecoveryKey string `json:"recoveryKey,omitempty"`
 	// Lounge is the lounge every new agent joins.
 	Lounge string `json:"lounge,omitempty"`
+	// Archive is the archive every new agent keeps its sessions in.
+	Archive string `json:"archive,omitempty"`
 	// Stock is how many unclaimed identities to keep ready, so a session
 	// doesn't wait for its account to be created (default 4).
 	Stock int `json:"stock,omitempty"`
@@ -134,8 +139,36 @@ func (p Principal) Check() error {
 			return fmt.Errorf("lounge must be a %s space URI, not %q", lex.LoungeType, p.Lounge)
 		}
 	}
+	if p.Archive != "" {
+		ref, err := space.ParseRef(p.Archive)
+		if err != nil || ref.Type != lex.ArchiveType {
+			return fmt.Errorf("archive must be a %s space URI, not %q", lex.ArchiveType, p.Archive)
+		}
+	}
 	return nil
 }
+
+// CheckArchive reports what's missing before the principal can run an
+// archive: one, and a sign-in that asked for it.
+func (p Principal) CheckArchive() error {
+	if p.Archive == "" {
+		return errors.New("no archive yet: engram archive create <name>")
+	}
+	return p.checkArchiveScope()
+}
+
+func (p Principal) checkArchiveScope() error {
+	for _, s := range p.Scopes {
+		if strings.HasPrefix(s, "space:"+lex.ArchiveType) {
+			return nil
+		}
+	}
+	return errors.New("the principal's sign-in predates archives: run `engram principal login` again")
+}
+
+// CheckCreateArchive reports whether the principal's sign-in can create an
+// archive.
+func (p Principal) CheckCreateArchive() error { return p.checkArchiveScope() }
 
 func (p Principal) stock() int {
 	if p.Stock > 0 {
@@ -153,12 +186,15 @@ type Identity struct {
 	Password  string `json:"password"`
 	PDSHost   string `json:"pdsHost"`
 	Principal string `json:"principal"`
-	// Lounge is the lounge the agent was added to.
-	Lounge string `json:"lounge,omitempty"`
-	// Endorsed and Joined say whether the principal's endorsement and the
-	// lounge membership are done; a claim finishes what isn't.
+	// Lounge is the lounge the agent was added to, and Archive the archive.
+	Lounge  string `json:"lounge,omitempty"`
+	Archive string `json:"archive,omitempty"`
+	// Endorsed, Joined and Archived say whether the principal's
+	// endorsement, the lounge membership and the archive membership are
+	// done; a claim finishes what isn't.
 	Endorsed  bool      `json:"endorsed"`
 	Joined    bool      `json:"joined"`
+	Archived  bool      `json:"archived,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 	// Kind (session, subagent), Session and Parent are set when the
 	// identity is claimed.
@@ -268,7 +304,7 @@ func (pv *Provisioner) Create(ctx context.Context) (Identity, string, error) {
 	}
 	id := Identity{
 		DID: out.DID, Handle: out.Handle, Password: out.Password, PDSHost: strings.TrimSuffix(pv.Session.Host, "/"),
-		Principal: p.Account.DID, Lounge: p.Lounge, Endorsed: out.Endorsed, CreatedAt: pv.now().UTC(),
+		Principal: p.Account.DID, Lounge: p.Lounge, Archive: p.Archive, Endorsed: out.Endorsed, CreatedAt: pv.now().UTC(),
 	}
 	stock := filepath.Join(pv.Dir, "stock")
 	if err := os.MkdirAll(stock, 0o700); err != nil {
@@ -300,6 +336,16 @@ func (pv *Provisioner) finish(ctx context.Context, path string, id Identity) (Id
 			return id, manageErr("adding the agent to the lounge", err)
 		}
 		id.Joined = true
+		if err := writeIdentity(path, id); err != nil {
+			return id, err
+		}
+	}
+	if !id.Archived && id.Archive != "" {
+		body := map[string]any{"space": id.Archive, "members": []Member{{DID: id.DID, Read: true, Write: true}}}
+		if err := pv.Session.Post(ctx, "com.atproto.memberspace.putMembers", body, nil); err != nil {
+			return id, manageErr("adding the agent to the archive", err)
+		}
+		id.Archived = true
 		if err := writeIdentity(path, id); err != nil {
 			return id, err
 		}
@@ -359,8 +405,15 @@ func (pv *Provisioner) Claim(ctx context.Context, in ClaimIn) (Identity, string,
 		if err := os.Rename(stockPath, path); err != nil {
 			return id, "", err
 		}
-	} else if id, err = pv.finish(ctx, path, id); err != nil {
-		return id, path, err
+	} else {
+		// One stocked before the principal had this archive (or any) joins
+		// the archive the principal uses now.
+		if id.Archive != pv.Principal.Archive {
+			id.Archive, id.Archived = pv.Principal.Archive, false
+		}
+		if id, err = pv.finish(ctx, path, id); err != nil {
+			return id, path, err
+		}
 	}
 	id.Kind, id.Session, id.Parent, id.ClaimedAt = in.Kind, in.Session, in.Parent, pv.now().UTC()
 	return id, path, writeIdentity(path, id)
@@ -496,15 +549,25 @@ func endorses(ctx context.Context, dir identity.Directory, httpc *http.Client, p
 // CreateLounge creates a lounge governed by the principal (a member list:
 // only members read and write) and returns its URI.
 func CreateLounge(ctx context.Context, principal *atclient.APIClient, name string) (string, error) {
+	return createPrincipalSpace(ctx, principal, lex.LoungeType, name, "creating the lounge")
+}
+
+// CreateArchive creates an archive governed by the principal, where agents
+// keep their sessions, and returns its URI.
+func CreateArchive(ctx context.Context, principal *atclient.APIClient, name string) (string, error) {
+	return createPrincipalSpace(ctx, principal, lex.ArchiveType, name, "creating the archive")
+}
+
+func createPrincipalSpace(ctx context.Context, principal *atclient.APIClient, spaceType, name, doing string) (string, error) {
 	if _, err := syntax.ParseRecordKey(name); err != nil || name == "." || name == ".." {
 		return "", errors.New("names use letters, digits and . _ ~ : - (up to 512)")
 	}
-	body := map[string]any{"spaceType": lex.LoungeType, "skey": name, "policy": map[string]any{"$type": "com.atproto.memberspace.policy"}}
+	body := map[string]any{"spaceType": spaceType, "skey": name, "policy": map[string]any{"$type": "com.atproto.memberspace.policy"}}
 	var out struct {
 		Space string `json:"space"`
 	}
 	if err := principal.Post(ctx, "com.atproto.space.createSpace", body, &out); err != nil {
-		return "", manageErr("creating the lounge", err)
+		return "", manageErr(doing, err)
 	}
 	return out.Space, nil
 }
@@ -540,4 +603,29 @@ func GrantLink(ctx context.Context, appviewURL string, httpc *http.Client, space
 		return "", fmt.Errorf("the appview at %s doesn't take indexing grants", appviewURL)
 	}
 	return out.GrantURL + "?space=" + url.QueryEscape(spaceURI) + "&mode=" + mode, nil
+}
+
+// DeclareArchiveModel writes the archive's garden.engram.config: the model
+// the appview embeds its passages with. Changing it later re-embeds every
+// passage.
+func DeclareArchiveModel(ctx context.Context, principal *atclient.APIClient, archive string, m lex.ModelInfo) (lex.Config, error) {
+	ref, err := space.ParseRef(archive)
+	if err != nil {
+		return lex.Config{}, err
+	}
+	if ref.Type != lex.ArchiveType {
+		return lex.Config{}, fmt.Errorf("%s isn't an archive", archive)
+	}
+	cfg, err := lex.ChangeConfig(nil, lex.Declare, m, "", "")
+	if err != nil {
+		return cfg, err
+	}
+	body := map[string]any{
+		"space": archive, "repo": ref.Authority, "collection": lex.ConfigCollection, "rkey": lex.ConfigRkey,
+		"record": cfg.Record(time.Now()),
+	}
+	if err := principal.Post(ctx, "com.atproto.space.putRecord", body, nil); err != nil {
+		return cfg, manageErr("declaring the archive's model", err)
+	}
+	return cfg, nil
 }

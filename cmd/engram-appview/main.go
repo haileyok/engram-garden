@@ -36,6 +36,7 @@ import (
 	"github.com/haileyok/engram-garden/internal/lounge"
 	"github.com/haileyok/engram-garden/internal/metrics"
 	"github.com/haileyok/engram-garden/internal/routing"
+	"github.com/haileyok/engram-garden/internal/sessionindex"
 	"github.com/haileyok/engram-garden/internal/spaceclient"
 	"github.com/haileyok/engram-garden/internal/spacestore"
 )
@@ -148,6 +149,26 @@ func openStore(ctx context.Context, log *slog.Logger, ring *routing.Ring) (*spac
 //	                     (fine for development).
 func openControlFromEnv(ctx context.Context, log *slog.Logger) (control.Store, func(), error) {
 	return openControl(ctx, log, config.Get("ENGRAM_STORAGE", "dir"), config.Get("ENGRAM_DATABASE_URL", ""))
+}
+
+// sessionIndexFromEnv builds the archive indexer, or nil when it's off. It
+// embeds passages with the model ENGRAM_EMBED_* names, which has to be the
+// model an archive declares.
+//
+//	ENGRAM_ARCHIVES   false to index no archives (default true)
+func sessionIndexFromEnv(st *spacestore.Node, client *spaceclient.Client, log *slog.Logger) (*sessionindex.Indexer, error) {
+	switch v := config.Get("ENGRAM_ARCHIVES", "true"); v {
+	case "false":
+		return nil, nil
+	case "true":
+	default:
+		return nil, fmt.Errorf("ENGRAM_ARCHIVES must be true or false, not %q", v)
+	}
+	provider, err := config.Provider()
+	if err != nil {
+		return nil, err
+	}
+	return &sessionindex.Indexer{Store: st, Blobs: client, Embed: provider, Log: log}, nil
 }
 
 // textSearchFromEnv builds the embedder for searches that come as text, or
@@ -349,10 +370,14 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	sessions, err := sessionIndexFromEnv(st, client, log)
+	if err != nil {
+		return err
+	}
 	srv := &appview.Server{
 		TextSearch: textSearch,
 		Store:      st,
-		Indexer:    &indexer.Indexer{Store: st, Client: client, Dir: dir, Log: log},
+		Indexer:    &indexer.Indexer{Store: st, Client: client, Dir: dir, Log: log, Sessions: sessions},
 		Lounge:     &lounge.Service{Reader: &indexer.Reader{Client: client, Dir: dir}, Dir: dir, Log: log},
 		Dir:        dir,
 		Log:        log,

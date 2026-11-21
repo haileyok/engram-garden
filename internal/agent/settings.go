@@ -51,6 +51,9 @@ type Settings struct {
 	Identity string `json:"identity,omitempty"`
 	// Lounge is the lounge to join, overriding the identity's.
 	Lounge string `json:"lounge,omitempty"`
+	// Archive is the archive the identity keeps its sessions in, overriding
+	// the identity's.
+	Archive string `json:"archive,omitempty"`
 	// Via is recorded in memories as the agent they were written for;
 	// defaults to the identity's DID.
 	Via string `json:"via,omitempty"`
@@ -340,6 +343,7 @@ func (s *Settings) applyEnv(getenv func(string) string) error {
 	}
 	set(&s.Identity, "ENGRAM_IDENTITY")
 	set(&s.Lounge, "ENGRAM_LOUNGE")
+	set(&s.Archive, "ENGRAM_ARCHIVE")
 	set(&s.Via, "ENGRAM_VIA")
 	set(&s.Embed.URL, "ENGRAM_EMBED_URL")
 	set(&s.Embed.APIKey, "ENGRAM_EMBED_API_KEY")

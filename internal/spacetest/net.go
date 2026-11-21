@@ -26,6 +26,7 @@ import (
 	"github.com/bluesky-social/indigo/atproto/syntax"
 	"github.com/haileyok/cocoon/space"
 	"github.com/ipfs/go-cid"
+	"github.com/multiformats/go-multihash"
 )
 
 // Account is a DID on the network with a space repo.
@@ -38,6 +39,7 @@ type Account struct {
 
 	records  map[string]space.SerializedRecord // path -> record
 	raw      map[string]json.RawMessage        // path -> record JSON
+	blobs    map[string][]byte                 // CID -> bytes uploaded
 	ops      []op
 	rev      string
 	spaceRev string
@@ -99,6 +101,12 @@ type Net struct {
 
 	// Created records each agent account created (createAgent), in order.
 	Created []CreateAccount
+
+	// CorruptBlobs serves space blobs with a byte changed, as a host that
+	// damaged or swapped them would; WrongUploadCID answers an upload with
+	// another blob's CID.
+	CorruptBlobs   bool
+	WrongUploadCID bool
 }
 
 // CreateAccount is an account the network created for an agent.
@@ -161,7 +169,7 @@ func (n *Net) NewAccount(did string) *Account {
 	if err != nil {
 		n.T.Fatal(err)
 	}
-	a := &Account{DID: did, Key: key, Kem: kem, records: map[string]space.SerializedRecord{}, raw: map[string]json.RawMessage{}, listed: true}
+	a := &Account{DID: did, Key: key, Kem: kem, records: map[string]space.SerializedRecord{}, raw: map[string]json.RawMessage{}, blobs: map[string][]byte{}, listed: true}
 	n.mu.Lock()
 	n.accounts[did] = a
 	n.mu.Unlock()
@@ -834,6 +842,66 @@ func (n *Net) route(r *http.Request, nsid string, w http.ResponseWriter) (any, *
 		}
 		return map[string]any{"uri": uri, "cid": c, "validationStatus": "unknown"}, nil
 
+	case "com.atproto.repo.uploadBlob":
+		a := n.account(n.callerDID(r))
+		if a == nil {
+			return nil, &xerr{401, "AuthRequired", "no session"}
+		}
+		data, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
+		if err != nil {
+			return nil, &xerr{400, "InvalidRequest", err.Error()}
+		}
+		sum, err := multihash.Sum(data, multihash.SHA2_256, -1)
+		if err != nil {
+			return nil, &xerr{500, "InternalError", err.Error()}
+		}
+		c := cid.NewCidV1(cid.Raw, sum)
+		n.mu.Lock()
+		a.blobs[c.String()] = data
+		n.mu.Unlock()
+		if n.WrongUploadCID {
+			other, _ := multihash.Sum(append(data, 'x'), multihash.SHA2_256, -1)
+			c = cid.NewCidV1(cid.Raw, other)
+		}
+		ctype := r.Header.Get("Content-Type")
+		if ctype == "" {
+			ctype = "application/octet-stream"
+		}
+		return map[string]any{"blob": map[string]any{
+			"$type": "blob", "ref": map[string]any{"$link": c.String()}, "mimeType": ctype, "size": len(data),
+		}}, nil
+
+	case "com.atproto.space.getBlob":
+		repo := q.Get("repo")
+		if q.Get("space") != n.Space {
+			return nil, &xerr{400, "InvalidRequest", "unknown space"}
+		}
+		if r.Header.Get("X-Test-Did") != repo {
+			if e := n.checkCredential(r, repo); e != nil {
+				return nil, e
+			}
+		}
+		n.mu.Lock()
+		a := n.accounts[repo]
+		var data []byte
+		if a != nil && n.blobInSpaceLocked(a, q.Get("cid")) {
+			data = a.blobs[q.Get("cid")]
+		}
+		n.mu.Unlock()
+		if data == nil {
+			// Unreferenced blobs are invisible, as on a real PDS.
+			return nil, &xerr{400, "BlobNotFound", "blob not found"}
+		}
+		if n.CorruptBlobs && len(data) > 0 {
+			data = append([]byte(nil), data...)
+			data[0] ^= 0x20
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		if _, err := w.Write(data); err != nil {
+			return nil, &xerr{500, "InternalError", err.Error()}
+		}
+		return nil, nil
+
 	case "com.atproto.space.listRepoOps":
 		repo := q.Get("repo")
 		if e := n.checkCredential(r, repo); e != nil {
@@ -1075,6 +1143,26 @@ func (n *Net) keyFunc(ctx context.Context) space.SigningKeyFunc {
 		}
 		return pub.DIDKey(), nil
 	}
+}
+
+// blobInSpaceLocked reports whether a record in the space names the blob,
+// which is what makes it readable there. Callers hold n.mu.
+func (n *Net) blobInSpaceLocked(a *Account, link string) bool {
+	if link == "" {
+		return false
+	}
+	for _, raw := range a.raw {
+		rec, err := atdata.UnmarshalJSON(raw)
+		if err != nil {
+			continue
+		}
+		for _, b := range atdata.ExtractBlobs(rec) {
+			if b.Ref.String() == link {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (n *Net) checkCredential(r *http.Request, audience string) *xerr {

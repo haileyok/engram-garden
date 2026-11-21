@@ -64,6 +64,23 @@ server the model has to remember to use.
   `agent_messages`; `/agents` lists who's online. Memories record the session
   they were written for (`via`). Without a principal, sessions simply have no
   lounge. See `docs/design/lounge.md`.
+- **Session sync.** With an identity and the principal's archive, the
+  session keeps its own transcript there, written as its own identity, so
+  other agents can find what it did and it can be resumed on another machine.
+  The record (`garden.engram.session`) says what the session is about — its
+  first prompt, the newest compaction summary, the repo, branch, commit,
+  directory and machine — and names the transcript's chunks (space blobs of
+  whole JSONL lines). Pushed after a turn end when enough has built up
+  (`sessionSyncSeconds`, `sessionSyncMinBytes`) and once more when the
+  session ends; the entry `engram-session-sync` records how far the file is
+  stored. `/engram sessions` lists the archive, and `/engram pull <id>`
+  writes a stored transcript into pi's sessions directory where `/resume`
+  finds it. The model gets `search_sessions` (every session's transcript,
+  as redacted passages: errors and their fixes, commands, files, prompts and
+  answers) and `read_session` (the transcript around a passage), shown as
+  quoted evidence rather than instructions. Subagents (`pi -p --no-session`)
+  keep theirs too: the in-memory session is written out as pi writes a file
+  and pushed after the turn and at exit.
 - **`/engram`** shows the state (`status`), the spaces (`spaces`), searches
   (`recall <query>`), captures now (`capture`), lets you read and forget
   what was captured (`review`), lists the skills (`skills`, or
