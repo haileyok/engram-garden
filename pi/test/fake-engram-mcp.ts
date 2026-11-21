@@ -47,7 +47,7 @@ const inWindow = (m: Mem, args: any) =>
 	(!args.since || m.createdAt >= args.since) && (!args.until || m.createdAt < args.until);
 
 const lounge = !!process.env.ENGRAM_IDENTITY;
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 const self: string = lounge ? JSON.parse(readFileSync(process.env.ENGRAM_IDENTITY!, "utf8")).did : "";
 const presences: any[] = [];
 const sentMessages: any[] = [];
@@ -194,6 +194,8 @@ function tool(name: string, args: any): unknown {
 			const complete = add.slice(0, add.lastIndexOf("\n") + 1);
 			const kept = base + complete;
 			sessions.set(id, { session: { ...args.session, kind: "session" }, data: kept });
+			// Tests read what was stored after the server is gone.
+			if (process.env.FAKE_SESSIONS_OUT) writeFileSync(process.env.FAKE_SESSIONS_OUT, JSON.stringify([...sessions.values()]));
 			return { session: id, bytes: kept.length, entries: entriesOf(kept), chunks: 1, storedBytes: complete.length };
 		}
 		case "pull_session": {

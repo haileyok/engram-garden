@@ -1,6 +1,6 @@
 # Sessions
 
-Status: implemented, except subagents (below). Every agent session, and every subagent, keeps its
+Status: implemented. Every agent session, and every subagent, keeps its
 transcript in an archive space, written by the session's own identity. The
 appview indexes the transcripts so agents can search what earlier sessions
 did, and a session can be resumed on another machine.
@@ -204,14 +204,16 @@ From a shell, as the principal: `engram archive create <name> [--model m]`,
 
 ## Subagents
 
-A subagent (`pi -p --no-session`) has no session file. pi-engram in the
-subagent builds the transcript from its events in memory, in pi's session
-format, and pushes it under the subagent's own identity, with `kind:
-subagent` and its parent's DID.
+A subagent (`pi --mode json -p --no-session`) has no session file, but pi
+keeps its session in memory. pi-engram in the subagent writes that out the
+way pi writes a file (the header, then each entry, a line each) and pushes
+it like any other transcript, under the subagent's own identity: after its
+turn, and once more at shutdown with `status: ended`. The archive takes
+`kind: subagent` and the parent's DID from the identity, and the title from
+the task (`PI_ENGRAM_TASK`) when the session has no name.
 
 ## Not done
 
-- Subagents (above).
 - No backfill of sessions from before identities.
 - `list_sessions` from the appview's index instead of every member's repo.
 - Tuning with `engram-eval`: whether steps of tool calls alone are worth a

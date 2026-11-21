@@ -196,30 +196,64 @@ export async function gitInfo(cwd: string): Promise<GitInfo> {
 	return info;
 }
 
+/** A transcript to push: a session file, or an in-memory session's entries. */
+export interface Transcript {
+	size(): number;
+	/**
+	 * piece reads complete lines from `from`: at most max bytes, cut after
+	 * the last newline. more says whether lines beyond it remain. A line
+	 * longer than max can't be stored, which is an error.
+	 */
+	piece(from: number, max: number): { data: string; end: number; more: boolean };
+}
+
+function cutPiece(buf: Buffer, from: number, max: number, size: number): { data: string; end: number; more: boolean } {
+	const cut = buf.lastIndexOf(0x0a) + 1;
+	if (cut === 0 && buf.length === max) throw new Error(`the session has a line longer than ${max} bytes at byte ${from}; it can't be stored`);
+	return { data: buf.subarray(0, cut).toString("utf8"), end: from + cut, more: buf.length === max && from + cut < size };
+}
+
+/** fileTranscript reads a session file, only the part asked for. */
+export function fileTranscript(path: string): Transcript {
+	return {
+		size: () => statSync(path).size,
+		piece(from, max) {
+			const size = statSync(path).size;
+			const want = Math.max(0, Math.min(size - from, max));
+			const buf = Buffer.alloc(want);
+			const fd = openSync(path, "r");
+			try {
+				let got = 0;
+				while (got < want) {
+					const n = readSync(fd, buf, got, want - got, from + got);
+					if (n <= 0) break;
+					got += n;
+				}
+				return cutPiece(buf.subarray(0, got), from, max, size);
+			} finally {
+				closeSync(fd);
+			}
+		},
+	};
+}
+
 /**
- * readPiece reads complete lines of a session file from `from`: at most max
- * bytes, cut after the last newline. more says whether lines beyond the piece
- * remain. A line longer than max can't be stored, which is an error.
+ * memoryTranscript is an in-memory session (pi -p --no-session, as
+ * subagents run) written out the way pi writes a session file: the header,
+ * then each entry, a line each.
  */
+export function memoryTranscript(header: unknown, entries: unknown[]): Transcript {
+	const lines = [header, ...entries].filter((e) => e != null).map((e) => `${JSON.stringify(e)}\n`);
+	const buf = Buffer.from(lines.join(""), "utf8");
+	return {
+		size: () => buf.length,
+		piece: (from, max) => cutPiece(buf.subarray(from, Math.min(buf.length, from + max)), from, max, buf.length),
+	};
+}
+
+/** readPiece reads complete lines of a session file (fileTranscript's piece). */
 export function readPiece(path: string, from: number, max = MAX_PUSH_BYTES): { data: string; end: number; more: boolean } {
-	const size = statSync(path).size;
-	const want = Math.max(0, Math.min(size - from, max));
-	const buf = Buffer.alloc(want);
-	const fd = openSync(path, "r");
-	try {
-		let got = 0;
-		while (got < want) {
-			const n = readSync(fd, buf, got, want - got, from + got);
-			if (n <= 0) break;
-			got += n;
-		}
-		const cut = buf.subarray(0, got).lastIndexOf(0x0a) + 1;
-		if (cut === 0 && got === max)
-			throw new Error(`the session has a line longer than ${max} bytes at byte ${from}; it can't be stored`);
-		return { data: buf.subarray(0, cut).toString("utf8"), end: from + cut, more: got === max && from + cut < size };
-	} finally {
-		closeSync(fd);
-	}
+	return fileTranscript(path).piece(from, max);
 }
 
 /**
@@ -230,7 +264,8 @@ export function readPiece(path: string, from: number, max = MAX_PUSH_BYTES): { d
  */
 export async function pushSession(opts: {
 	call: <T>(tool: string, args: Record<string, unknown>) => Promise<T>;
-	file: string;
+	/** The transcript: a session file's path, or a Transcript. */
+	file: string | Transcript;
 	session: Manifest;
 	from: number;
 	now?: Date;
@@ -238,9 +273,10 @@ export async function pushSession(opts: {
 }): Promise<{ record: SyncRecord; answer: PushAnswer }> {
 	const now = opts.now ?? new Date();
 	const max = opts.max ?? MAX_PUSH_BYTES;
+	const t = typeof opts.file === "string" ? fileTranscript(opts.file) : opts.file;
 	let from = opts.from;
 	let replace = false;
-	if (from > statSync(opts.file).size) {
+	if (from > t.size()) {
 		// The file is shorter than what was stored from it: start over.
 		from = 0;
 		replace = true;
@@ -248,7 +284,7 @@ export async function pushSession(opts: {
 	let answer: PushAnswer;
 	for (let rounds = 0; ; rounds++) {
 		if (rounds > 10_000) throw new Error("pushing the session isn't getting anywhere");
-		const piece = readPiece(opts.file, from, max);
+		const piece = t.piece(from, max);
 		answer = await opts.call<PushAnswer>("push_session", {
 			session: opts.session,
 			fromBytes: from,
@@ -259,7 +295,7 @@ export async function pushSession(opts: {
 			// The archive holds a different transcript: send this whole file,
 			// unless another machine has it further along, in which case
 			// replacing it would throw that machine's work away.
-			const size = statSync(opts.file).size;
+			const size = t.size();
 			if (replace || answer.bytes > size)
 				throw new Error(
 					`another machine has this session further along (${answer.bytes} bytes stored, ${size} here); not replacing it. Pull it there, or start a new session`,

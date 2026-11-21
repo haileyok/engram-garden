@@ -1113,6 +1113,40 @@ test("the session's transcript is stored, listed, and pulled back", async () => 
 	}
 });
 
+test("a subagent's in-memory session is pushed too, and marked ended", async () => {
+	const out = join(mkdtempSync(join(tmpdir(), "pi-sub-")), "sessions.json");
+	const h = await harness({ autoCapture: false, env: { FAKE_ARCHIVE: "1", FAKE_SESSIONS_OUT: out } });
+	h.ctx.mode = "print";
+	h.ctx.hasUI = false;
+	h.ctx.sessionManager.getSessionFile = () => undefined;
+	h.ctx.sessionManager.getSessionId = () => "sub-session";
+	h.ctx.sessionManager.getHeader = () => ({ type: "session", version: 3, id: "sub-session", timestamp: "2026-11-21T00:00:00.000Z", cwd: "/tmp" });
+	process.env.PI_ENGRAM_TASK = "find where the indexer drops memories";
+	let shut = false;
+	try {
+		await start(h);
+		await waitFor(() => h.tools.has("engram_debug_sessions"));
+		h.addMessage("user", "find where the indexer drops memories");
+		h.addMessage("assistant", "In SetConfig.");
+		await h.emit("agent_settled", { type: "agent_settled", aborted: false });
+		await waitFor(() => h.branch.some((e) => e.customType === "engram-session-sync"));
+		await h.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+		shut = true;
+		const stored = JSON.parse(readFileSync(out, "utf8")).find((x: any) => x.session.sessionId === "sub-session");
+		assert.ok(stored, "the subagent's session was stored");
+		assert.equal(stored.session.status, "ended");
+		assert.equal(stored.session.title, "find where the indexer drops memories");
+		const lines = stored.data.trim().split("\n").map((l: string) => JSON.parse(l));
+		assert.equal(lines[0].type, "session");
+		assert.ok(lines.some((l: any) => l.message?.content?.[0]?.text === "In SetConfig."), "the reply is in the transcript");
+		// Pushed once as it went, and the rest at the end: nothing twice.
+		assert.equal(lines.filter((l: any) => l.message?.content?.[0]?.text === "In SetConfig.").length, 1);
+	} finally {
+		delete process.env.PI_ENGRAM_TASK;
+		if (!shut) await h.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+	}
+});
+
 test("without an archive, the session isn't pushed", async () => {
 	const h = await harness({ autoCapture: false });
 	try {

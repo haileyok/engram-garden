@@ -56,7 +56,10 @@ import {
 	SESSION_SYNC_ENTRY,
 	type SyncRecord,
 	gitInfo,
+	fileTranscript,
+	memoryTranscript,
 	pushSession,
+	type Transcript,
 	startedAtOf,
 	syncedBytes,
 	summaryOf,
@@ -453,11 +456,11 @@ export default function engram(pi: ExtensionAPI) {
 		// No more messages into a session that's going away, even while
 		// the last push and capture keep engram-mcp busy below.
 		room.stop();
-		if (event.reason !== "reload" && captureAllowed(ctx)) {
+		if (event.reason !== "reload" && syncAllowed(ctx)) {
 			// The last push carries everything this session added.
 			await Promise.race([
 				syncSession(ctx, { final: true }),
-				new Promise((r) => setTimeout(r, event.reason === "quit" ? 15_000 : 5_000).unref()),
+				new Promise((r) => setTimeout(r, event.reason === "quit" || !ctx.sessionManager.getSessionFile() ? 15_000 : 5_000).unref()),
 			]);
 		}
 		if (cfg?.autoCapture && event.reason !== "reload" && captureAllowed(ctx)) {
@@ -512,11 +515,29 @@ export default function engram(pi: ExtensionAPI) {
 	}
 
 
-	/** syncSession stores what the session file grew by, and where the work stands. */
-	async function syncSession(ctx: ExtensionContext, opts: { final?: boolean } = {}): Promise<void> {
-		if (!cfg?.autoSessionSync || !server || !archived || !captureAllowed(ctx)) return;
+	/**
+	 * transcriptOf is the session's transcript: its file, or for an
+	 * in-memory session (pi -p --no-session, as subagents run) its entries
+	 * written out the same way.
+	 */
+	function transcriptOf(ctx: ExtensionContext): Transcript | undefined {
 		const file = ctx.sessionManager.getSessionFile();
+		if (file) return fileTranscript(file);
+		const entries = ctx.sessionManager.getEntries() as any[];
+		if (!entries.length) return undefined;
+		return memoryTranscript(ctx.sessionManager.getHeader(), entries);
+	}
+
+	/** syncAllowed: saved sessions in the TUI or RPC, and any in-memory one (a subagent's). */
+	function syncAllowed(ctx: ExtensionContext): boolean {
+		return captureAllowed(ctx) || !ctx.sessionManager.getSessionFile();
+	}
+
+	/** syncSession stores what the session's transcript grew by, and where the work stands. */
+	async function syncSession(ctx: ExtensionContext, opts: { final?: boolean } = {}): Promise<void> {
+		if (!cfg?.autoSessionSync || !server || !archived || !syncAllowed(ctx)) return;
 		const id = ctx.sessionManager.getSessionId();
+		const file = transcriptOf(ctx);
 		if (!file || !id) return;
 		// One push at a time; the next one carries what this one missed.
 		if (sessionPush) {
@@ -531,7 +552,7 @@ export default function engram(pi: ExtensionAPI) {
 			const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 			const manifest: Manifest = {
 				sessionId: id,
-				title: titleOf(branch, ctx.sessionManager.getSessionName()),
+				title: titleOf(branch, ctx.sessionManager.getSessionName() || process.env.PI_ENGRAM_TASK),
 				summary: summaryOf(branch),
 				status: opts.final ? "ended" : "active",
 				cwd: ctx.cwd,
@@ -1116,9 +1137,9 @@ export default function engram(pi: ExtensionAPI) {
 			const since = Date.now() - lastPushAt;
 			const grown = (() => {
 				try {
-					const file = ctx.sessionManager.getSessionFile();
-					if (!file) return 0;
-					return statSync(file).size - syncedBytes(ctx.sessionManager.getEntries() as any[]);
+					const t = transcriptOf(ctx);
+					if (!t) return 0;
+					return t.size() - syncedBytes(ctx.sessionManager.getEntries() as any[]);
 				} catch {
 					return 0;
 				}

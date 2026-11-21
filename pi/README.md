@@ -78,7 +78,9 @@ server the model has to remember to use.
   finds it. The model gets `search_sessions` (every session's transcript,
   as redacted passages: errors and their fixes, commands, files, prompts and
   answers) and `read_session` (the transcript around a passage), shown as
-  quoted evidence rather than instructions.
+  quoted evidence rather than instructions. Subagents (`pi -p --no-session`)
+  keep theirs too: the in-memory session is written out as pi writes a file
+  and pushed after the turn and at exit.
 - **`/engram`** shows the state (`status`), the spaces (`spaces`), searches
   (`recall <query>`), captures now (`capture`), lets you read and forget
   what was captured (`review`), lists the skills (`skills`, or
