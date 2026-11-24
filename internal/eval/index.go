@@ -15,8 +15,13 @@ import (
 type Index struct {
 	Mems []Memory
 	dims int
-	bits [][]byte
-	i8   [][]byte
+	// bits and i8 hold one row per vector. A memory has one row, or several
+	// when it is embedded in chunks; rowDoc says whose each row is and
+	// docRows lists a memory's rows.
+	bits    [][]byte
+	i8      [][]byte
+	rowDoc  []int
+	docRows [][]int
 
 	n     uint64
 	avgdl float64
@@ -26,6 +31,11 @@ type Index struct {
 
 	BM25    text.BM25
 	Weights text.Weights
+	// ChunkPenalty is subtracted, times the natural log of its vector
+	// count, from the similarity of a memory with several vectors: more
+	// windows are more chances to match by luck, so a long memory would
+	// otherwise outrank a short one that matches as well.
+	ChunkPenalty float64
 }
 
 type posting struct {
@@ -36,17 +46,24 @@ type posting struct {
 // NewIndex indexes memories with their normalized document vectors (nil
 // vectors skip vector search).
 func NewIndex(mems []Memory, vecs [][]float32) *Index {
+	var rows [][][]float32
+	if len(vecs) == len(mems) && len(vecs) > 0 {
+		for _, v := range vecs {
+			rows = append(rows, [][]float32{v})
+		}
+	}
+	return NewIndexRows(mems, rows)
+}
+
+// NewIndexRows indexes memories that each have any number of normalized
+// vectors (a memory embedded in chunks has one per chunk). Nil rows skip
+// vector search. A memory ranks by its best vector.
+func NewIndexRows(mems []Memory, rows [][][]float32) *Index {
 	ix := &Index{
 		Mems: mems, df: map[string]uint64{}, post: map[string][]posting{},
 		BM25: text.DefaultBM25, Weights: text.DefaultWeights,
 	}
-	if len(vecs) == len(mems) && len(vecs) > 0 {
-		ix.dims = len(vecs[0])
-		for _, v := range vecs {
-			ix.bits = append(ix.bits, vec.AppendBits(nil, v))
-			ix.i8 = append(ix.i8, vec.AppendInt8(nil, v))
-		}
-	}
+	ix.setRows(rows)
 	var total float64
 	for i, m := range mems {
 		d := text.AnalyzeMemory(m.Text, m.Tags, m.Source)
@@ -63,6 +80,52 @@ func NewIndex(mems []Memory, vecs [][]float32) *Index {
 		ix.avgdl = total / float64(ix.n)
 	}
 	return ix
+}
+
+func (ix *Index) setRows(rows [][][]float32) {
+	ix.bits, ix.i8, ix.rowDoc, ix.docRows, ix.dims = nil, nil, nil, nil, 0
+	if len(rows) != len(ix.Mems) || len(rows) == 0 {
+		return
+	}
+	ix.docRows = make([][]int, len(rows))
+	for d, vs := range rows {
+		for _, v := range vs {
+			ix.dims = len(v)
+			ix.docRows[d] = append(ix.docRows[d], len(ix.bits))
+			ix.rowDoc = append(ix.rowDoc, d)
+			ix.bits = append(ix.bits, vec.AppendBits(nil, v))
+			ix.i8 = append(ix.i8, vec.AppendInt8(nil, v))
+		}
+	}
+}
+
+// WithRows returns the index with other vectors for the same memories. The
+// keyword side is shared, so only the vectors differ.
+func (ix *Index) WithRows(rows [][][]float32) *Index {
+	c := *ix
+	c.setRows(rows)
+	return &c
+}
+
+// docSim is the int8 cosine of a memory's best vector.
+func (ix *Index) docSim(q []float32, doc int) float64 {
+	best := math.Inf(-1)
+	rows := ix.docRows[doc]
+	for _, r := range rows {
+		best = math.Max(best, float64(vec.Int8Dot(q, ix.i8[r])))
+	}
+	if len(rows) > 1 {
+		best -= ix.ChunkPenalty * math.Log(float64(len(rows)))
+	}
+	return best
+}
+
+// WithChunkPenalty returns the index with a penalty on memories that have
+// several vectors; see ChunkPenalty.
+func (ix *Index) WithChunkPenalty(p float64) *Index {
+	c := *ix
+	c.ChunkPenalty = p
+	return &c
 }
 
 // With returns the index scoring keywords with other weights and BM25
@@ -95,15 +158,26 @@ func (ix *Index) Vector(q []float32, ncand int) []Hit {
 	}
 	qb := vec.AppendBits(nil, q)
 	type c struct{ doc, dist int }
-	cs := make([]c, len(ix.bits))
-	for i, b := range ix.bits {
-		cs[i] = c{i, vec.Hamming(qb, b)}
+	// A memory's distance is its nearest row's.
+	near := make([]int, len(ix.docRows))
+	for i := range near {
+		near[i] = math.MaxInt
+	}
+	for r, b := range ix.bits {
+		d := ix.rowDoc[r]
+		near[d] = min(near[d], vec.Hamming(qb, b))
+	}
+	cs := make([]c, 0, len(near))
+	for d, dist := range near {
+		if dist != math.MaxInt {
+			cs = append(cs, c{d, dist})
+		}
 	}
 	sort.SliceStable(cs, func(a, b int) bool { return cs[a].dist < cs[b].dist })
 	cs = cs[:min(ncand, len(cs))]
 	out := make([]Hit, len(cs))
 	for i, x := range cs {
-		s := float64(vec.Int8Dot(q, ix.i8[x.doc]))
+		s := ix.docSim(q, x.doc)
 		out[i] = Hit{Doc: x.doc, Sim: s, HasSim: true, Score: s}
 	}
 	sortHits(out)
@@ -201,7 +275,7 @@ func (ix *Index) Hybrid(qv []float32, q *text.Query, ncand int, f Fusion) []Hit 
 		}
 		if !h.HasSim && qv != nil && ix.i8 != nil {
 			// A keyword-only candidate: its int8 cosine.
-			h.Sim, h.HasSim = float64(vec.Int8Dot(qv, ix.i8[d])), true
+			h.Sim, h.HasSim = ix.docSim(qv, d), true
 		}
 		hits = append(hits, *h)
 	}

@@ -26,8 +26,11 @@ type LLM struct {
 	Headers map[string]string
 	// CacheDir holds one file per answered prompt; empty disables caching.
 	CacheDir string
-	HTTP     *http.Client
-	sem      chan struct{}
+	// Extra is merged into every request body (for instance
+	// {"reasoning_effort": "none"} to skip a reasoning model's thinking).
+	Extra map[string]any
+	HTTP  *http.Client
+	sem   chan struct{}
 }
 
 // LLMFromEnv configures an LLM from ENGRAM_EVAL_LLM_URL, _MODEL, _KEY
@@ -45,6 +48,11 @@ func LLMFromEnv(getenv func(string) string, cacheDir string, concurrency int) (*
 	}
 	if l.URL == "" || l.Model == "" {
 		return nil, errors.New("set ENGRAM_EVAL_LLM_URL (an OpenAI-compatible API base, e.g. https://host/v1) and ENGRAM_EVAL_LLM_MODEL")
+	}
+	if x := getenv("ENGRAM_EVAL_LLM_EXTRA"); x != "" {
+		if err := json.Unmarshal([]byte(x), &l.Extra); err != nil {
+			return nil, fmt.Errorf("ENGRAM_EVAL_LLM_EXTRA must be a JSON object: %w", err)
+		}
 	}
 	for _, h := range strings.Split(getenv("ENGRAM_EVAL_LLM_HEADERS"), ";") {
 		name, value, ok := strings.Cut(h, ":")
@@ -114,23 +122,27 @@ func (l *LLM) cacheKey(system, user string) string {
 }
 
 func (l *LLM) call(ctx context.Context, system, user string) (string, error) {
-	body, _ := json.Marshal(map[string]any{
+	req := map[string]any{
 		"model":           l.Model,
 		"messages":        []chatMessage{{"system", system}, {"user", user}},
 		"response_format": map[string]string{"type": "json_object"},
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l.URL+"/chat/completions", bytes.NewReader(body))
+	}
+	for k, v := range l.Extra {
+		req[k] = v
+	}
+	body, _ := json.Marshal(req)
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, l.URL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	hreq.Header.Set("Content-Type", "application/json")
 	if l.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+l.APIKey)
+		hreq.Header.Set("Authorization", "Bearer "+l.APIKey)
 	}
 	for k, v := range l.Headers {
-		req.Header.Set(k, v)
+		hreq.Header.Set(k, v)
 	}
-	resp, err := l.HTTP.Do(req)
+	resp, err := l.HTTP.Do(hreq)
 	if err != nil {
 		return "", err
 	}
